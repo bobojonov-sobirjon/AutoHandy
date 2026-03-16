@@ -1,0 +1,3182 @@
+openapi: 3.0.3
+info:
+  title: AutoHandy APIs
+  version: v1
+  description: AutoHandy Apies - JWT Authentication Required
+  contact:
+    name: API Support
+    email: contact@snippets.local
+  license:
+    name: BSD License
+paths:
+  /api/auth/check-sms-code/:
+    post:
+      operationId: auth_check_sms_code_create
+      description: Проверка SMS кода и получение JWT токена. Параметр 'role' (Driver,
+        Master или Owner) обязателен.
+      summary: Проверка SMS кода
+      tags:
+      - Authentication
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SMSVerificationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SMSVerificationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/SMSVerificationRequest'
+          '*/*':
+            schema:
+              $ref: '#/components/schemas/SMSVerificationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  errors:
+                    type: object
+                  error:
+                    type: string
+          description: ''
+        '500':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+          description: ''
+  /api/auth/faq/:
+    get:
+      operationId: auth_faq_retrieve
+      description: Получение списка всех активных FAQ. Доступно без авторизации.
+      summary: Получение списка FAQ
+      tags:
+      - FAQ
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  count:
+                    type: integer
+                    example: 5
+                  faqs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                          example: 1
+                        question:
+                          type: string
+                          example: Как зарегистрироваться в системе?
+                        answer:
+                          type: string
+                          example: Для регистрации...
+                        order:
+                          type: integer
+                          example: 1
+                        created_at:
+                          type: string
+                          format: date-time
+                        updated_at:
+                          type: string
+                          format: date-time
+          description: ''
+  /api/auth/login/:
+    post:
+      operationId: auth_login_create
+      description: Отправка 4-значного кода подтверждения на номер телефона (SMS)
+        или email. Если пользователь не найден, создается новый пользователь автоматически.
+        Параметр 'role' (Driver, Master или Owner) обязателен.
+      summary: Отправка кода подтверждения
+      tags:
+      - Authentication
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IdentifierRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/IdentifierRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/IdentifierRequest'
+          '*/*':
+            schema:
+              $ref: '#/components/schemas/IdentifierRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Код подтверждения отправлен на email
+                  identifier:
+                    type: string
+                    example: user@example.com
+                  identifier_type:
+                    type: string
+                    example: email
+                  phone:
+                    type: string
+                    example: '998901234567'
+                    description: Номер телефона (только для phone)
+                  email:
+                    type: string
+                    example: user@example.com
+                    description: Email адрес (только для email)
+                  user_exists:
+                    type: boolean
+                    example: true
+                  sms_code:
+                    type: string
+                    example: '1234'
+                    description: SMS код подтверждения
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  errors:
+                    type: object
+          description: ''
+        '500':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+          description: ''
+  /api/auth/oauth/token/:
+    post:
+      operationId: auth_oauth_token_create
+      description: OAuth2 password flow for Swagger - email only authentication
+      summary: OAuth2 Token Endpoint
+      tags:
+      - Authentication
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                grant_type:
+                  type: string
+                  example: password
+                username:
+                  type: string
+                  format: email
+                  example: user@example.com
+                password:
+                  type: string
+                  example: password
+              required:
+              - grant_type
+              - username
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  refresh_token:
+                    type: string
+                  token_type:
+                    type: string
+                    example: Bearer
+                  expires_in:
+                    type: integer
+                    example: 604800
+                  scope:
+                    type: string
+                    example: read write
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  error_description:
+                    type: string
+          description: ''
+  /api/auth/sms-status/:
+    get:
+      operationId: auth_sms_status_retrieve
+      description: Проверка статуса SMS сервиса SMSC.ru и баланса
+      summary: Проверка статуса SMS сервиса
+      tags:
+      - SMS Service
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  service:
+                    type: string
+                    example: SMSC.ru
+                  balance:
+                    type: number
+                    example: 150.5
+                  currency:
+                    type: string
+                    example: RUB
+                  status:
+                    type: string
+                    example: active
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+          description: ''
+  /api/auth/update-telegram-chat-id/:
+    post:
+      operationId: auth_update_telegram_chat_id_create
+      description: Обновляет Telegram Chat ID текущего пользователя для получения
+        SMS
+      summary: Обновить Telegram Chat ID
+      tags:
+      - User Profile
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TelegramChatIdRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TelegramChatIdRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TelegramChatIdRequest'
+          '*/*':
+            schema:
+              $ref: '#/components/schemas/TelegramChatIdRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Telegram Chat ID успешно обновлен
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  errors:
+                    type: object
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+  /api/auth/user/:
+    get:
+      operationId: auth_user_retrieve
+      description: Получение детальной информации о текущем авторизованном пользователе
+      summary: Получение информации о пользователе
+      tags:
+      - User Profile
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDetails'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: Authentication credentials were not provided.
+          description: ''
+    put:
+      operationId: auth_user_update
+      description: Обновление информации о текущем пользователе. Поддерживает обновление
+        всех полей, включая avatar (файл) и роль (группу).
+      summary: Обновление информации о пользователе
+      tags:
+      - User Profile
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Информация о пользователе успешно обновлена
+                  user:
+                    type: object
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  errors:
+                    type: object
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: Authentication credentials were not provided.
+          description: ''
+    patch:
+      operationId: auth_user_partial_update
+      description: Частичное обновление информации о текущем пользователе. Можно обновить
+        только нужные поля. Поддерживает avatar (файл) и роль (группу).
+      summary: Частичное обновление информации о пользователе
+      tags:
+      - User Profile
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedUserUpdateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedUserUpdateRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Информация о пользователе успешно обновлена
+                  user:
+                    type: object
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  errors:
+                    type: object
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: Authentication credentials were not provided.
+          description: ''
+  /api/car/:
+    get:
+      operationId: car_retrieve
+      description: Получить список машин пользователя
+      summary: Получить список машин
+      tags:
+      - Cars
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Car'
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+    post:
+      operationId: car_create
+      description: Создать новую машину
+      summary: Создать новую машину
+      tags:
+      - Cars
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CarCreateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CarCreateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CarCreateRequest'
+          '*/*':
+            schema:
+              $ref: '#/components/schemas/CarCreateRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Car'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+  /api/car/{id}/:
+    get:
+      operationId: car_retrieve_2
+      description: Получить детали машины
+      summary: Получить детали машины
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Cars
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Car'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+    put:
+      operationId: car_update
+      description: Обновить машину
+      summary: Обновить машину
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Cars
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CarRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CarRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CarRequest'
+          '*/*':
+            schema:
+              $ref: '#/components/schemas/CarRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Car'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+    patch:
+      operationId: car_partial_update
+      description: Частичное обновление машины
+      summary: Частичное обновление машины
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Cars
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedCarRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedCarRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedCarRequest'
+          '*/*':
+            schema:
+              $ref: '#/components/schemas/PatchedCarRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Car'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+    delete:
+      operationId: car_destroy
+      description: Удалить машину
+      summary: Удалить машину
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Cars
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          content:
+            application/json:
+              schema:
+                description: Машина удалена
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+  /api/car/stats/:
+    get:
+      operationId: car_stats_retrieve
+      description: Получить статистику машин пользователя
+      summary: Получить статистику машин
+      tags:
+      - Cars
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_cars:
+                    type: integer
+                  cars_by_category:
+                    type: object
+                  cars_by_brand:
+                    type: object
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+  /api/categories/categories/:
+    get:
+      operationId: categories_categories_list
+      description: "\n        Получить список всех категорий с возможностью фильтрации\
+        \ по типу.\n        \n        **Фильтрация:**\n        - Используйте параметр\
+        \ `type` для фильтрации категорий по типу (TypeCategory)\n        - Доступные\
+        \ значения фильтра:\n          * `by_master` - Категории для мастерских (услуги\
+        \ мастеров)\n          * `by_car` - Категории для автомобилей (марки, модели\
+        \ и т.д.)\n          * `by_order` - Категории для заказов\n        - Если\
+        \ параметр `type` не указан, возвращаются все категории\n        \n      \
+        \  **Примеры использования:**\n        - `/api/categories/categories/` - все\
+        \ категории\n        - `/api/categories/categories/?type=by_master` - только\
+        \ категории мастеров\n        - `/api/categories/categories/?type=by_car`\
+        \ - только категории машин\n        - `/api/categories/categories/?type=by_order`\
+        \ - только категории заказов\n        \n        **Поля в ответе:**\n     \
+        \   - `id` - ID категории\n        - `name` - Название категории\n       \
+        \ - `type_category` - Тип категории (by_master, by_car, by_order)\n      \
+        \  - `icon` - URL иконки категории (полный URL)\n        - `created_at` -\
+        \ Дата создания\n        - `updated_at` - Дата обновления\n        "
+      summary: Получить список категорий
+      parameters:
+      - in: query
+        name: type
+        schema:
+          type: string
+          enum:
+          - by_car
+          - by_master
+          - by_order
+        description: 'Фильтр по типу категории (TypeCategory): by_master - Категории
+          мастеров, by_car - Категории машин, by_order - Категории заказов'
+      tags:
+      - Categories
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Category'
+          description: ''
+  /api/master/masters/:
+    get:
+      operationId: master_masters_list
+      description: "\n        Получить профили мастерских текущего пользователя. Доступно\
+        \ для всех пользователей (публичный доступ).\n        \n        **Логика поиска:**\n\
+        \        - Если пользователь авторизован, возвращаются все мастерские где\
+        \ он является:\n          1. Владельцем (создал мастерскую)\n          2.\
+        \ ИЛИ сотрудником (добавлен через MasterEmployee)\n        - Если пользователь\
+        \ не авторизован, возвращается пустой список\n        "
+      summary: Получить профиль мастера
+      tags:
+      - Masters
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Master'
+          description: ''
+    post:
+      operationId: master_masters_create
+      description: "\n        Создание нового профиля мастера. Эта операция доступна\
+        \ ТОЛЬКО пользователям с ролью 'Owner'.\n        \n        **ВАЖНО**: Вы должны\
+        \ быть в группе 'Owner' для выполнения этой операции!\n        \n        **ВСЕ\
+        \ ПОЛЯ НЕОБЯЗАТЕЛЬНЫ!** Можно отправить пустой объект {} или заполнить только\
+        \ нужные поля:\n        \n        - `name`: Название мастерской (строка, например:\
+        \ \"СТО Авто-Сервис\")\n        - `city`: Город мастерской (строка)\n    \
+        \    - `address`: Адрес мастерской (строка)\n        - `phone`: Номер телефона\
+        \ мастерской (строка, например: +998901234567)\n        - `working_time`:\
+        \ Режим работы (строка, например: \"Пн-Пт: 09:00-18:00, Сб: 10:00-16:00\"\
+        )\n        - `latitude`: Широта местоположения (число от -90 до 90, например:\
+        \ 41.3111)\n        - `longitude`: Долгота местоположения (число от -180 до\
+        \ 180, например: 69.2797)\n        - `description`: Описание мастерской и\
+        \ услуг (текст)\n        - `category`: Список ID категорий услуг (массив чисел,\
+        \ например: [1, 2, 3])\n        - `services`: Список услуг с ценами (массив\
+        \ объектов, каждый содержит: name, price_from, price_to, category)\n     \
+        \   - `card_number`: Номер банковской карты для платежей (строка, до 19 символов)\n\
+        \        - `card_expiry_month`: Месяц истечения срока карты (число 1-12)\n\
+        \        - `card_expiry_year`: Год истечения срока карты (число, например:\
+        \ 2026)\n        - `card_cvv`: CVV код карты (строка, 3-4 цифры)\n       \
+        \ \n        **Примечания:**\n        - User автоматически берется из текущего\
+        \ авторизованного пользователя\n        - Категории должны существовать в\
+        \ базе данных и иметь тип 'by_master'\n        - После создания мастерской,\
+        \ user автоматически добавляется в группу 'Master'\n        - Можно создать\
+        \ мастерскую вообще без данных и заполнить потом через PUT/PATCH\n        "
+      summary: Создать профиль мастера (ТОЛЬКО для Owner)
+      tags:
+      - Masters
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MasterCreateRequest'
+            examples:
+              ПолныйПримерСозданияМастерской:
+                value:
+                  name: СТО Авто-Сервис
+                  city: Ташкент
+                  address: ул. Амира Темура, 15
+                  latitude: 41.3111
+                  longitude: 69.2797
+                  phone: '+998901234567'
+                  working_time: 'Пн-Пт: 09:00-18:00, Сб: 10:00-16:00'
+                  description: Автосервис с полным спектром услуг. Работаем с 2010
+                    года. Опытные мастера, качественные запчасти.
+                  category:
+                  - 1
+                  - 2
+                  - 3
+                  services:
+                  - name: Замена масла
+                    price_from: 150000
+                    price_to: 300000
+                    category: 1
+                  - name: Диагностика двигателя
+                    price_from: 50000
+                    price_to: 100000
+                    category: 2
+                  card_number: '8600123456789012'
+                  card_expiry_month: 12
+                  card_expiry_year: 2026
+                  card_cvv: '123'
+                summary: Полный пример создания мастерской
+              МинимальныйПример:
+                value:
+                  name: Мой Автосервис
+                  city: Москва
+                  phone: '+79991234567'
+                summary: Минимальный пример
+              ПустойЗапрос(можноСоздатьВообщеБезДанных):
+                value: {}
+                summary: Пустой запрос (можно создать вообще без данных)
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MasterCreateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MasterCreateRequest'
+          '*/*':
+            schema:
+              $ref: '#/components/schemas/MasterCreateRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Master'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: Ошибка валидации данных
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: Только пользователи с ролью Owner могут создавать мастерские
+          description: ''
+  /api/master/masters/{master_id}/:
+    get:
+      operationId: master_masters_retrieve
+      description: Получить подробную информацию о мастерской по ID. Доступно для
+        всех пользователей (публичный доступ).
+      summary: Получить детали мастера по ID
+      parameters:
+      - in: path
+        name: master_id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Masters
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Master'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Мастер не найден
+          description: ''
+    put:
+      operationId: master_masters_update
+      description: "\n        Полное обновление информации о мастерской. Эта операция\
+        \ доступна ТОЛЬКО пользователям с ролью 'Owner'.\n        \n        **ВАЖНО**:\
+        \ Вы должны быть в группе 'Owner' для выполнения этой операции!\n        \n\
+        \        Все поля необязательны, можно обновить только нужные поля.\n    \
+        \    "
+      summary: Обновить мастера по ID (ТОЛЬКО для Owner)
+      parameters:
+      - in: path
+        name: master_id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Masters
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MasterUpdateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MasterUpdateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MasterUpdateRequest'
+          '*/*':
+            schema:
+              $ref: '#/components/schemas/MasterUpdateRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Master'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+    patch:
+      operationId: master_masters_partial_update
+      description: "\n        Частичное обновление информации о мастерской. Эта операция\
+        \ доступна ТОЛЬКО пользователям с ролью 'Owner'.\n        \n        **ВАЖНО**:\
+        \ Вы должны быть в группе 'Owner' для выполнения этой операции!\n        \n\
+        \        Можно обновить только нужные поля, не передавая все остальные.\n\
+        \        "
+      summary: Частичное обновление мастера по ID (ТОЛЬКО для Owner)
+      parameters:
+      - in: path
+        name: master_id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Masters
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedMasterUpdateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedMasterUpdateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedMasterUpdateRequest'
+          '*/*':
+            schema:
+              $ref: '#/components/schemas/PatchedMasterUpdateRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Master'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: Ошибка валидации данных
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Мастер не найден
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: Только пользователи с ролью Owner могут обновлять мастерские
+          description: ''
+    delete:
+      operationId: master_masters_destroy
+      description: "\n        Удаление мастерской из системы. Эта операция доступна\
+        \ ТОЛЬКО пользователям с ролью 'Owner'.\n        \n        **ВАЖНО**: Вы должны\
+        \ быть в группе 'Owner' для выполнения этой операции!\n        \n        **ВНИМАНИЕ**:\
+        \ Это действие удалит мастерскую и все связанные с ней данные (услуги, изображения\
+        \ и т.д.)\n        "
+      summary: Удалить мастера по ID (ТОЛЬКО для Owner)
+      parameters:
+      - in: path
+        name: master_id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Masters
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          content:
+            application/json:
+              schema:
+                description: Мастер успешно удален
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Мастер не найден
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: Только пользователи с ролью Owner могут удалять мастерские
+          description: ''
+  /api/master/masters/employees/:
+    get:
+      operationId: master_masters_employees_retrieve
+      description: Поиск пользователя по его уникальному private_id. Возвращает полную
+        информацию о пользователе.
+      summary: Поиск пользователя по private_id
+      parameters:
+      - in: query
+        name: private_id
+        schema:
+          type: string
+        description: Уникальный 6-значный ID пользователя
+        required: true
+      tags:
+      - Add Master to Owner Master
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      private_id:
+                        type: string
+                      full_name:
+                        type: string
+                      phone_number:
+                        type: string
+                      email:
+                        type: string
+                      avatar:
+                        type: string
+                      description:
+                        type: string
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+    post:
+      operationId: master_masters_employees_create
+      description: "\n        Добавление сотрудника к мастерской. \n        \n   \
+        \     **Важно:** Владелец мастерской добавляется автоматически при создании.\n\
+        \        "
+      summary: Добавить сотрудника к мастерской
+      tags:
+      - Add Master to Owner Master
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MasterEmployeeCreateRequest'
+            examples:
+              ПримерДобавленияСотрудника:
+                value:
+                  master_id: 1
+                  user_id: 5
+                summary: Пример добавления сотрудника
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MasterEmployeeCreateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MasterEmployeeCreateRequest'
+          '*/*':
+            schema:
+              $ref: '#/components/schemas/MasterEmployeeCreateRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Сотрудник успешно добавлен
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  errors:
+                    type: object
+          description: ''
+  /api/master/masters/list/:
+    get:
+      operationId: master_masters_list_list
+      description: "\n        Получить список мастеров с обязательной фильтрацией.\
+        \ \n        \n        **ВАЖНО**: Если фильтры не указаны, возвращается пустой\
+        \ список!\n        \n        **Параметры фильтрации:**\n        - `category`\
+        \ - ID категории (by_order или by_master). При by_order ищет мастеров через\
+        \ service_type или название\n        - `name` - Название мастерской (поиск\
+        \ по частичному совпадению)\n        - `lat` - Широта текущего местоположения\
+        \ пользователя (требуется вместе с long и radius)\n        - `long` - Долгота\
+        \ текущего местоположения пользователя (требуется вместе с lat и radius)\n\
+        \        - `radius` - Радиус поиска в километрах (по умолчанию 10 км, требуется\
+        \ вместе с lat и long)\n        \n        **Примеры использования:**\n   \
+        \     - `/api/master/masters/list/?category=1` - мастера по категории (умный\
+        \ поиск)\n        - `/api/master/masters/list/?name=Авто` - поиск по названию\n\
+        \        - `/api/master/masters/list/?lat=41.3111&long=69.2797&radius=5` -\
+        \ мастера в радиусе 5 км\n        - `/api/master/masters/list/?category=1&lat=41.3111&long=69.2797&radius=10`\
+        \ - комбинация фильтров\n        \n        **Умный поиск по категории:**\n\
+        \        - Если category типа by_order: ищет мастеров через MasterServiceItems\
+        \ по service_type или названию\n        - Если category типа by_master: прямой\
+        \ поиск по категории мастера\n        - Точность поиска: 80-90%\n        \n\
+        \        **Геолокация:**\n        - Расчет расстояния выполняется по формуле\
+        \ Haversine\n        - Возвращаются только мастера с заполненными координатами\
+        \ (latitude и longitude)\n        - Поле `distance` добавляется в ответ (расстояние\
+        \ в километрах от точки пользователя)\n        "
+      summary: Получить список мастеров с фильтрацией
+      parameters:
+      - in: query
+        name: category
+        schema:
+          type: integer
+        description: ID категории мастера
+      - in: query
+        name: lat
+        schema:
+          type: number
+          format: double
+        description: Широта текущего местоположения пользователя
+      - in: query
+        name: long
+        schema:
+          type: number
+          format: double
+        description: Долгота текущего местоположения пользователя
+      - in: query
+        name: name
+        schema:
+          type: string
+        description: Название мастерской (поиск по частичному совпадению)
+      - in: query
+        name: radius
+        schema:
+          type: number
+          format: double
+        description: Радиус поиска в километрах (по умолчанию 10 км)
+      tags:
+      - Masters
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Master'
+          description: ''
+  /api/order/:
+    get:
+      operationId: order_list
+      description: Возвращает список заказов с возможностью фильтрации, поиска и сортировки
+      summary: Получить список заказов
+      parameters:
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: search
+        required: false
+        in: query
+        description: A search term.
+        schema:
+          type: string
+      tags:
+      - Orders
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Order'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+    post:
+      operationId: order_create
+      description: 'Создает новый заказ для текущего пользователя (user берется из
+        header). Поля: text (обязательно) - описание заказа, location (обязательно)
+        - адрес или описание места, priority - приоритет заказа (low - низкий, high
+        - высокий, по умолчанию low), latitude - широта местоположения (от -90 до
+        90), longitude - долгота местоположения (от -180 до 180), master_id - ID мастера
+        (опционально), car_list - массив ID машин (опционально, например [1, 2]),
+        category_list - массив ID категорий (опционально, например [1, 2]).'
+      summary: Создать новый заказ
+      tags:
+      - Orders
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - text
+              - location
+              properties:
+                text:
+                  type: string
+                  description: Описание заказа
+                  example: Нужна помощь с заменой колеса
+                priority:
+                  type: string
+                  enum:
+                  - low
+                  - high
+                  description: Приоритет заказа
+                  default: low
+                  example: high
+                location:
+                  type: string
+                  description: Адрес или описание места
+                  example: ул. Навои, д. 15, Ташкент
+                latitude:
+                  type: number
+                  description: Широта местоположения (от -90 до 90)
+                  example: 41.3111
+                longitude:
+                  type: number
+                  description: Долгота местоположения (от -180 до 180)
+                  example: 69.2797
+                master_id:
+                  type: integer
+                  description: ID мастера (необязательно)
+                  example: 1
+                car_list:
+                  type: array
+                  items:
+                    type: integer
+                  description: 'Список ID машин. Необязательно. Пример: [1, 2, 3]'
+                  example:
+                  - 1
+                  - 2
+                category_list:
+                  type: array
+                  items:
+                    type: integer
+                  description: 'Список ID категорий. Необязательно. Пример: [1, 2,
+                    3]'
+                  example:
+                  - 1
+                  - 2
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: Сообщение об успешном создании заказа
+                    example: Ваш заказ отправлен
+                  order:
+                    type: object
+                    description: Данные созданного заказа
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+  /api/order/{id}/:
+    get:
+      operationId: order_retrieve
+      description: Возвращает детальную информацию о конкретном заказе
+      summary: Получить детали заказа
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Orders
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+    put:
+      operationId: order_update
+      description: 'Полностью обновляет все поля заказа. Поля: text - описание заказа,
+        location - адрес или описание места, priority - приоритет заказа (low - низкий,
+        high - высокий), status - статус заказа (pending - ожидает, in_progress -
+        в работе, completed - завершен, cancelled - отменен, rejected - отклонен),
+        latitude - широта местоположения (от -90 до 90), longitude - долгота местоположения
+        (от -180 до 180), master - ID мастера.'
+      summary: Полное обновление заказа
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Orders
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                  description: Описание заказа
+                  example: Нужна помощь с заменой колеса
+                status:
+                  type: string
+                  enum:
+                  - pending
+                  - in_progress
+                  - completed
+                  - cancelled
+                  - rejected
+                  description: Статус заказа
+                  example: in_progress
+                priority:
+                  type: string
+                  enum:
+                  - low
+                  - high
+                  description: Приоритет заказа
+                  example: high
+                location:
+                  type: string
+                  description: Адрес или описание места
+                  example: ул. Навои, д. 15, Ташкент
+                latitude:
+                  type: number
+                  description: Широта местоположения (от -90 до 90)
+                  example: 41.3111
+                longitude:
+                  type: number
+                  description: Долгота местоположения (от -180 до 180)
+                  example: 69.2797
+                master:
+                  type: integer
+                  description: ID мастера
+                  example: 1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+    patch:
+      operationId: order_partial_update
+      description: 'Частично обновляет поля заказа. Можно указать только те поля,
+        которые нужно обновить. Поля: text - описание заказа, location - адрес или
+        описание места, priority - приоритет заказа (low - низкий, high - высокий),
+        status - статус заказа (pending - ожидает, in_progress - в работе, completed
+        - завершен, cancelled - отменен, rejected - отклонен), latitude - широта местоположения
+        (от -90 до 90), longitude - долгота местоположения (от -180 до 180), master
+        - ID мастера.'
+      summary: Частичное обновление заказа
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Orders
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                  description: Описание заказа
+                  example: Нужна помощь с заменой колеса
+                status:
+                  type: string
+                  enum:
+                  - pending
+                  - in_progress
+                  - completed
+                  - cancelled
+                  - rejected
+                  description: Статус заказа
+                  example: in_progress
+                priority:
+                  type: string
+                  enum:
+                  - low
+                  - high
+                  description: Приоритет заказа
+                  example: high
+                location:
+                  type: string
+                  description: Адрес или описание места
+                  example: ул. Навои, д. 15, Ташкент
+                latitude:
+                  type: number
+                  description: Широта местоположения (от -90 до 90)
+                  example: 41.3111
+                longitude:
+                  type: number
+                  description: Долгота местоположения (от -180 до 180)
+                  example: 69.2797
+                master:
+                  type: integer
+                  description: ID мастера
+                  example: 1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+    delete:
+      operationId: order_destroy
+      description: Удаляет заказ из системы
+      summary: Удалить заказ
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Orders
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          content:
+            application/json:
+              schema:
+                description: Заказ успешно удален
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+  /api/order/{order_id}/accept/:
+    post:
+      operationId: order_accept_create
+      description: Принимает заказ в работу с проверкой минимального баланса пользователя
+        (1000 ₽) и списанием 200 ₽ за каждый заказ
+      summary: Принять заказ в работу
+      parameters:
+      - in: path
+        name: order_id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Orders
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  order:
+                    type: object
+                  balance_after:
+                    type: number
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+  /api/order/{order_id}/status/:
+    post:
+      operationId: order_status_create
+      description: 'Обновляет статус заказа на новый. Статусы: pending - ожидает,
+        in_progress - в работе, completed - завершен, cancelled - отменен, rejected
+        - отклонен. Доступно только владельцу заказа или мастеру.'
+      summary: Обновить статус заказа
+      parameters:
+      - in: path
+        name: order_id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Orders
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - status
+              properties:
+                status:
+                  type: string
+                  enum:
+                  - pending
+                  - in_progress
+                  - completed
+                  - cancelled
+                  - rejected
+                  description: 'Статус заказа: pending (Ожидает), in_progress (В работе),
+                    completed (Завершен), cancelled (Отменен), rejected (Отклонен)'
+                  example: in_progress
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+  /api/order/by-master/:
+    get:
+      operationId: order_by_master_list
+      description: Возвращает список заказов, назначенных текущему мастеру (master
+        берется из header). Фильтрует заказы по полю master в модели Order. Поддерживает
+        фильтрацию по статусу, приоритету и географической области (4 точки)
+      summary: Получить заказы текущего мастера
+      tags:
+      - Orders
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Order'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '403':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+  /api/order/by-user/:
+    get:
+      operationId: order_by_user_list
+      description: Возвращает все заказы текущего авторизованного пользователя (user
+        берется из header). Фильтрует заказы по полю user в модели Order.
+      summary: Получить заказы текущего пользователя
+      tags:
+      - Orders
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Order'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+  /api/order/ratings/:
+    post:
+      operationId: order_ratings_create
+      description: Создает рейтинг для мастера или мастера в мастере после завершения
+        заказа
+      summary: Создать рейтинг
+      tags:
+      - Rating
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                order:
+                  type: integer
+                  description: ID заказа
+                master:
+                  type: integer
+                  description: ID мастера
+                rating:
+                  type: integer
+                  description: Рейтинг от 1 до 5
+                comment:
+                  type: string
+                  description: Комментарий
+              required:
+              - order
+              - rating
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Rating'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+  /api/order/ratings/list/:
+    get:
+      operationId: order_ratings_list_list
+      description: Возвращает список рейтингов для мастера
+      summary: Получить список рейтингов
+      tags:
+      - Rating
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Rating'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+          description: ''
+components:
+  schemas:
+    Car:
+      type: object
+      description: Сериализатор для машины
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        category:
+          type: string
+          readOnly: true
+        brand:
+          type: string
+          nullable: true
+          title: Марка машины
+          maxLength: 255
+        model:
+          type: string
+          nullable: true
+          title: Модель машины
+          maxLength: 255
+        year:
+          type: integer
+          maximum: 2147483647
+          minimum: -2147483648
+          nullable: true
+          title: Год выпуска машины
+        user:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата создания
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата обновления
+      required:
+      - category
+      - created_at
+      - id
+      - updated_at
+      - user
+    CarCreateRequest:
+      type: object
+      description: Сериализатор для создания машины
+      properties:
+        category:
+          type: integer
+          nullable: true
+          title: Категория
+        brand:
+          type: string
+          nullable: true
+          title: Марка машины
+          maxLength: 255
+        model:
+          type: string
+          nullable: true
+          title: Модель машины
+          maxLength: 255
+        year:
+          type: integer
+          maximum: 2147483647
+          minimum: -2147483648
+          nullable: true
+          title: Год выпуска машины
+    CarRequest:
+      type: object
+      description: Сериализатор для машины
+      properties:
+        brand:
+          type: string
+          nullable: true
+          title: Марка машины
+          maxLength: 255
+        model:
+          type: string
+          nullable: true
+          title: Модель машины
+          maxLength: 255
+        year:
+          type: integer
+          maximum: 2147483647
+          minimum: -2147483648
+          nullable: true
+          title: Год выпуска машины
+    Category:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          title: Название категории
+          maxLength: 255
+        icon:
+          type: string
+          format: uri
+          nullable: true
+          title: Иконка категории
+        type_category:
+          enum:
+          - by_master
+          - by_car
+          - by_order
+          type: string
+          description: |-
+            * `by_master` - По категории мастера
+            * `by_car` - По категории машины
+            * `by_order` - По категории заказа
+          x-spec-enum-id: 6572e7f4d22d9a6e
+          title: Тип категории
+        service_type:
+          type: string
+          title: Тип услуги
+          description: 'Общий тип услуги для связи между by_order и by_master категориями
+            (например: remont, diagnostika, zamena)'
+          maxLength: 100
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата создания
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата обновления
+      required:
+      - created_at
+      - id
+      - name
+      - type_category
+      - updated_at
+    IdentifierRequest:
+      type: object
+      description: Сериализатор для идентификатора (email или номер телефона)
+      properties:
+        identifier:
+          type: string
+          minLength: 1
+          maxLength: 255
+        role:
+          enum:
+          - Driver
+          - Master
+          - Owner
+          type: string
+          x-spec-enum-id: d530a1c31c352132
+          description: |-
+            Роль пользователя: Driver, Master или Owner (обязательно).
+
+            * `Driver` - Driver
+            * `Master` - Master
+            * `Owner` - Owner
+      required:
+      - identifier
+      - role
+    Master:
+      type: object
+      description: Сериализатор для мастера
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        user_info:
+          type: string
+          readOnly: true
+        name:
+          type: string
+          title: Название мастерской
+          description: 'Название мастерской (например: "СТО Авто-Сервис")'
+          maxLength: 255
+        city:
+          type: string
+          title: Город
+          maxLength: 100
+        address:
+          type: string
+          title: Адрес
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,9})?$
+          nullable: true
+          title: Широта
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,9})?$
+          nullable: true
+          title: Долгота
+        phone:
+          type: string
+          title: Телефон
+          maxLength: 20
+        working_time:
+          type: string
+          title: Рабочее время
+          maxLength: 100
+        services:
+          type: string
+          readOnly: true
+        card_number:
+          type: string
+          title: Номер карты
+          maxLength: 19
+        card_expiry_month:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+          nullable: true
+          title: Месяц истечения
+        card_expiry_year:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+          nullable: true
+          title: Год истечения
+        card_cvv:
+          type: string
+          title: CVV/CVC
+          maxLength: 4
+        balance:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,8}(?:\.\d{0,2})?$
+          title: Баланс мастера
+        reserved_amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,8}(?:\.\d{0,2})?$
+          title: Зарезервированная сумма
+        description:
+          type: string
+          nullable: true
+          title: Описание
+        images:
+          type: string
+          readOnly: true
+        category_data:
+          type: string
+          readOnly: true
+        rating_data:
+          type: string
+          readOnly: true
+        masters:
+          type: string
+          readOnly: true
+        distance:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата создания
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата обновления
+        last_activity:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+          title: Последняя активность
+      required:
+      - category_data
+      - created_at
+      - distance
+      - id
+      - images
+      - last_activity
+      - masters
+      - rating_data
+      - services
+      - updated_at
+      - user_info
+    MasterCreateRequest:
+      type: object
+      description: Сериализатор для создания мастера
+      properties:
+        name:
+          type: string
+          title: Название мастерской
+          description: 'Название мастерской (например: "СТО Авто-Сервис")'
+          maxLength: 255
+        city:
+          type: string
+          title: Город
+          maxLength: 100
+        address:
+          type: string
+          title: Адрес
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,9})?$
+          nullable: true
+          title: Широта
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,9})?$
+          nullable: true
+          title: Долгота
+        phone:
+          type: string
+          title: Телефон
+          maxLength: 20
+        working_time:
+          type: string
+          title: Рабочее время
+          maxLength: 100
+        description:
+          type: string
+          nullable: true
+          title: Описание
+        services:
+          type: array
+          items:
+            type: object
+          writeOnly: true
+          description: 'Список услуг мастера. Пример: [{''name'': ''Замена масла'',
+            ''price_from'': 1000, ''price_to'': 2000, ''category'': 1}]'
+        category:
+          type: array
+          items:
+            type: integer
+          writeOnly: true
+          description: Список ID категорий [1, 2, 3, ...]. Категории должны быть типа
+            'by_master'
+        card_number:
+          type: string
+          title: Номер карты
+          maxLength: 19
+        card_expiry_month:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+          nullable: true
+          title: Месяц истечения
+        card_expiry_year:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+          nullable: true
+          title: Год истечения
+        card_cvv:
+          type: string
+          title: CVV/CVC
+          maxLength: 4
+    MasterEmployeeCreateRequest:
+      type: object
+      description: Сериализатор для добавления сотрудника к мастерской
+      properties:
+        master_id:
+          type: integer
+          description: ID мастерской
+        user_id:
+          type: integer
+          description: ID пользователя для добавления
+      required:
+      - master_id
+      - user_id
+    MasterUpdateRequest:
+      type: object
+      description: Сериализатор для обновления мастера (частичное обновление)
+      properties:
+        city:
+          type: string
+          title: Город
+          maxLength: 100
+        address:
+          type: string
+          title: Адрес
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,9})?$
+          nullable: true
+          title: Широта
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,9})?$
+          nullable: true
+          title: Долгота
+        phone:
+          type: string
+          minLength: 1
+          title: Телефон
+          maxLength: 20
+        working_time:
+          type: string
+          minLength: 1
+          title: Рабочее время
+          maxLength: 100
+        card_number:
+          type: string
+          title: Номер карты
+          maxLength: 19
+        card_expiry_month:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+          nullable: true
+          title: Месяц истечения
+        card_expiry_year:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+          nullable: true
+          title: Год истечения
+        card_cvv:
+          type: string
+          title: CVV/CVC
+          maxLength: 4
+        description:
+          type: string
+          nullable: true
+          title: Описание
+        images:
+          type: array
+          items:
+            type: string
+            format: binary
+          writeOnly: true
+        category:
+          type: array
+          items:
+            type: integer
+          writeOnly: true
+          description: Список ID категорий [1, 2, 3, ...]
+    Order:
+      type: object
+      description: Сериализатор для заказа
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        user:
+          type: string
+          readOnly: true
+        car_data:
+          type: string
+          readOnly: true
+        category_data:
+          type: string
+          readOnly: true
+        text:
+          type: string
+          title: Описание заказа
+          description: Подробное описание проблемы или услуги
+        status:
+          enum:
+          - pending
+          - in_progress
+          - completed
+          - cancelled
+          - rejected
+          type: string
+          description: |-
+            * `pending` - Ожидает
+            * `in_progress` - В работе
+            * `completed` - Завершен
+            * `cancelled` - Отменен
+            * `rejected` - Отклонен
+          x-spec-enum-id: 58fb175d53dd6743
+          title: Статус заказа
+        status_display:
+          type: string
+          readOnly: true
+        priority:
+          enum:
+          - low
+          - high
+          type: string
+          description: |-
+            * `low` - Низкий
+            * `high` - Высокий
+          x-spec-enum-id: 557cac164237b373
+          title: Приоритет заказа
+        priority_display:
+          type: string
+          readOnly: true
+        location:
+          type: string
+          title: Местоположение
+          description: Адрес или описание места
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,7})?$
+          nullable: true
+          title: Широта
+          description: Широта местоположения
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,7})?$
+          nullable: true
+          title: Долгота
+          description: Долгота местоположения
+        master:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата создания
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата обновления
+      required:
+      - car_data
+      - category_data
+      - created_at
+      - id
+      - location
+      - master
+      - priority_display
+      - status_display
+      - text
+      - updated_at
+      - user
+    PatchedCarRequest:
+      type: object
+      description: Сериализатор для машины
+      properties:
+        brand:
+          type: string
+          nullable: true
+          title: Марка машины
+          maxLength: 255
+        model:
+          type: string
+          nullable: true
+          title: Модель машины
+          maxLength: 255
+        year:
+          type: integer
+          maximum: 2147483647
+          minimum: -2147483648
+          nullable: true
+          title: Год выпуска машины
+    PatchedMasterUpdateRequest:
+      type: object
+      description: Сериализатор для обновления мастера (частичное обновление)
+      properties:
+        city:
+          type: string
+          title: Город
+          maxLength: 100
+        address:
+          type: string
+          title: Адрес
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,9})?$
+          nullable: true
+          title: Широта
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,9})?$
+          nullable: true
+          title: Долгота
+        phone:
+          type: string
+          minLength: 1
+          title: Телефон
+          maxLength: 20
+        working_time:
+          type: string
+          minLength: 1
+          title: Рабочее время
+          maxLength: 100
+        card_number:
+          type: string
+          title: Номер карты
+          maxLength: 19
+        card_expiry_month:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+          nullable: true
+          title: Месяц истечения
+        card_expiry_year:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+          nullable: true
+          title: Год истечения
+        card_cvv:
+          type: string
+          title: CVV/CVC
+          maxLength: 4
+        description:
+          type: string
+          nullable: true
+          title: Описание
+        images:
+          type: array
+          items:
+            type: string
+            format: binary
+          writeOnly: true
+        category:
+          type: array
+          items:
+            type: integer
+          writeOnly: true
+          description: Список ID категорий [1, 2, 3, ...]
+    PatchedUserUpdateRequest:
+      type: object
+      description: Сериализатор для обновления информации о пользователе
+      properties:
+        username:
+          type: string
+          minLength: 1
+          title: Имя пользователя
+          description: Обязательное поле. Не более 150 символов. Только буквы, цифры
+            и символы @/./+/-/_.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        first_name:
+          type: string
+          title: Имя
+          maxLength: 150
+        last_name:
+          type: string
+          title: Фамилия
+          maxLength: 150
+        date_of_birth:
+          type: string
+          format: date
+          nullable: true
+          title: Дата рождения
+          description: Необязательно. Введите вашу дату рождения.
+        avatar:
+          type: string
+          format: binary
+          nullable: true
+          description: Загрузите файл изображения для аватара
+        address:
+          type: string
+          nullable: true
+          title: Адрес
+          description: Необязательно. Введите ваш адрес.
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,7})?$
+          nullable: true
+          title: Долгота
+          description: Необязательно. Долгота вашего местоположения.
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,7})?$
+          nullable: true
+          title: Широта
+          description: Необязательно. Широта вашего местоположения.
+        roles:
+          type: string
+          writeOnly: true
+          description: 'Роли пользователя. Можно указать одну роль или несколько через
+            запятую. Примеры: ''Driver'', ''Driver,Owner'', ''Driver,Master,Owner'''
+        description:
+          type: string
+          nullable: true
+          title: Описание
+          description: Необязательно. Введите ваше описание.
+    Rating:
+      type: object
+      description: Сериализатор для рейтинга
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        order:
+          type: integer
+          title: Заказ
+        user:
+          type: integer
+          readOnly: true
+          title: Пользователь (оценивающий)
+        user_name:
+          type: string
+          readOnly: true
+        master:
+          type: integer
+          nullable: true
+          title: Мастер
+        master_name:
+          type: string
+          readOnly: true
+        rating:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+          title: Рейтинг
+          description: Рейтинг от 1 до 5
+        comment:
+          type: string
+          nullable: true
+          title: Комментарий
+          description: Комментарий к рейтингу
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата создания
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата обновления
+      required:
+      - created_at
+      - id
+      - master
+      - master_name
+      - order
+      - rating
+      - updated_at
+      - user
+      - user_name
+    SMSVerificationRequest:
+      type: object
+      description: Сериализатор для проверки SMS кода
+      properties:
+        identifier:
+          type: string
+          minLength: 1
+          maxLength: 255
+        sms_code:
+          type: string
+          minLength: 4
+          maxLength: 4
+        role:
+          enum:
+          - Driver
+          - Master
+          - Owner
+          type: string
+          x-spec-enum-id: d530a1c31c352132
+          description: |-
+            Роль пользователя: Driver, Master или Owner (обязательно).
+
+            * `Driver` - Driver
+            * `Master` - Master
+            * `Owner` - Owner
+      required:
+      - identifier
+      - role
+      - sms_code
+    TelegramChatIdRequest:
+      type: object
+      description: Сериализатор для обновления Telegram Chat ID
+      properties:
+        chat_id:
+          type: string
+          minLength: 1
+          description: Ваш Telegram Chat ID
+          maxLength: 50
+      required:
+      - chat_id
+    TokenResponse:
+      type: object
+      description: Сериализатор для ответа с токеном
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        user:
+          $ref: '#/components/schemas/User'
+        tokens:
+          type: object
+      required:
+      - message
+      - success
+      - tokens
+      - user
+    User:
+      type: object
+      description: Сериализатор для данных пользователя
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        private_id:
+          type: string
+          readOnly: true
+          nullable: true
+          description: Уникальный 6-значный идентификатор пользователя. Генерируется
+            автоматически.
+        phone_number:
+          type: string
+          nullable: true
+          title: Номер телефона
+          description: Необязательно. Введите ваш номер телефона.
+          maxLength: 15
+        first_name:
+          type: string
+          title: Имя
+          maxLength: 150
+        last_name:
+          type: string
+          title: Фамилия
+          maxLength: 150
+        email:
+          type: string
+          format: email
+          title: Электронная почта
+          description: Обязательно. Введите действительный адрес электронной почты.
+          maxLength: 254
+        description:
+          type: string
+          nullable: true
+          title: Описание
+          description: Необязательно. Введите ваше описание.
+        is_verified:
+          type: boolean
+          title: Email подтвержден
+          description: Указывает, подтвержден ли email этого пользователя.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата создания
+        roles:
+          type: string
+          readOnly: true
+        balance:
+          type: string
+          readOnly: true
+      required:
+      - balance
+      - created_at
+      - email
+      - id
+      - private_id
+      - roles
+    UserDetails:
+      type: object
+      description: Сериализатор для детальной информации о пользователе (только чтение)
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        private_id:
+          type: string
+          readOnly: true
+          nullable: true
+          description: Уникальный 6-значный идентификатор пользователя. Генерируется
+            автоматически.
+        username:
+          type: string
+          title: Имя пользователя
+          description: Обязательное поле. Не более 150 символов. Только буквы, цифры
+            и символы @/./+/-/_.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          type: string
+          format: email
+          readOnly: true
+          title: Электронная почта
+          description: Обязательно. Введите действительный адрес электронной почты.
+        phone_number:
+          type: string
+          readOnly: true
+          nullable: true
+          title: Номер телефона
+          description: Необязательно. Введите ваш номер телефона.
+        first_name:
+          type: string
+          title: Имя
+          maxLength: 150
+        last_name:
+          type: string
+          title: Фамилия
+          maxLength: 150
+        date_of_birth:
+          type: string
+          format: date
+          nullable: true
+          title: Дата рождения
+          description: Необязательно. Введите вашу дату рождения.
+        avatar:
+          type: string
+          format: uri
+          readOnly: true
+        address:
+          type: string
+          nullable: true
+          title: Адрес
+          description: Необязательно. Введите ваш адрес.
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,7})?$
+          nullable: true
+          title: Долгота
+          description: Необязательно. Долгота вашего местоположения.
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,7})?$
+          nullable: true
+          title: Широта
+          description: Необязательно. Широта вашего местоположения.
+        is_verified:
+          type: boolean
+          readOnly: true
+          title: Email подтвержден
+          description: Указывает, подтвержден ли email этого пользователя.
+        roles:
+          type: string
+          readOnly: true
+        balance:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата создания
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Дата обновления
+        description:
+          type: string
+          nullable: true
+          title: Описание
+          description: Необязательно. Введите ваше описание.
+      required:
+      - avatar
+      - balance
+      - created_at
+      - email
+      - id
+      - is_verified
+      - phone_number
+      - private_id
+      - roles
+      - updated_at
+      - username
+    UserUpdateRequest:
+      type: object
+      description: Сериализатор для обновления информации о пользователе
+      properties:
+        username:
+          type: string
+          minLength: 1
+          title: Имя пользователя
+          description: Обязательное поле. Не более 150 символов. Только буквы, цифры
+            и символы @/./+/-/_.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        first_name:
+          type: string
+          title: Имя
+          maxLength: 150
+        last_name:
+          type: string
+          title: Фамилия
+          maxLength: 150
+        date_of_birth:
+          type: string
+          format: date
+          nullable: true
+          title: Дата рождения
+          description: Необязательно. Введите вашу дату рождения.
+        avatar:
+          type: string
+          format: binary
+          nullable: true
+          description: Загрузите файл изображения для аватара
+        address:
+          type: string
+          nullable: true
+          title: Адрес
+          description: Необязательно. Введите ваш адрес.
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,7})?$
+          nullable: true
+          title: Долгота
+          description: Необязательно. Долгота вашего местоположения.
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,7})?$
+          nullable: true
+          title: Широта
+          description: Необязательно. Широта вашего местоположения.
+        roles:
+          type: string
+          writeOnly: true
+          description: 'Роли пользователя. Можно указать одну роль или несколько через
+            запятую. Примеры: ''Driver'', ''Driver,Owner'', ''Driver,Master,Owner'''
+        description:
+          type: string
+          nullable: true
+          title: Описание
+          description: Необязательно. Введите ваше описание.
+  securitySchemes:
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+servers:
+- url: http://localhost:8000
+  description: Development server
+tags:
+- name: Authentication
+  description: User authentication and authorization
+- name: Cars
+  description: Car management endpoints
+- name: Masters
+  description: Master/service provider endpoints
+- name: Orders
+  description: Order management endpoints
+- name: Categories
+  description: Category management endpoints

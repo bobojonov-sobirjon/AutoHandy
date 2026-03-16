@@ -1,0 +1,450 @@
+"""
+Business logic for SMS and user services.
+SMS is sent via Twilio; if Twilio fails, code is still returned in response (when configured).
+"""
+import re
+import requests
+import random
+import logging
+from django.conf import settings
+from django.core.cache import cache
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
+from django.core.mail import send_mail
+from django.utils import timezone
+from datetime import timedelta
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework import status
+from rest_framework.response import Response
+from .models import UserSMSCode
+
+logger = logging.getLogger(__name__)
+
+User = get_user_model()
+
+
+class SMSService:
+    """SMS services: Twilio (primary). Code is always saved and can be returned in response if send fails."""
+
+    BOT_TOKEN = getattr(settings, 'TELEGRAM_BOT_TOKEN', '')
+    BOT_NAME = getattr(settings, 'TELEGRAM_BOT_NAME', '')
+
+    @staticmethod
+    def send_telegram_sms(phone_number: str, message: str) -> dict:
+        """Send SMS notification via Telegram Bot (optional)."""
+        try:
+            if not SMSService.BOT_TOKEN:
+                return {'success': False, 'error': 'Telegram bot not configured'}
+            telegram_message = f"SMS code for {phone_number}\n\n{message}"
+            url = f"https://api.telegram.org/bot{SMSService.BOT_TOKEN}/sendMessage"
+            admin_chat_id = getattr(settings, 'TELEGRAM_ADMIN_CHAT_ID', '')
+            if not admin_chat_id:
+                return {'success': False, 'error': 'TELEGRAM_ADMIN_CHAT_ID not set'}
+            data = {'chat_id': admin_chat_id, 'text': telegram_message}
+            response = requests.post(url, json=data, timeout=10)
+            if response.status_code == 200:
+                return {'success': True, 'message': 'SMS sent via Telegram'}
+            return {'success': False, 'error': response.text}
+        except Exception as e:
+            logger.error(f"Error sending Telegram SMS: {e}")
+            return {'success': False, 'error': str(e)}
+
+    @staticmethod
+    def format_phone_to_e164(phone_number: str) -> str:
+        """
+        Normalize phone to E.164 (digits only with country code).
+        Supports all countries: Uzbekistan (998), Russia (7), and others (e.g. 1, 44, 90, ...).
+        """
+        cleaned = re.sub(r'\D', '', phone_number)
+        if not cleaned:
+            return phone_number
+        # Russia: 8XXXXXXXXXX -> 7XXXXXXXXXX
+        if len(cleaned) == 11 and cleaned.startswith('8') and cleaned[1] == '9':
+            cleaned = '7' + cleaned[1:]
+        elif len(cleaned) == 10 and cleaned.startswith('9'):
+            # Russia 9XXXXXXXXX -> 79XXXXXXXXX
+            cleaned = '7' + cleaned
+        # Already has country code (e.g. 998..., 7..., 1..., 44...)
+        return cleaned
+
+    @staticmethod
+    def format_phone_number(phone_number: str) -> str:
+        """Alias for E.164 format (backward compatibility)."""
+        return SMSService.format_phone_to_e164(phone_number)
+
+    @staticmethod
+    def send_sms_via_twilio(to_phone_e164: str, body: str) -> dict:
+        """
+        Send SMS via Twilio. to_phone_e164: digits with country code, or with +.
+        Returns dict: success, message or error.
+        """
+        sid = getattr(settings, 'TWILIO_ACCOUNT_SID', None)
+        token = getattr(settings, 'TWILIO_AUTH_TOKEN', None)
+        from_number = getattr(settings, 'TWILIO_PHONE_NUMBER', None)
+        if not sid or not token or not from_number:
+            return {'success': False, 'error': 'Twilio not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER)'}
+        to_formatted = to_phone_e164 if to_phone_e164.startswith('+') else f'+{to_phone_e164}'
+        try:
+            from twilio.rest import Client
+            client = Client(sid, token)
+            message = client.messages.create(body=body, from_=from_number, to=to_formatted)
+            logger.info(f"Twilio SMS sent to {to_formatted} sid={message.sid}")
+            return {'success': True, 'message_sid': message.sid}
+        except Exception as e:
+            logger.warning(f"Twilio send failed: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    @staticmethod
+    def send_email_code(email: str, sms_code: str) -> dict:
+        """
+        Отправка кода подтверждения на email
+        
+        Args:
+            email (str): Email адрес
+            sms_code (str): Код подтверждения
+            
+        Returns:
+            dict: Результат отправки
+        """
+        try:
+            subject = 'Код подтверждения AutoHandy'
+            message = f'Ваш код подтверждения: {sms_code}'
+            from_email = settings.DEFAULT_FROM_EMAIL
+            recipient_list = [email]
+            
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email=from_email,
+                recipient_list=recipient_list,
+                fail_silently=False,
+            )
+            
+            logger.info(f"Email code {sms_code} sent to {email}")
+            return {
+                'success': True,
+                'message': 'Код подтверждения отправлен на email'
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to send email to {email}: {str(e)}")
+            return {
+                'success': False,
+                'error': f'Ошибка отправки email: {str(e)}'
+            }
+    
+    @staticmethod
+    def check_smsc_balance() -> dict:
+        """Check SMSC.ru balance (optional/legacy)."""
+        try:
+            login = getattr(settings, 'SMSC_LOGIN', None)
+            psw = getattr(settings, 'SMSC_PASSWORD', None)
+            if not login or not psw:
+                return {'success': False, 'error': 'SMSC not configured', 'balance': 0}
+            data = {'login': login, 'psw': psw, 'fmt': 3}
+            response = requests.get('https://smsc.ru/sys/balance.php', params=data, timeout=10)
+            result = response.json()
+            if result.get('error'):
+                return {'success': False, 'error': result.get('error'), 'balance': 0}
+            return {'success': True, 'balance': float(result.get('balance', 0)), 'currency': result.get('currency', 'RUB')}
+        except Exception as e:
+            return {'success': False, 'error': str(e), 'balance': 0}
+
+    @staticmethod
+    def send_sms_code(identifier: str, identifier_type: str = 'phone', role: str = None) -> dict:
+        """
+        Send SMS code to phone (Twilio) or email. Saves code to DB always.
+        For phone: sends via Twilio to any E.164 number. If Twilio fails and
+        SMS_SEND_CODE_IN_RESPONSE_IF_FAIL is True, still returns success with sms_code in response.
+        """
+        try:
+            if role and role not in ['Driver', 'Master', 'Owner']:
+                return {'success': False, 'error': 'Invalid role', 'status_code': status.HTTP_400_BAD_REQUEST}
+
+            user_exists = False
+            phone_number = None
+
+            if identifier_type == 'phone':
+                phone_number = SMSService.format_phone_to_e164(identifier)
+                try:
+                    user = User.objects.prefetch_related('groups').get(phone_number=identifier)
+                    user_exists = True
+                    if role:
+                        user_groups = user.groups.values_list('name', flat=True)
+                        if user_groups and role not in user_groups:
+                            return {
+                                'success': False,
+                                'error': f'Role mismatch. User roles: {", ".join(user_groups)}. You specified: {role}',
+                                'status_code': status.HTTP_400_BAD_REQUEST
+                            }
+                except User.DoesNotExist:
+                    user_exists = False
+            elif identifier_type == 'email':
+                try:
+                    user = User.objects.prefetch_related('groups').get(email=identifier)
+                    user_exists = True
+                    if role:
+                        user_groups = user.groups.values_list('name', flat=True)
+                        if user_groups and role not in user_groups:
+                            return {'success': False, 'error': 'Invalid user role', 'status_code': status.HTTP_400_BAD_REQUEST}
+                    phone_number = user.phone_number or identifier
+                except User.DoesNotExist:
+                    user_exists = False
+                    phone_number = identifier
+
+            if not phone_number:
+                return {
+                    'success': False,
+                    'error': 'Could not determine phone number for SMS',
+                    'status_code': status.HTTP_400_BAD_REQUEST
+                }
+
+            sms_code = str(random.randint(1000, 9999))
+            sms_sent = False
+            sms_error = None
+
+            if identifier_type == 'email':
+                email_result = SMSService.send_email_code(identifier, sms_code)
+                if not email_result['success']:
+                    return {'success': False, 'error': email_result['error'], 'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR}
+                sms_sent = True
+            else:
+                twilio_result = SMSService.send_sms_via_twilio(phone_number, f'Your verification code: {sms_code}')
+                sms_sent = twilio_result.get('success', False)
+                sms_error = twilio_result.get('error')
+                if not sms_sent:
+                    logger.warning(f"Twilio send failed for {phone_number}: {sms_error}")
+
+            UserSMSCode.objects.filter(
+                identifier=identifier,
+                identifier_type=identifier_type,
+                is_used=False
+            ).update(is_used=True, used_at=timezone.now())
+
+            expires_at = timezone.now() + timedelta(minutes=5)
+            created_by_user = None
+            if user_exists:
+                try:
+                    created_by_user = User.objects.get(phone_number=identifier) if identifier_type == 'phone' else User.objects.get(email=identifier)
+                except User.DoesNotExist:
+                    pass
+
+            UserSMSCode.objects.create(
+                code=sms_code,
+                identifier=identifier,
+                identifier_type=identifier_type,
+                created_by=created_by_user,
+                expires_at=expires_at
+            )
+
+            cache_key = f'sms_code_{identifier_type}_{identifier}'
+            cache.set(cache_key, sms_code, timeout=300)
+            cache.set(f'user_exists_{identifier_type}_{identifier}', user_exists, timeout=300)
+            if role:
+                cache.set(f'user_role_{identifier_type}_{identifier}', role, timeout=300)
+
+            send_code_in_response = getattr(settings, 'SMS_SEND_CODE_IN_RESPONSE_IF_FAIL', True)
+            if identifier_type == 'email':
+                message = 'Verification code sent to email'
+            elif sms_sent:
+                message = 'SMS code sent'
+            else:
+                message = 'Code generated; SMS could not be sent. Use the code below.' if send_code_in_response else 'SMS send failed'
+
+            response_data = {
+                'success': True,
+                'message': message,
+                'identifier': identifier,
+                'identifier_type': identifier_type,
+                'phone': phone_number if identifier_type == 'phone' else None,
+                'email': identifier if identifier_type == 'email' else None,
+                'user_exists': user_exists,
+                'status_code': status.HTTP_200_OK
+            }
+            if identifier_type == 'email' or sms_sent or send_code_in_response:
+                response_data['sms_code'] = sms_code
+            if not sms_sent and identifier_type == 'phone' and sms_error:
+                response_data['sms_error'] = sms_error
+
+            return response_data
+
+        except requests.exceptions.Timeout:
+            return {'success': False, 'error': 'SMS service timeout', 'status_code': status.HTTP_408_REQUEST_TIMEOUT}
+        except Exception as e:
+            logger.exception(e)
+            return {'success': False, 'error': str(e), 'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR}
+    
+    @staticmethod
+    def verify_sms_code(identifier: str, sms_code: str, identifier_type: str = 'phone', role: str = None) -> dict:
+        """
+        Проверка SMS кода
+        
+        Args:
+            identifier (str): Номер телефона или email
+            sms_code (str): SMS код
+            identifier_type (str): Тип идентификатора ('phone' или 'email')
+            role (str): Роль пользователя ('Driver' или 'Master') - только для новых пользователей
+            
+        Returns:
+            dict: Результат
+        """
+        try:
+            if role and role not in ['Driver', 'Master', 'Owner']:
+                return {'success': False, 'error': 'Invalid role', 'status_code': status.HTTP_400_BAD_REQUEST}
+
+            # Get code from database (primary source)
+            try:
+                sms_code_obj = UserSMSCode.objects.filter(
+                    identifier=identifier,
+                    identifier_type=identifier_type,
+                    code=sms_code,
+                    is_used=False
+                ).order_by('-created_at').first()
+                
+                if not sms_code_obj:
+                    # Try cache as fallback
+                    cache_key = f'sms_code_{identifier_type}_{identifier}'
+                    stored_code = cache.get(cache_key)
+                    
+                    if not stored_code or stored_code != sms_code:
+                        return {'success': False, 'error': 'Invalid SMS code', 'status_code': status.HTTP_400_BAD_REQUEST}
+                else:
+                    if sms_code_obj.is_expired():
+                        return {'success': False, 'error': 'SMS code expired', 'status_code': status.HTTP_400_BAD_REQUEST}
+                    sms_code_obj.mark_as_used()
+                    logger.info(f"SMS code verified for {identifier}")
+                    
+            except Exception as e:
+                logger.error(f"Error verifying SMS code: {str(e)}")
+                # Fallback to cache
+                cache_key = f'sms_code_{identifier_type}_{identifier}'
+                stored_code = cache.get(cache_key)
+                
+                if not stored_code or stored_code != sms_code:
+                    return {'success': False, 'error': 'Invalid SMS code', 'status_code': status.HTTP_400_BAD_REQUEST}
+
+            # Find or create user
+            user_exists = cache.get(f'user_exists_{identifier_type}_{identifier}', False)
+            
+            cached_role = cache.get(f'user_role_{identifier_type}_{identifier}')
+            if not role and cached_role:
+                role = cached_role
+            
+            if user_exists:
+                try:
+                    if identifier_type == 'phone':
+                        user = User.objects.prefetch_related('groups').get(phone_number=identifier)
+                    else:  # email
+                        user = User.objects.prefetch_related('groups').get(email=identifier)
+                    created = False
+                    
+                    if role:
+                        user_groups = user.groups.values_list('name', flat=True)
+                        if user_groups and role not in user_groups:
+                            return {'success': False, 'error': 'Invalid user role', 'status_code': status.HTTP_400_BAD_REQUEST}
+                        if not user_groups:
+                            try:
+                                group = Group.objects.get(name=role)
+                                user.groups.add(group)
+                                logger.info(f"Added role {role} to existing user {user.email}")
+                            except Group.DoesNotExist:
+                                logger.warning(f"Group {role} not found, skipping role assignment")
+                except User.DoesNotExist:
+                    if identifier_type == 'phone':
+                        user, created = User.objects.prefetch_related('groups').get_or_create(
+                            phone_number=identifier,
+                            defaults={
+                                'username': f'user_{identifier}',
+                                'email': f'{identifier}@example.com',
+                                'first_name': 'User',
+                                'last_name': identifier,
+                                'is_verified': True
+                            }
+                        )
+                        
+                        if created and role:
+                            try:
+                                group = Group.objects.get(name=role)
+                                user.groups.add(group)
+                            except Group.DoesNotExist:
+                                logger.warning(f"Group {role} not found, skipping role assignment")
+                    else:  # email
+                        user, created = User.objects.prefetch_related('groups').get_or_create(
+                            email=identifier,
+                            defaults={
+                                'username': f'user_{identifier.split("@")[0]}',
+                                'phone_number': None,
+                                'first_name': 'User',
+                                'last_name': identifier.split("@")[0],
+                                'is_verified': True
+                            }
+                        )
+                        
+                        if created and role:
+                            try:
+                                group = Group.objects.get(name=role)
+                                user.groups.add(group)
+                            except Group.DoesNotExist:
+                                logger.warning(f"Group {role} not found, skipping role assignment")
+            else:
+                if identifier_type == 'phone':
+                    normalized = SMSService.format_phone_to_e164(identifier)
+                    country_code = normalized[:3] if len(normalized) >= 3 else normalized
+                    display_name = normalized[len(country_code):] if len(normalized) > len(country_code) else normalized
+                    user, created = User.objects.prefetch_related('groups').get_or_create(
+                        phone_number=identifier,
+                        defaults={
+                            'username': f'user_{identifier}',
+                            'email': f'{identifier}@example.com',
+                            'first_name': f'User_{country_code}',
+                            'last_name': display_name or identifier,
+                            'is_verified': True
+                        }
+                    )
+                    
+                    if created and role:
+                        try:
+                            group = Group.objects.get(name=role)
+                            user.groups.add(group)
+                        except Group.DoesNotExist:
+                            logger.warning(f"Group {role} not found, skipping role assignment")
+                else:  # email
+                    user, created = User.objects.prefetch_related('groups').get_or_create(
+                        email=identifier,
+                        defaults={
+                            'username': f'user_{identifier.split("@")[0]}',
+                            'phone_number': None,
+                            'first_name': 'User',
+                            'last_name': identifier.split("@")[0],
+                            'is_verified': True
+                        }
+                    )
+                    
+                    if created and role:
+                        try:
+                            group = Group.objects.get(name=role)
+                            user.groups.add(group)
+                        except Group.DoesNotExist:
+                            logger.warning(f"Group {role} not found, skipping role assignment")
+            
+            refresh = RefreshToken.for_user(user)
+            access_token = refresh.access_token
+            
+            cache.delete(f'user_exists_{identifier_type}_{identifier}')
+            cache.delete(f'user_role_{identifier_type}_{identifier}')
+            cache.delete(f'sms_code_{identifier_type}_{identifier}')
+
+            return {
+                'success': True,
+                'message': 'Login successful',
+                'user': user,
+                'user_created': created,
+                'tokens': {
+                    'access': str(access_token),
+                    'refresh': str(refresh)
+                },
+                'status_code': status.HTTP_200_OK
+            }
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e), 'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR}

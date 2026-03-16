@@ -1,0 +1,37 @@
+asgiref==3.9.1
+certifi==2025.8.3
+charset-normalizer==3.4.3
+Django==5.2.6
+django-cors-headers==4.9.0
+django-filter==25.1
+djangorestframework==3.16.1
+djangorestframework_simplejwt==5.5.1
+dotenv==0.9.9
+drf-spectacular==0.28.0
+gunicorn==23.0.0
+idna==3.10
+inflection==0.5.1
+modeltranslation==0.25
+packaging==25.0
+pillow==11.3.0
+PyJWT==2.10.1
+python-dotenv==1.1.1
+pytz==2025.2
+PyYAML==6.0.2
+requests==2.32.5
+twilio>=8.0.0
+sqlparse==0.5.3
+tzdata==2025.2
+uritemplate==4.2.0
+urllib3==2.5.0
+
+# Optional: Redis for production cache (if USE_REDIS_CACHE=True)
+django-redis==5.4.0
+redis==5.0.1
+
+# PostgreSQL database adapter
+psycopg2-binary==2.9.9
+
+# WebSocket support for real-time chat
+channels==4.1.0
+daphne==4.1.2
