@@ -1,266 +1,62 @@
-# AutoHandy - Система аутентификации по SMS
+# AutoHandy
 
-## Описание проекта
+## Полное техническое задание / Product Specification
 
-AutoHandy - это Django REST API проект для аутентификации пользователей через SMS-коды. Поддерживает номера телефонов Узбекистана и России.
+**Версия для передачи разработчику**
 
-## Возможности
+- **Тип продукта:** Marketplace мобильных автоуслуг  
+- **Архитектура:** 2 приложения (Customer + Provider) и 1 общая база данных  
+- **Backend:** Firebase  
+- **Платежи:** Stripe Connect обязателен с первого релиза  
+- **Регион запуска:** Sacramento + Bay Area, California  
 
-- ✅ **SMS аутентификация** - вход через SMS-код
-- ✅ **Поддержка номеров** - Узбекистан (+998) и Россия (+7)
-- ✅ **JWT токены** - безопасная аутентификация
-- ✅ **Автоматическое создание пользователей**
-- ✅ **Swagger документация** - интерактивная API документация
-- ✅ **Валидация номеров** - проверка формата номеров
-- ✅ **Кэширование** - оптимизация производительности
+---
 
-## Технологии
+### Назначение документа
 
-- **Django 5.2.6** - веб-фреймворк
-- **Django REST Framework** - API фреймворк
-- **JWT** - аутентификация
-- **SMSC.ru** - SMS сервис
-- **Swagger/OpenAPI** - документация API
-- **SQLite** - база данных (по умолчанию)
+Этот документ описывает, что именно должно быть реализовано в приложении AutoHandy. Документ предназначен для разработчика и фиксирует структуру продукта, логику сценариев, обязательные функции, группы и подгруппы услуг, платежную модель, уведомления, emergency-логику и архитектуру двух приложений.
 
-## Установка
+---
 
-### 1. Клонирование репозитория
-```bash
-git clone <repository-url>
-cd AutoHandy
-```
+## 1. Общая концепция продукта
 
-### 2. Создание виртуального окружения
-```bash
-python -m venv env
-# Windows
-env\Scripts\activate
-# Linux/Mac
-source env/bin/activate
-```
+AutoHandy — это marketplace выездных автоуслуг по модели, близкой к TaskRabbit/Uber, но в автомобильной нише. Клиенту не нужно обзванивать сервисы: он открывает приложение, находит услугу, создаёт заказ, оплачивает его внутри платформы и получает помощь на месте.
 
-### 3. Установка зависимостей
-```bash
-pip install -r requirements.txt
-```
+В системе есть два типа пользователей:
 
-### 4. Настройка переменных окружения
-Создайте файл `.env` в корне проекта:
-```env
-DEBUG=True
-SECRET_KEY=your-secret-key
-SMSC_LOGIN=your-smsc-login
-SMSC_PASSWORD=your-smsc-password
-```
+- **Customer App** — приложение для клиента, который ищет услугу.
+- **Provider App** — приложение для мастера / сервис-провайдера, который принимает и выполняет заказы.
 
-### 5. Применение миграций
-```bash
-python manage.py migrate
-```
+**Важно:** приложений два, но база данных одна. Все пользователи, заказы, платежи, отзывы и проверки хранятся централизованно.
 
-### 6. Создание суперпользователя
-```bash
-python manage.py createsuperuser
-```
+---
 
-### 7. Запуск сервера
-```bash
-python manage.py runserver
-```
+## 2. Архитектура
 
-## API Endpoints
+| Компонент | Технология |
+|-----------|------------|
+| Frontend | Flutter |
+| Backend | Firebase |
+| Платежи | Stripe Connect |
+| Push-уведомления | Firebase Cloud Messaging |
+| Карта и геолокация | Google Maps / Flutter map integration |
 
-### 1. Login (отправка SMS кода)
-**POST** `/api/auth/login/`
+---
 
-Отправляет 4-значный SMS код на номер телефона.
+## 3. Обязательная платежная модель
 
-**Request:**
-```json
-{
-    "phone_number": "7914180518"
-}
-```
+Stripe Connect должен быть подключён сразу в первом релизе. Это обязательное требование. Без него платформа теряет комиссию и контроль над заказами.
 
-**Response:**
-```json
-{
-    "success": true,
-    "message": "SMS код отправлен",
-    "phone": "7914180518",
-    "user_exists": false
-}
-```
+**Базовая логика платежа:**
 
-### 2. Check SMS Code (проверка SMS кода)
-**POST** `/api/auth/check-sms-code/`
+| Шаг | Описание |
+|-----|----------|
+| 1 | Клиент создаёт заказ и оплачивает его внутри приложения. |
+| 2 | Stripe Connect принимает оплату. |
+| 3 | Платформа автоматически удерживает комиссию (например 10–15%). |
+| 4 | Оставшаяся сумма перечисляется мастеру. |
+| 5 | В системе сохраняются статус оплаты, комиссия платформы и сумма выплаты мастеру. |
 
-Проверяет SMS код и выдает JWT токен.
+**Пример:** заказ на 200 USD → платформа удерживает 15% (= 30 USD) → мастеру перечисляется 170 USD.
 
-**Request:**
-```json
-{
-    "phone_number": "7914180518",
-    "sms_code": "1234"
-}
-```
-
-**Response:**
-```json
-{
-    "success": true,
-    "message": "Успешный вход",
-    "user": {
-        "id": 1,
-        "phone_number": "7914180518",
-        "first_name": "User_RU",
-        "last_name": "RU_914180518",
-        "email": "7914180518@example.com",
-        "is_verified": true,
-        "created_at": "2024-01-01T12:00:00Z"
-    },
-    "user_created": true,
-    "tokens": {
-        "access": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
-        "refresh": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..."
-    }
-}
-```
-
-## Поддерживаемые форматы номеров
-
-### Узбекские номера:
-- `998XXXXXXXXX` (12 цифр)
-- `+998XXXXXXXXX` (12 цифр)
-
-### Российские номера:
-- `8XXXXXXXXXX` → `7XXXXXXXXXX` (11 цифр)
-- `+7XXXXXXXXXX` → `7XXXXXXXXXX` (11 цифр)
-- `7XXXXXXXXXX` (11 цифр)
-
-## Swagger документация
-
-После запуска сервера документация доступна по адресу:
-- **Swagger UI**: http://127.0.0.1:8000/swagger/
-- **ReDoc**: http://127.0.0.1:8000/redoc/
-
-## Production Setup (Server Configuration)
-
-### ⚠️ ВАЖНО: Cache Configuration для Production
-
-**Проблема:** Localda код работает, но на сервере SMS код не находится.
-
-**Причина:** Django работает с несколькими workers (Gunicorn), и `LocMemCache` не делится между процессами.
-
-**Решение:**
-
-✅ **AUTO:** Production muhitida (DEBUG=False) DatabaseCache avtomatik ishlaydi! Hech qanday sozlash kerak emas.
-
-Yoki manual qilish:
-
-1. **Database Cache (Простой вариант):**
-```bash
-# В .env файле на сервере:
-USE_DB_CACHE=True
-
-# Создать cache table:
-python manage.py createcachetable
-
-# Перезапустить сервер:
-sudo systemctl restart gunicorn
-```
-
-2. **Redis Cache (Рекомендуется для high load):**
-```bash
-# Установить Redis:
-sudo apt install redis-server
-
-# В .env файле:
-USE_REDIS_CACHE=True
-REDIS_URL=redis://127.0.0.1:6379/1
-
-# Установить пакеты:
-pip install -r requirements.txt
-
-# Перезапустить сервер:
-sudo systemctl restart gunicorn
-```
-
-Подробности в файле `SERVERDA_NIMA_QILISH_KERAK.md`
-
-## Настройка SMS сервиса
-
-### SMSC.ru
-1. Зарегистрируйтесь на https://smsc.ru
-2. Получите API ID и пароль
-3. Добавьте в настройки:
-```python
-SMSC_LOGIN = 'your-login'
-SMSC_PASSWORD = 'your-password'
-```
-
-## Структура проекта
-
-```
-AutoHandy/
-├── apps/
-│   └── accounts/          # Приложение аутентификации
-│       ├── models.py      # Модели пользователей
-│       ├── views.py       # API представления
-│       ├── serializers.py # Сериализаторы
-│       ├── services.py    # Бизнес-логика
-│       └── urls.py        # URL маршруты
-├── config/                # Настройки Django
-│   ├── settings.py        # Основные настройки
-│   ├── urls.py           # Главные URL
-│   └── wsgi.py           # WSGI конфигурация
-├── requirements.txt       # Зависимости
-├── manage.py             # Управление Django
-└── README.md             # Документация
-```
-
-## Тестирование
-
-### Тест с curl
-```bash
-# Отправка SMS кода
-curl -X POST http://127.0.0.1:8000/api/auth/login/ \
-  -H "Content-Type: application/json" \
-  -d '{"phone_number": "+998914180518"}'
-
-# Проверка SMS кода
-curl -X POST http://127.0.0.1:8000/api/auth/check-sms-code/ \
-  -H "Content-Type: application/json" \
-  -d '{"phone_number": "+998914180518", "sms_code": "1234"}'
-```
-
-## Разработка
-
-### Запуск в режиме разработки
-```bash
-python manage.py runserver --settings=config.settings
-```
-
-### Создание миграций
-```bash
-python manage.py makemigrations
-python manage.py migrate
-```
-
-### Сбор статических файлов
-```bash
-python manage.py collectstatic
-```
-
-## Лицензия
-
-Этот проект распространяется под лицензией MIT.
-
-## Автор
-
-Создано для проекта AutoHandy.
-
-## Поддержка
-
-Если у вас есть вопросы или проблемы, создайте issue в репозитории.
+**Важный момент:** в MVP нельзя делать оплату мимо платформы. Основная логика продукта строится вокруг платежей внутри системы.
