@@ -6,7 +6,7 @@
 
 - **Тип продукта:** Marketplace мобильных автоуслуг  
 - **Архитектура:** 2 приложения (Customer + Provider) и 1 общая база данных  
-- **Backend:** Firebase  
+- **Backend:** DRF and FastAPI  
 - **Платежи:** Stripe Connect обязателен с первого релиза  
 - **Регион запуска:** Sacramento + Bay Area, California  
 
