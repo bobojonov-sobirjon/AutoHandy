@@ -36,7 +36,7 @@ AutoHandy — это marketplace выездных автоуслуг по мод
 | Компонент | Технология |
 |-----------|------------|
 | Frontend | Flutter |
-| Backend | Firebase |
+| Backend | DRF and FastAPI |
 | Платежи | Stripe Connect |
 | Push-уведомления | Firebase Cloud Messaging |
 | Карта и геолокация | Google Maps / Flutter map integration |
