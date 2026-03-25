@@ -2,6 +2,7 @@ from django.contrib.auth.models import AbstractUser
 from django.db import models
 from decimal import Decimal
 import random
+import uuid
 
 
 class CustomUser(AbstractUser):
@@ -10,8 +11,10 @@ class CustomUser(AbstractUser):
     """
     email = models.EmailField(
         unique=True,
+        blank=True,
+        null=True,
         verbose_name="Email",
-        help_text="Required. Enter a valid email address."
+        help_text="Optional until set via profile. Phone-only users may have no email.",
     )
     phone_number = models.CharField(
         max_length=15,
@@ -81,6 +84,11 @@ class CustomUser(AbstractUser):
         verbose_name="Email verified",
         help_text="Indicates whether this user's email is verified."
     )
+    is_email_verified = models.BooleanField(
+        default=False,
+        verbose_name="Email verified (profile flow)",
+        help_text="Set true after the user confirms email via verification link."
+    )
     created_at = models.DateTimeField(
         auto_now_add=True,
         verbose_name="Created at"
@@ -100,7 +108,11 @@ class CustomUser(AbstractUser):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"{self.email} ({self.get_full_name()})"
+        """Prefer real name (e.g. Jazzmin navbar); else email / phone / id."""
+        name = f"{self.first_name} {self.last_name}".strip()
+        if name:
+            return name
+        return self.email or self.phone_number or f"id={self.pk}"
 
     def _generate_unique_private_id(self):
         """Generate unique 6-digit private_id"""
@@ -120,13 +132,21 @@ class CustomUser(AbstractUser):
         Return the first_name plus the last_name, with a space in between.
         """
         full_name = f"{self.first_name} {self.last_name}".strip()
-        return full_name if full_name else self.email
+        if full_name:
+            return full_name
+        if self.email:
+            return self.email
+        return self.phone_number or ''
 
     def get_short_name(self):
         """
         Return the short name for the user.
         """
-        return self.first_name if self.first_name else self.email
+        if self.first_name:
+            return self.first_name
+        if self.email:
+            return self.email
+        return self.phone_number or ''
 
     def get_role_name(self):
         """
@@ -286,6 +306,39 @@ class UserSMSCode(models.Model):
         self.save(update_fields=['is_used', 'used_at'])
 
 
+class EmailVerificationToken(models.Model):
+    """One-time token sent by email to verify address (profile registration flow)."""
+    user = models.ForeignKey(
+        'CustomUser',
+        on_delete=models.CASCADE,
+        related_name='email_verification_tokens',
+        verbose_name="User",
+    )
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False, db_index=True)
+    email = models.EmailField(
+        verbose_name="Email to verify",
+        help_text="Snapshot of email this token was issued for.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = "Email verification token"
+        verbose_name_plural = "Email verification tokens"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['token', 'is_used']),
+        ]
+
+    def __str__(self):
+        return f"Email verify {self.email} ({self.token})"
+
+    def is_expired(self):
+        from django.utils import timezone
+        return timezone.now() > self.expires_at
+
+
 class MasterCustomUser(CustomUser):
     """
     Proxy model for masters
@@ -302,8 +355,8 @@ class CarOwner(CustomUser):
     """
     class Meta:
         proxy = True
-        verbose_name = "Car owner"
-        verbose_name_plural = "01. Car owners"
+        verbose_name = "Driver"
+        verbose_name_plural = "01. Driver"
 
 
 class Owner(CustomUser):
@@ -349,7 +402,7 @@ class FAQ(models.Model):
 
     class Meta:
         verbose_name = "FAQ"
-        verbose_name_plural = "04. FAQ"
+        verbose_name_plural = "03. FAQ"
         ordering = ['order', '-created_at']
 
     def __str__(self):

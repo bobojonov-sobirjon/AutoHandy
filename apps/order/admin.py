@@ -180,8 +180,8 @@ class OrderServiceAdmin(admin.ModelAdmin):
     list_display = ['id', 'order_link', 'service_name', 'service_price', 'created_at']
     list_filter = ['created_at', 'order__status']
     search_fields = [
-        'order__id', 'master_service_item__name',
-        'order__user__first_name', 'order__user__last_name'
+        'order__id', 'master_service_item__category__name',
+        'order__user__first_name', 'order__user__last_name',
     ]
     readonly_fields = ['id', 'created_at']
     list_per_page = 25
@@ -193,22 +193,19 @@ class OrderServiceAdmin(admin.ModelAdmin):
     order_link.short_description = 'Order'
     order_link.admin_order_field = 'order__id'
     def service_name(self, obj):
-        return obj.master_service_item.name if obj.master_service_item else '-'
+        if obj.master_service_item and obj.master_service_item.category_id:
+            return obj.master_service_item.category.name
+        return '-'
     service_name.short_description = 'Service'
     def service_price(self, obj):
         if obj.master_service_item:
-            price_from = obj.master_service_item.price_from
-            price_to = obj.master_service_item.price_to
-            if price_from and price_to:
-                return f"{price_from} - {price_to}"
-            elif price_from:
-                return f"from {price_from}"
+            return str(obj.master_service_item.price)
         return '-'
     service_price.short_description = 'Price'
     def get_queryset(self, request):
         return super().get_queryset(request).select_related(
             'order', 'order__user', 'master_service_item',
-            'master_service_item__master_service'
+            'master_service_item__master_service', 'master_service_item__category',
         )
 
 @admin.register(Review)

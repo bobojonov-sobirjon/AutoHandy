@@ -1,3 +1,4 @@
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -49,28 +50,6 @@ class Master(models.Model):
     phone = models.CharField(max_length=20, default='', verbose_name='Phone')
     working_time = models.CharField(max_length=100, default='', verbose_name='Working hours')
 
-    # Bank details
-    card_number = models.CharField(max_length=19, blank=True, verbose_name='Card number')
-    card_expiry_month = models.PositiveIntegerField(null=True, blank=True, verbose_name='Card expiry month')
-    card_expiry_year = models.PositiveIntegerField(null=True, blank=True, verbose_name='Card expiry year')
-    card_cvv = models.CharField(max_length=4, blank=True, verbose_name='CVV/CVC')
-
-    # Master balance
-    balance = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0.00,
-        verbose_name='Master balance'
-    )
-
-    # Reserved amount
-    reserved_amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0.00,
-        verbose_name='Reserved amount'
-    )
-
     description = models.TextField(blank=True, verbose_name='Description', null=True)
 
     # Timestamps
@@ -100,20 +79,6 @@ class Master(models.Model):
     def completion_rate(self):
         """Order completion rate percentage"""
         return 0  # Field removed, always return 0
-
-    def can_take_order(self, amount=200):
-        """Whether master can take order (reserve check)"""
-        return self.reserved_amount >= amount
-
-    def reserve_amount(self, amount):
-        """Reserve amount"""
-        self.reserved_amount += amount
-        self.save(update_fields=['reserved_amount'])
-
-    def release_amount(self, amount):
-        """Release reserved amount"""
-        self.reserved_amount = max(0, self.reserved_amount - amount)
-        self.save(update_fields=['reserved_amount'])
 
 
 class MasterImage(models.Model):
@@ -158,31 +123,28 @@ class MasterService(models.Model):
 
 
 class MasterServiceItems(models.Model):
-    """Master service item"""
+    """
+    One skill line per by_master catalog category: master's fixed price.
+    """
+
     master_service = models.ForeignKey(
         MasterService,
         on_delete=models.CASCADE,
         related_name='master_service_items',
-        verbose_name='Master service'
-    )
-    name = models.CharField(max_length=200, default='', verbose_name='Service name')
-    price_from = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0.00,
-        verbose_name='Price from'
-    )
-    price_to = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0.00,
-        verbose_name='Price to'
+        verbose_name='Master service',
     )
     category = models.ForeignKey(
         Category,
         on_delete=models.CASCADE,
         related_name='master_service_items',
-        verbose_name='Category'
+        verbose_name='Service (subcategory)',
+    )
+    price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        verbose_name='Price',
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Added at')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
@@ -191,32 +153,83 @@ class MasterServiceItems(models.Model):
         verbose_name = 'Master service item'
         verbose_name_plural = 'Master service items'
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['master_service', 'category'],
+                name='uniq_masterserviceitem_service_category',
+            ),
+        ]
 
     def __str__(self):
-        return f"{self.master_service} - {self.name}: {self.price_from}-{self.price_to}"
+        return f'{self.category.name} – {self.price}'
 
 
-class MasterEmployee(models.Model):
-    """Workshop employees"""
+class MasterScheduleDay(models.Model):
+    """Working hours for a specific calendar day (min. 14 days ahead coverage expected by app)."""
+
     master = models.ForeignKey(
         Master,
         on_delete=models.CASCADE,
-        related_name='employees',
-        verbose_name='Master'
+        related_name='schedule_days',
+        verbose_name='Master',
     )
-    employee = models.ForeignKey(
-        User,
-        on_delete=models.CASCADE,
-        related_name='master_employments',
-        verbose_name='Employee'
-    )
-    added_at = models.DateTimeField(auto_now_add=True, verbose_name='Added at')
+    date = models.DateField(verbose_name='Date', db_index=True)
+    start_time = models.TimeField(verbose_name='Start time')
+    end_time = models.TimeField(verbose_name='End time')
 
     class Meta:
-        verbose_name = 'Workshop employee'
-        verbose_name_plural = 'Workshop employees'
-        unique_together = ['master', 'employee']
-        ordering = ['added_at']
+        verbose_name = 'Master schedule day'
+        verbose_name_plural = 'Master schedule days'
+        ordering = ['date', 'start_time']
+        constraints = [
+            models.UniqueConstraint(fields=['master', 'date'], name='uniq_master_schedule_date'),
+        ]
+
+    def clean(self):
+        if self.start_time and self.end_time and self.end_time <= self.start_time:
+            raise ValidationError('end_time must be after start_time.')
 
     def __str__(self):
-        return f"{self.master} - {self.employee.email}"
+        return f'{self.master_id} {self.date} {self.start_time}-{self.end_time}'
+
+
+class MasterBusySlot(models.Model):
+    """
+    Occupied interval on a day: linked to a scheduled order or a manual master block.
+    """
+
+    master = models.ForeignKey(
+        Master,
+        on_delete=models.CASCADE,
+        related_name='busy_slots',
+        verbose_name='Master',
+    )
+    date = models.DateField(verbose_name='Date', db_index=True)
+    start_time = models.TimeField(verbose_name='Start time')
+    end_time = models.TimeField(verbose_name='End time')
+    order = models.OneToOneField(
+        'order.Order',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='master_busy_slot',
+        verbose_name='Order',
+    )
+    reason = models.CharField(
+        max_length=255,
+        blank=True,
+        verbose_name='Note',
+        help_text='Optional note for manual blocks',
+    )
+
+    class Meta:
+        verbose_name = 'Master busy slot'
+        verbose_name_plural = 'Master busy slots'
+        ordering = ['date', 'start_time']
+
+    def clean(self):
+        if self.start_time and self.end_time and self.end_time <= self.start_time:
+            raise ValidationError('end_time must be after start_time.')
+
+    def __str__(self):
+        return f'{self.master_id} {self.date} {self.start_time}-{self.end_time}'

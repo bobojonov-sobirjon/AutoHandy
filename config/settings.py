@@ -41,6 +41,7 @@ LOCAL_APPS = [
 INSTALLED_APPS = [
     'daphne',  # Must be first for WebSocket support
     'django.contrib.sites',
+    'jazzmin',  # Admin theme — must be before django.contrib.admin
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -270,6 +271,66 @@ AUTH_USER_MODEL = 'accounts.CustomUser'
 
 SITE_ID = 1
 
+# django-jazzmin — https://django-jazzmin.readthedocs.io/
+JAZZMIN_SETTINGS = {
+    'site_title': 'AutoHandy Admin',
+    'site_header': 'AutoHandy',
+    'site_brand': 'AutoHandy',
+    'welcome_sign': 'AutoHandy administration',
+    'copyright': 'AutoHandy',
+    'search_model': ['accounts.CustomUser', 'auth.Group'],
+    'user_avatar': None,
+    'topmenu_links': [
+        {'name': 'Admin home', 'url': 'admin:index', 'permissions': ['auth.view_user']},
+        {'name': 'API docs', 'url': '/docs/', 'new_window': True},
+    ],
+    'show_sidebar': True,
+    'navigation_expanded': False,
+    'hide_apps': [],
+    'hide_models': [],
+    'icons': {
+        'auth': 'fas fa-users-cog',
+        'auth.user': 'fas fa-user',
+        'auth.Group': 'fas fa-users',
+        'accounts': 'fas fa-user-circle',
+        'accounts.customuser': 'fas fa-user',
+        'sites': 'fas fa-globe',
+    },
+    'default_icon_parents': 'fas fa-folder',
+    'default_icon_children': 'fas fa-circle',
+    'related_modal_active': False,
+    'custom_css': None,
+    'custom_js': None,
+    'use_google_fonts_cdn': True,
+    'show_ui_builder': False,
+    'changeform_format': 'horizontal_tabs',
+    'changeform_format_overrides': {
+        'auth.user': 'collapsible',
+        'auth.group': 'vertical_tabs',
+    },
+}
+
+JAZZMIN_UI_TWEAKS = {
+    'navbar_small_text': False,
+    'footer_small_text': False,
+    'body_small_text': False,
+    'brand_small_text': False,
+    'brand_colour': 'navbar-dark',
+    'accent': 'accent-teal',
+    'navbar': 'navbar-dark',
+    'navbar_fixed': False,
+    'layout_boxed': False,
+    'footer_fixed': False,
+    'sidebar_fixed': True,
+    'sidebar': 'sidebar-dark-primary',
+    'theme': 'default',
+    'dark_mode_theme': None,
+    'button_classes': {
+        'primary': 'btn-primary',
+        'secondary': 'btn-secondary',
+    },
+}
+
 # Email Configuration
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'  # Change to your SMTP server
@@ -278,6 +339,10 @@ EMAIL_USE_TLS = True
 EMAIL_HOST_USER = 'sobirbobojonov2000@gmail.com'
 EMAIL_HOST_PASSWORD = 'harntaefuxuvlqqw'
 DEFAULT_FROM_EMAIL = 'sobirbobojonov2000@gmail.com'
+
+# Public URL prefix for email verification links (no trailing slash). Example: https://app.yourdomain.com
+EMAIL_VERIFICATION_PUBLIC_BASE = os.getenv('EMAIL_VERIFICATION_PUBLIC_BASE', 'https://autohandy.app')
+EMAIL_VERIFICATION_TOKEN_HOURS = int(os.getenv('EMAIL_VERIFICATION_TOKEN_HOURS', '48'))
 
 # Twilio SMS (primary)
 TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')

@@ -21,11 +21,17 @@ class CategorySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Category
-        fields = ['id', 'name', 'icon', 'type_category', 'service_type', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'icon', 'type_category', 'parent', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
         extra_kwargs = {
-            'icon': {'validators': [validate_icon_file]}
+            'icon': {'validators': [validate_icon_file]},
+            'parent': {'allow_null': True, 'required': False},
         }
+
+    def validate_parent(self, value):
+        if value and getattr(self.instance, 'pk', None) and value.pk == self.instance.pk:
+            raise serializers.ValidationError('A category cannot be its own parent.')
+        return value
 
     def to_representation(self, instance):
         """Override to return full URL for icon field"""

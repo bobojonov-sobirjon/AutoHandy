@@ -1,22 +1,42 @@
+from datetime import date, timedelta
+from decimal import Decimal
+
+from drf_spectacular.utils import OpenApiExample, extend_schema_serializer
 from rest_framework import serializers
-from .models import Master, MasterService, MasterImage, MasterServiceItems, MasterEmployee
+from .models import (
+    Master,
+    MasterBusySlot,
+    MasterImage,
+    MasterScheduleDay,
+    MasterService,
+    MasterServiceItems,
+)
 from apps.categories.models import Category
+from apps.master.validation import validate_skill_category
 from apps.order.models import Rating
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
 
-# Import UserDetailsSerializer for master employees
 from apps.accounts.serializers import UserDetailsSerializer
 
 
 class MasterImageSerializer(serializers.ModelSerializer):
-    """Master images serializer"""
-    
+    """Master images — `image` maydoni har doim to‘liq (absolute) URL."""
+
     class Meta:
         model = MasterImage
         fields = ['id', 'image', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        if instance.image and request:
+            data['image'] = request.build_absolute_uri(instance.image.url)
+        elif instance.image:
+            data['image'] = instance.image.url
+        return data
 
 
 class MasterSerializer(serializers.ModelSerializer):
@@ -28,16 +48,17 @@ class MasterSerializer(serializers.ModelSerializer):
     rating_data = serializers.SerializerMethodField()
     masters = serializers.SerializerMethodField()
     distance = serializers.SerializerMethodField()
-    
+    skills_profile = serializers.SerializerMethodField()
+    schedule_profile = serializers.SerializerMethodField()
+
     class Meta:
         model = Master
         fields = [
-            'id', 'user_info', 'name', 'city', 'address', 
+            'id', 'user_info', 'name', 'city', 'address',
             'latitude', 'longitude', 'phone', 'working_time', 'services',
-            'card_number', 'card_expiry_month', 'card_expiry_year', 
-            'card_cvv', 'balance', 'reserved_amount', 'description', 'images', 
-            'category_data', 'rating_data', 'masters', 'distance', 'created_at', 'updated_at', 
-            'last_activity'
+            'description', 'images',
+            'category_data', 'rating_data', 'masters', 'distance', 'created_at', 'updated_at',
+            'last_activity', 'skills_profile', 'schedule_profile',
         ]
         read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'last_activity', 'distance']
     
@@ -110,31 +131,55 @@ class MasterSerializer(serializers.ModelSerializer):
         }
     
     def get_masters(self, obj):
-        """Get all workshop employees (owner first, then added)"""
+        """Workshop owner (MasterEmployee removed)."""
         request = self.context.get('request')
-        masters_list = []
-        
-        # Add owner first (who created the workshop)
         owner_data = UserDetailsSerializer(obj.user, context={'request': request}).data
         owner_data['is_owner'] = True
         owner_data['added_at'] = obj.created_at
-        masters_list.append(owner_data)
-        
-        # Then add all employees
-        employees = MasterEmployee.objects.filter(master=obj).select_related('employee')
-        for emp in employees:
-            employee_data = UserDetailsSerializer(emp.employee, context={'request': request}).data
-            employee_data['is_owner'] = False
-            employee_data['added_at'] = emp.added_at
-            masters_list.append(employee_data)
-        
-        return masters_list
+        return [owner_data]
     
     def get_distance(self, obj):
         """Get distance from user (if computed)"""
         # If distance was set in view, return it
         return getattr(obj, 'distance', None)
-    
+
+    def get_skills_profile(self, obj):
+        items = MasterServiceItems.objects.filter(master_service__master=obj)
+        count = items.count()
+        parent_ids = set(items.values_list('category__parent_id', flat=True))
+        parent_groups = len([p for p in parent_ids if p is not None])
+        recommendation = None
+        if count < 3:
+            recommendation = 'Add more skills to increase your earnings.'
+        return {
+            'skill_count': count,
+            'parent_group_count': parent_groups,
+            'recommendation_message': recommendation,
+        }
+
+    def get_schedule_profile(self, obj):
+        today = date.today()
+        horizon_end = today + timedelta(days=13)
+        qs = MasterScheduleDay.objects.filter(master=obj, date__gte=today, date__lte=horizon_end)
+        scheduled_dates = set(qs.values_list('date', flat=True))
+        required_dates = {today + timedelta(days=i) for i in range(14)}
+        missing = required_dates - scheduled_dates
+        last_any = (
+            MasterScheduleDay.objects.filter(master=obj, date__gte=today)
+            .order_by('-date')
+            .values_list('date', flat=True)
+            .first()
+        )
+        needs = bool(missing)
+        return {
+            'min_days_ahead_required': 14,
+            'scheduled_days_in_next_14': len(scheduled_dates),
+            'missing_days_in_next_14': len(missing),
+            'last_scheduled_date': last_any.isoformat() if last_any else None,
+            'needs_extension': needs,
+            'reminder_message': 'Update your schedule to receive more orders.' if needs else None,
+        }
+
     def validate_latitude(self, value):
         """Validate latitude"""
         if value is not None:
@@ -155,15 +200,41 @@ class MasterSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Namuna (barcha maydonlar)',
+            summary='Standart namuna',
+            description='latitude/longitude — number (Swagger `number` turi). category — integer ID lar ro‘yxati.',
+            value={
+                'name': 'СТО AutoHandy',
+                'city': 'Toshkent',
+                'address': "Amir Temur ko'chasi, 15",
+                'latitude': 41.3111,
+                'longitude': 69.2797,
+                'phone': '+998901234567',
+                'working_time': 'Dush-Juma 09:00-18:00, Shan 10:00-15:00',
+                'description': "To'liq avtoservis, diagnostika va ta'mirlash.",
+                'category': [1, 2, 3],
+            },
+            request_only=True,
+        ),
+    ],
+)
 class MasterCreateSerializer(serializers.ModelSerializer):
-    """Master create serializer"""
-    services = serializers.ListField(
-        child=serializers.DictField(),
+    """Master create (no skills here — use POST /api/master/service-items/)."""
+
+    latitude = serializers.FloatField(
         required=False,
-        allow_empty=True,
-        write_only=True,
-        help_text="List of master services. Example: [{'name': 'Oil change', 'price_from': 1000, 'price_to': 2000, 'category': 1}]"
+        allow_null=True,
+        help_text='Широта -90…90 (JSON: number; form: matn ham qabul qilinadi).',
     )
+    longitude = serializers.FloatField(
+        required=False,
+        allow_null=True,
+        help_text='Долгота -180…180 (JSON: number).',
+    )
+
     category = serializers.ListField(
         child=serializers.IntegerField(),
         required=False,
@@ -171,39 +242,43 @@ class MasterCreateSerializer(serializers.ModelSerializer):
         write_only=True,
         help_text="List of category IDs [1, 2, 3, ...]. Categories must be type 'by_master'"
     )
-    
+    images = serializers.ListField(
+        child=serializers.ImageField(required=False),
+        write_only=True,
+        required=False,
+        allow_empty=True,
+        help_text="multipart/form-data: repeat field name 'images' for each file (Swagger shows as array of files).",
+    )
+
     class Meta:
         model = Master
         fields = [
             'name', 'city', 'address', 'latitude', 'longitude', 'phone', 'working_time',
-            'description', 'services', 'category', 'card_number', 
-            'card_expiry_month', 'card_expiry_year', 'card_cvv'
+            'description', 'category', 'images',
         ]
         extra_kwargs = {
             'name': {'required': False, 'allow_blank': True},
             'city': {'required': False, 'allow_blank': True},
             'address': {'required': False, 'allow_blank': True},
-            'latitude': {'required': False},
-            'longitude': {'required': False},
             'phone': {'required': False, 'allow_blank': True},
             'working_time': {'required': False, 'allow_blank': True},
             'description': {'required': False, 'allow_blank': True, 'allow_null': True},
-            'card_number': {'required': False, 'allow_blank': True},
-            'card_expiry_month': {'required': False},
-            'card_expiry_year': {'required': False},
-            'card_cvv': {'required': False, 'allow_blank': True},
         }
     
     def to_internal_value(self, data):
         """Convert data from multipart/form-data"""
         import json
-        from decimal import Decimal, InvalidOperation
         from django.http import QueryDict
-        
+
         # Создаем обычный dict из данных для возможности модификации
         if isinstance(data, QueryDict):
             data_dict = {}
             for key in data.keys():
+                if key == 'images':
+                    files = [f for f in data.getlist(key) if f]
+                    if files:
+                        data_dict[key] = files
+                    continue
                 value = data.get(key)
                 if value is not None:
                     data_dict[key] = value
@@ -212,56 +287,23 @@ class MasterCreateSerializer(serializers.ModelSerializer):
             data = data.copy()
         else:
             data = dict(data)
-        
-        # Обрабатываем latitude и longitude (могут быть строкой с запятой или точкой)
-        if 'latitude' in data:
-            lat_value = data.get('latitude')
-            if isinstance(lat_value, str):
+
+        def _coerce_float_key(d, key):
+            if key not in d:
+                return
+            v = d.get(key)
+            if isinstance(v, str):
+                s = v.replace(',', '.').strip()
+                if not s:
+                    return
                 try:
-                    # Заменяем запятую на точку для float
-                    lat_str = lat_value.replace(',', '.')
-                    # Конвертируем в Decimal для точности
-                    data['latitude'] = str(Decimal(lat_str))
-                except (ValueError, AttributeError, InvalidOperation):
-                    # Если конвертация не удалась, оставляем как есть для стандартной валидации
+                    d[key] = float(s)
+                except ValueError:
                     pass
-        
-        if 'longitude' in data:
-            lon_value = data.get('longitude')
-            if isinstance(lon_value, str):
-                try:
-                    # Заменяем запятую на точку для float
-                    lon_str = lon_value.replace(',', '.')
-                    # Конвертируем в Decimal для точности
-                    data['longitude'] = str(Decimal(lon_str))
-                except (ValueError, AttributeError, InvalidOperation):
-                    # Если конвертация не удалась, оставляем как есть для стандартной валидации
-                    pass
-        
-        # Обрабатываем services (может быть JSON строкой или списком)
-        if 'services' in data:
-            services_value = data.get('services')
-            if isinstance(services_value, str):
-                # Удаляем пробелы и проверяем, не пустая ли строка
-                services_value = services_value.strip()
-                if services_value:
-                    try:
-                        # Пробуем распарсить как JSON
-                        parsed = json.loads(services_value)
-                        if isinstance(parsed, list):
-                            data['services'] = parsed
-                        else:
-                            # Если не список, делаем пустым списком
-                            data['services'] = []
-                    except (json.JSONDecodeError, TypeError):
-                        # Если не JSON, делаем пустым списком
-                        data['services'] = []
-                else:
-                    data['services'] = []
-            elif not isinstance(services_value, list):
-                # Если это не список и не строка, делаем пустым списком
-                data['services'] = []
-        
+
+        _coerce_float_key(data, 'latitude')
+        _coerce_float_key(data, 'longitude')
+
         # Обрабатываем category (может быть строкой или JSON строкой)
         if 'category' in data:
             category_value = data.get('category')
@@ -294,57 +336,22 @@ class MasterCreateSerializer(serializers.ModelSerializer):
         return super().to_internal_value(data)
     
     def validate_latitude(self, value):
-        """Validate latitude"""
-        if value is not None:
-            if not (-90 <= value <= 90):
-                raise serializers.ValidationError("Latitude must be between -90 and 90")
-        return value
-    
+        """Validate latitude; store as Decimal for the model."""
+        if value is None:
+            return None
+        f = float(value)
+        if not (-90 <= f <= 90):
+            raise serializers.ValidationError('Latitude must be between -90 and 90')
+        return Decimal(str(f))
+
     def validate_longitude(self, value):
-        """Validate longitude"""
-        if value is not None:
-            if not (-180 <= value <= 180):
-                raise serializers.ValidationError("Longitude must be between -180 and 180")
-        return value
-    
-    def validate_services(self, value):
-        """Validate services"""
-        if not isinstance(value, list):
-            raise serializers.ValidationError("Services must be a list")
-        
-        # Фильтруем пустые словари и None значения
-        value = [s for s in value if s and isinstance(s, dict) and s]
-        
-        # Проверяем, что каждый элемент - это объект с name, price_from, price_to и category
-        for idx, service in enumerate(value):
-            if not isinstance(service, dict):
-                raise serializers.ValidationError({
-                    str(idx): "Each service must be an object"
-                })
-            
-            # Проверяем наличие обязательных полей
-            required_fields = ['name', 'price_from', 'price_to', 'category']
-            missing_fields = [field for field in required_fields if field not in service or service[field] is None]
-            
-            if missing_fields:
-                raise serializers.ValidationError({
-                    str(idx): f"Service must contain fields: {', '.join(missing_fields)}"
-                })
-            
-            # Проверяем, что категория существует
-            try:
-                Category.objects.get(id=service['category'])
-            except Category.DoesNotExist:
-                raise serializers.ValidationError({
-                    str(idx): f"Category with ID {service['category']} not found"
-                })
-            except (ValueError, TypeError):
-                raise serializers.ValidationError({
-                    str(idx): f"Category must be a number, got: {type(service['category']).__name__}"
-                })
-        
-        return value
-    
+        if value is None:
+            return None
+        f = float(value)
+        if not (-180 <= f <= 180):
+            raise serializers.ValidationError('Longitude must be between -180 and 180')
+        return Decimal(str(f))
+
     def validate_category(self, value):
         """Validate categories"""
         if not isinstance(value, list):
@@ -361,76 +368,93 @@ class MasterCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         """Create master with automatic user assignment"""
         from django.contrib.auth.models import Group
-        
-        services_data = validated_data.pop('services', [])
+
+        validated_data.pop('images', None)
         category_ids = validated_data.pop('category', [])
         user = self.context['request'].user
         validated_data['user'] = user
-        
+
         master = super().create(validated_data)
-        
-        # Добавляем пользователя в группу Master (если еще не в ней)
+
         master_group, created = Group.objects.get_or_create(name='Master')
         if not user.groups.filter(name='Master').exists():
             user.groups.add(master_group)
-        
-        # Добавляем категории
+
         if category_ids:
             master.category.set(category_ids)
-        
-        # Создаем услуги мастера
-        if services_data:
-            # Создаем один MasterService для всех items
-            master_service = MasterService.objects.create(master=master)
-            
-            # Создаем MasterServiceItems для каждой услуги
-            for service_data in services_data:
-                MasterServiceItems.objects.create(
-                    master_service=master_service,
-                    name=service_data['name'],
-                    price_from=service_data['price_from'],
-                    price_to=service_data['price_to'],
-                    category_id=service_data['category']
-                )
-        
+
         return master
 
 
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Namuna yangilash',
+            summary='PATCH/PUT namunasi',
+            value={
+                'name': 'СТО Yangilangan',
+                'city': 'Toshkent',
+                'address': 'Navoiy ko‘chasi, 10',
+                'latitude': 41.2995,
+                'longitude': 69.2401,
+                'phone': '+998901111111',
+                'working_time': '09:00-21:00',
+                'description': 'Yangilangan profil.',
+            },
+            request_only=True,
+        ),
+    ],
+)
 class MasterUpdateSerializer(serializers.ModelSerializer):
     """Master update serializer (partial update)"""
-    
+
+    latitude = serializers.FloatField(
+        required=False,
+        allow_null=True,
+        help_text='Широта -90…90 (JSON: number).',
+    )
+    longitude = serializers.FloatField(
+        required=False,
+        allow_null=True,
+        help_text='Долгота -180…180 (JSON: number).',
+    )
+
+    images = serializers.ListField(
+        child=serializers.ImageField(required=False),
+        write_only=True,
+        required=False,
+        allow_empty=True,
+        help_text="multipart/form-data: repeat field name 'images' for each new file.",
+    )
+
     class Meta:
         model = Master
         fields = [
-            'name', 'city', 'address', 'latitude', 'longitude', 'phone', 'working_time', 
-            'card_number', 'card_expiry_month', 'card_expiry_year', 
-            'card_cvv', 'description'
+            'name', 'city', 'address', 'latitude', 'longitude', 'phone', 'working_time',
+            'description', 'images',
         ]
         extra_kwargs = {
             'name': {'required': False, 'allow_blank': True},
             'city': {'required': False},
             'address': {'required': False},
-            'latitude': {'required': False},
-            'longitude': {'required': False},
             'phone': {'required': False},
             'working_time': {'required': False},
-            'card_number': {'required': False},
-            'card_expiry_month': {'required': False},
-            'card_expiry_year': {'required': False},
-            'card_cvv': {'required': False},
             'description': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
     
     def to_internal_value(self, data):
         """Convert data from multipart/form-data"""
-        import json
-        from decimal import Decimal, InvalidOperation
         from django.http import QueryDict
         
         # Создаем обычный dict из данных для возможности модификации
         if isinstance(data, QueryDict):
             data_dict = {}
             for key in data.keys():
+                if key == 'images':
+                    files = [f for f in data.getlist(key) if f]
+                    if files:
+                        data_dict[key] = files
+                    continue
                 value = data.get(key)
                 if value is not None:
                     data_dict[key] = value
@@ -439,41 +463,37 @@ class MasterUpdateSerializer(serializers.ModelSerializer):
             data = data.copy()
         else:
             data = dict(data)
-        
-        # Обрабатываем latitude и longitude (могут быть строкой с запятой или точкой)
-        if 'latitude' in data:
-            lat_value = data.get('latitude')
-            if isinstance(lat_value, str):
-                try:
-                    lat_str = lat_value.replace(',', '.')
-                    data['latitude'] = str(Decimal(lat_str))
-                except (ValueError, AttributeError, InvalidOperation):
-                    pass
-        
-        if 'longitude' in data:
-            lon_value = data.get('longitude')
-            if isinstance(lon_value, str):
-                try:
-                    lon_str = lon_value.replace(',', '.')
-                    data['longitude'] = str(Decimal(lon_str))
-                except (ValueError, AttributeError, InvalidOperation):
-                    pass
+
+        for coord in ('latitude', 'longitude'):
+            if coord in data and isinstance(data.get(coord), str):
+                s = data[coord].replace(',', '.').strip()
+                if s:
+                    try:
+                        data[coord] = float(s)
+                    except ValueError:
+                        pass
         
         return super().to_internal_value(data)
     
     def validate_latitude(self, value):
-        """Validate latitude"""
-        if value is not None:
-            if not (-90 <= value <= 90):
-                raise serializers.ValidationError("Latitude must be between -90 and 90")
-        return value
-    
+        if value is None:
+            return None
+        f = float(value)
+        if not (-90 <= f <= 90):
+            raise serializers.ValidationError('Latitude must be between -90 and 90')
+        return Decimal(str(f))
+
     def validate_longitude(self, value):
-        """Validate longitude"""
-        if value is not None:
-            if not (-180 <= value <= 180):
-                raise serializers.ValidationError("Longitude must be between -180 and 180")
-        return value
+        if value is None:
+            return None
+        f = float(value)
+        if not (-180 <= f <= 180):
+            raise serializers.ValidationError('Longitude must be between -180 and 180')
+        return Decimal(str(f))
+
+    def update(self, instance, validated_data):
+        validated_data.pop('images', None)
+        return super().update(instance, validated_data)
 
 
 class AddMasterImagesSerializer(serializers.Serializer):
@@ -525,19 +545,18 @@ class MasterNearbySerializer(serializers.ModelSerializer):
     services_display = serializers.SerializerMethodField()
     distance = serializers.SerializerMethodField()
     images = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Master
         fields = [
-            'id', 'user_name', 'user_phone', 'city', 'address', 
-            'latitude', 'longitude', 'services', 'services_display', 
-            'distance', 'description', 'images'
+            'id', 'user_name', 'user_phone', 'city', 'address',
+            'latitude', 'longitude', 'services_display',
+            'distance', 'description', 'images',
         ]
-    
+
     def get_services_display(self, obj):
-        """Get display names of services"""
-        master_services = MasterService.objects.filter(master=obj)
-        return [service.name for service in master_services]
+        items = MasterServiceItems.objects.filter(master_service__master=obj).select_related('category')
+        return [i.category.name for i in items if i.category_id]
     
     def get_distance(self, obj):
         """Get distance (set in view)"""
@@ -550,231 +569,372 @@ class MasterNearbySerializer(serializers.ModelSerializer):
 
 
 class MasterServiceItemsSerializer(serializers.ModelSerializer):
-    """Master service items serializer"""
-    category_name = serializers.CharField(source='category.name', read_only=True)
-    
+    """Master skill line: by_master category + narx + kategoriya/parent ikonkalari."""
+
+    service_name = serializers.CharField(source='category.name', read_only=True)
+    type_category = serializers.CharField(source='category.type_category', read_only=True)
+    category_icon = serializers.SerializerMethodField()
+    parent_category_id = serializers.IntegerField(source='category.parent_id', read_only=True, allow_null=True)
+    parent_category_name = serializers.SerializerMethodField()
+    parent_category_icon = serializers.SerializerMethodField()
+    price = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        coerce_to_string=False,
+    )
+
     class Meta:
         model = MasterServiceItems
         fields = [
-            'id', 'name', 'price_from', 'price_to', 'category', 'category_name',
-            'created_at', 'updated_at'
+            'id',
+            'master_service',
+            'category',
+            'service_name',
+            'type_category',
+            'category_icon',
+            'parent_category_id',
+            'parent_category_name',
+            'parent_category_icon',
+            'price',
+            'created_at',
+            'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def _abs_media(self, file_field):
+        if not file_field:
+            return None
+        request = self.context.get('request')
+        url = file_field.url
+        if request:
+            return request.build_absolute_uri(url)
+        return url
+
+    def get_category_icon(self, obj):
+        if not obj.category_id:
+            return None
+        return self._abs_media(obj.category.icon)
+
+    def get_parent_category_name(self, obj):
+        if obj.category_id and obj.category.parent_id:
+            return obj.category.parent.name
+        return None
+
+    def get_parent_category_icon(self, obj):
+        if not obj.category_id or not obj.category.parent_id:
+            return None
+        return self._abs_media(obj.category.parent.icon)
+
+    def validate_category(self, value):
+        validate_skill_category(value)
+        return value
+
 
 class MasterServiceSerializer(serializers.ModelSerializer):
-    """Master service serializer"""
+    """Master service container; items grouped by parent; ustaxona rasmlari qo‘shilgan."""
+
+    master = serializers.IntegerField(source='master_id', read_only=True)
     master_service_items = serializers.SerializerMethodField()
+    images = serializers.SerializerMethodField()
     master_items = serializers.ListField(
         child=serializers.DictField(),
         required=False,
         allow_empty=True,
         write_only=True,
-        help_text="List of service items [{'name': '...', 'price_from': ..., 'price_to': ..., 'category': category_id}, ...]"
+        help_text="[{'category': subcategory_id, 'price': 100.00}, ...]",
     )
     master_id = serializers.IntegerField(write_only=True, required=False)
-    
+
     class Meta:
         model = MasterService
         fields = [
-            'id', 'master_service_items', 'master_items', 'master_id', 'created_at'
+            'id',
+            'master',
+            'master_service_items',
+            'images',
+            'master_items',
+            'master_id',
+            'created_at',
         ]
-        read_only_fields = ['id', 'created_at']
-    
+        read_only_fields = ['id', 'master', 'created_at']
+
+    def get_images(self, obj):
+        qs = MasterImage.objects.filter(master_id=obj.master_id).order_by('-created_at')
+        return MasterImageSerializer(qs, many=True, context=self.context).data
+
     def get_master_service_items(self, obj):
-        """Get master service items grouped by category"""
-        items = MasterServiceItems.objects.filter(master_service=obj).select_related('category').order_by('category__name', 'name')
-        grouped_items = {}
+        request = self.context.get('request')
+        items = MasterServiceItems.objects.filter(master_service=obj).select_related(
+            'category', 'category__parent',
+        ).order_by('category__parent_id', 'category__name')
+        groups = {}
         for item in items:
-            category_id = item.category.id
-            category_name = item.category.name
-            
-            if category_id not in grouped_items:
-                grouped_items[category_id] = {
-                    'category_id': category_id,
-                    'category_name': category_name,
-                    'items': []
+            parent = item.category.parent
+            gid = parent.id if parent else 0
+            if gid not in groups:
+                parent_icon = None
+                if parent and parent.icon:
+                    parent_icon = (
+                        request.build_absolute_uri(parent.icon.url)
+                        if request
+                        else parent.icon.url
+                    )
+                groups[gid] = {
+                    'parent_category_id': parent.id if parent else None,
+                    'parent_category_name': parent.name if parent else None,
+                    'parent_category_icon': parent_icon,
+                    'items': [],
                 }
-            
-            grouped_items[category_id]['items'].append(
+            groups[gid]['items'].append(
                 MasterServiceItemsSerializer(item, context=self.context).data
             )
-        
-        return list(grouped_items.values())
+        return list(groups.values())
 
     def validate_master_items(self, value):
-        """Validate service items"""
         if not isinstance(value, list):
-            raise serializers.ValidationError("master_items must be a list")
+            raise serializers.ValidationError('master_items must be a list')
         for item in value:
             if not isinstance(item, dict):
-                raise serializers.ValidationError("Each item must be an object")
-            required_fields = ['name', 'price_from', 'price_to', 'category']
-            for field in required_fields:
-                if field not in item:
-                    raise serializers.ValidationError(f"Each item must contain '{field}'")
+                raise serializers.ValidationError('Each item must be an object')
+            if 'category' not in item or 'price' not in item:
+                raise serializers.ValidationError("Each item must contain 'category' and 'price'")
             try:
-                Category.objects.get(id=item['category'])
+                cat = Category.objects.get(id=item['category'])
             except Category.DoesNotExist:
                 raise serializers.ValidationError(f"Category with ID {item['category']} not found")
+            validate_skill_category(cat)
         return value
 
     def validate_master_id(self, value):
-        """Validate master_id"""
         if value:
             try:
-                from .models import Master
                 Master.objects.get(id=value)
             except Master.DoesNotExist:
-                raise serializers.ValidationError(f"Master with ID {value} not found")
+                raise serializers.ValidationError(f'Master with ID {value} not found')
         return value
 
     def create(self, validated_data):
-        """Create master service with items"""
         master_items_data = validated_data.pop('master_items', [])
-        validated_data.pop('master_id', None)  # Удаляем master_id, он только для валидации
+        validated_data.pop('master_id', None)
         master_service = super().create(validated_data)
-        
         for item_data in master_items_data:
-            MasterServiceItems.objects.create(
+            MasterServiceItems.objects.update_or_create(
                 master_service=master_service,
-                name=item_data['name'],
-                price_from=item_data['price_from'],
-                price_to=item_data['price_to'],
-                category_id=item_data['category']
+                category_id=item_data['category'],
+                defaults={'price': item_data['price']},
             )
-        
         return master_service
-    
+
     def update(self, instance, validated_data):
-        """Update master service with items"""
         master_items_data = validated_data.pop('master_items', None)
         if master_items_data is not None:
             MasterServiceItems.objects.filter(master_service=instance).delete()
             for item_data in master_items_data:
                 MasterServiceItems.objects.create(
                     master_service=instance,
-                    name=item_data['name'],
-                    price_from=item_data['price_from'],
-                    price_to=item_data['price_to'],
-                    category_id=item_data['category']
+                    category_id=item_data['category'],
+                    price=item_data['price'],
                 )
-        
         return super().update(instance, validated_data)
 
 
-class MasterEmployeeCreateSerializer(serializers.Serializer):
-    """Serializer for adding employee to workshop"""
-    master_id = serializers.IntegerField(required=True, help_text="Workshop ID")
-    user_id = serializers.IntegerField(required=True, help_text="User ID to add")
+class ServiceItemLineSerializer(serializers.Serializer):
+    """Одна строка навыка: подкатегория + цена (Swagger: category — integer, price — number)."""
 
-    def validate_master_id(self, value):
+    category = serializers.IntegerField(
+        min_value=1,
+        help_text='ID категории типа by_master (каталог мастерской)',
+    )
+    price = serializers.FloatField(help_text='Цена (number, ≥ 0)')
+
+    def validate_category(self, value):
         try:
-            Master.objects.get(id=value)
-        except Master.DoesNotExist:
-            raise serializers.ValidationError("Workshop not found")
+            cat = Category.objects.get(pk=value)
+        except Category.DoesNotExist:
+            raise serializers.ValidationError('Category not found')
+        validate_skill_category(cat)
         return value
 
-    def validate_user_id(self, value):
-        try:
-            User.objects.get(id=value)
-        except User.DoesNotExist:
-            raise serializers.ValidationError("User not found")
-        return value
+    def validate_price(self, value):
+        f = float(value)
+        if f < 0:
+            raise serializers.ValidationError('Price must be >= 0')
+        return Decimal(str(f))
+
+
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Add services',
+            value={
+                'master_id': 1,
+                'services': [
+                    {'category': 101, 'price': 150000},
+                    {'category': 102, 'price': 80000},
+                ],
+            },
+            request_only=True,
+        ),
+        OpenApiExample(
+            'Без master_id (одна мастерская у пользователя)',
+            value={'services': [{'category': 101, 'price': 150000}]},
+            request_only=True,
+        ),
+    ],
+)
+class AddServiceItemsSerializer(serializers.Serializer):
+    """Добавление навыков: POST /api/master/service-items/"""
+
+    master_id = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        help_text='ID мастерской. Не обязателен, если у пользователя ровно одна мастерская (Master.user).',
+    )
+    services = ServiceItemLineSerializer(
+        many=True,
+        allow_empty=False,
+        help_text='List of {category: integer id, price: number}',
+    )
 
     def validate(self, attrs):
-        master_id = attrs.get('master_id')
-        user_id = attrs.get('user_id')
-        master = Master.objects.get(id=master_id)
-        user = User.objects.get(id=user_id)
-        if master.user.id == user.id:
-            raise serializers.ValidationError({'user_id': 'Owner is already added automatically'})
-        if MasterEmployee.objects.filter(master=master, employee=user).exists():
-            raise serializers.ValidationError({'user_id': 'This user is already added to this workshop'})
-        existing_employment = MasterEmployee.objects.filter(employee=user).exclude(master=master).first()
-        if existing_employment:
-            owner_name = existing_employment.master.user.get_full_name() or existing_employment.master.user.phone_number
-            raise serializers.ValidationError({
-                'user_id': f'This user is already an employee of workshop "{owner_name}". One user can only work in one workshop.'
-            })
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            raise serializers.ValidationError('Требуется авторизация.')
+        user = request.user
+        mid = attrs.get('master_id')
+        if mid in (None, ''):
+            qs = Master.objects.filter(user=user)
+            n = qs.count()
+            if n == 0:
+                raise serializers.ValidationError({
+                    'master_id': 'Мастерская не найдена. Сначала создайте профиль мастера.',
+                })
+            if n > 1:
+                raise serializers.ValidationError({
+                    'master_id': 'Укажите master_id: у вас несколько мастерских.',
+                })
+            attrs['master_id'] = qs.first().id
+        else:
+            try:
+                master = Master.objects.get(id=int(mid))
+            except (ValueError, TypeError, Master.DoesNotExist):
+                raise serializers.ValidationError({'master_id': 'Мастер не найден'})
+            if master.user_id != user.id:
+                raise serializers.ValidationError({'master_id': 'Нет доступа к этой мастерской'})
         return attrs
 
 
-class AddServiceItemsSerializer(serializers.Serializer):
-    """Serializer for adding services to master via master_id"""
-    master_id = serializers.IntegerField(required=True, help_text="Master ID to add services to")
-    services = serializers.ListField(
-        child=serializers.DictField(),
-        required=True,
-        allow_empty=False,
-        help_text="List of services to add"
-    )
-
-    def validate_master_id(self, value):
-        try:
-            Master.objects.get(id=value)
-        except Master.DoesNotExist:
-            raise serializers.ValidationError("Master with this ID not found")
-        return value
-
-    def validate_services(self, value):
-        if not isinstance(value, list):
-            raise serializers.ValidationError("services must be a list")
-        for idx, service in enumerate(value):
-            if not isinstance(service, dict):
-                raise serializers.ValidationError(f"Service #{idx+1} must be an object")
-            required_fields = ['name', 'price_from', 'price_to', 'category']
-            for field in required_fields:
-                if field not in service:
-                    raise serializers.ValidationError(f"Service #{idx+1}: missing field '{field}'")
-            try:
-                Category.objects.get(id=service['category'])
-            except Category.DoesNotExist:
-                raise serializers.ValidationError(f"Service #{idx+1}: category with ID {service['category']} not found")
-        return value
-
-
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Update price / category',
+            value={'price': 175000, 'category': 101},
+            request_only=True,
+        ),
+    ],
+)
 class UpdateServiceItemSerializer(serializers.ModelSerializer):
-    """Serializer for updating service item"""
+    """Update skill price or category (by_master catalog)."""
+
+    price = serializers.FloatField(required=False, help_text='Цена (number, ≥ 0)')
 
     class Meta:
         model = MasterServiceItems
-        fields = ['name', 'price_from', 'price_to', 'category']
+        fields = ['price', 'category']
 
     def validate_category(self, value):
-        if not Category.objects.filter(id=value.id).exists():
-            raise serializers.ValidationError("Category not found")
+        validate_skill_category(value)
         return value
 
+    def validate_price(self, value):
+        if value is None:
+            return None
+        f = float(value)
+        if f < 0:
+            raise serializers.ValidationError('Price must be >= 0')
+        return Decimal(str(f))
 
-class MasterEmployeeSerializer(serializers.ModelSerializer):
-    """Workshop employees serializer"""
-    employee_info = serializers.SerializerMethodField()
-    master_info = serializers.SerializerMethodField()
-    
+
+class MasterScheduleDaySerializer(serializers.ModelSerializer):
     class Meta:
-        model = MasterEmployee
-        fields = ['id', 'master', 'master_info', 'employee', 'employee_info', 'added_at']
-        read_only_fields = ['id', 'added_at']
-    
-    def get_employee_info(self, obj):
-        """Get employee info"""
-        if obj.employee:
-            return {
-                'id': obj.employee.id,
-                'full_name': obj.employee.get_full_name(),
-                'email': obj.employee.email,
-                'phone_number': obj.employee.phone_number,
-                'avatar': obj.employee.avatar.url if obj.employee.avatar else None
-            }
-        return None
-    
-    def get_master_info(self, obj):
-        """Get master info"""
-        if obj.master:
-            return {
-                'id': obj.master.id,
-                'name': obj.master.name,
-                'city': obj.master.city
-            }
-        return None
+        model = MasterScheduleDay
+        fields = ['id', 'date', 'start_time', 'end_time']
+        read_only_fields = ['id']
+
+    def validate(self, attrs):
+        start = attrs.get('start_time')
+        end = attrs.get('end_time')
+        if self.instance:
+            if start is None:
+                start = self.instance.start_time
+            if end is None:
+                end = self.instance.end_time
+        if start and end and end <= start:
+            raise serializers.ValidationError('end_time must be after start_time.')
+        return attrs
+
+
+class MasterScheduleDayWriteSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    start_time = serializers.TimeField()
+    end_time = serializers.TimeField()
+
+    def validate(self, attrs):
+        if attrs['end_time'] <= attrs['start_time']:
+            raise serializers.ValidationError('end_time must be after start_time.')
+        return attrs
+
+
+class MasterScheduleBulkSerializer(serializers.Serializer):
+    days = MasterScheduleDayWriteSerializer(many=True)
+
+
+class MasterBusySlotSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MasterBusySlot
+        fields = ['id', 'date', 'start_time', 'end_time', 'reason']
+        read_only_fields = ['id']
+
+    def validate(self, attrs):
+        start = attrs.get('start_time')
+        end = attrs.get('end_time')
+        if start and end and end <= start:
+            raise serializers.ValidationError('end_time must be after start_time.')
+        return attrs
+
+
+class ServiceCardSerializer(serializers.Serializer):
+    """
+    UI uchun "service card" ko'rinishi:
+    - icon (category.icon)
+    - average price range (MasterServiceItems.price min/max/avg)
+    - masters_count (shu service ni beradigan masterlar soni)
+    - average_rating (shu service ni beradigan masterlar bo'yicha Rating.avg)
+    """
+
+    category_id = serializers.IntegerField()
+    name = serializers.CharField()
+    icon = serializers.CharField(allow_null=True, required=False)
+
+    price_min = serializers.FloatField()
+    price_max = serializers.FloatField()
+    price_avg = serializers.FloatField()
+
+    masters_count = serializers.IntegerField()
+
+    average_rating = serializers.FloatField(allow_null=True, required=False)
+    rating_count = serializers.IntegerField()
+
+    is_most_common = serializers.BooleanField()
+
+
+class ServiceCardGroupSerializer(serializers.Serializer):
+    parent_category_id = serializers.IntegerField(allow_null=True)
+    parent_category_name = serializers.CharField()
+    parent_category_icon = serializers.CharField(allow_null=True, required=False)
+
+    services = ServiceCardSerializer(many=True)
+
+
+class ServiceCardsResponseSerializer(serializers.Serializer):
+    groups = ServiceCardGroupSerializer(many=True)

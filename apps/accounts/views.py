@@ -5,20 +5,28 @@ from rest_framework import status
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
+from datetime import timedelta
+
+from django.utils import timezone
+
 from .serializers import (
-    PhoneNumberSerializer, 
+    PhoneNumberSerializer,
     IdentifierSerializer,
-    SMSVerificationSerializer, 
-    UserSerializer, 
+    SMSVerificationSerializer,
+    UserSerializer,
     TokenResponseSerializer,
     SMSResponseSerializer,
     UserDetailsSerializer,
-    UserUpdateSerializer,
+    UserProfileRegistrationSerializer,
+    UserLimitedProfileUpdateSerializer,
+    UserLocationUpdateSerializer,
+    EmailVerificationConfirmSerializer,
     FAQSerializer,
-    TelegramChatIdSerializer
+    TelegramChatIdSerializer,
 )
 from .services import SMSService
-from .models import CustomUser, FAQ
+from .models import CustomUser, FAQ, EmailVerificationToken
+from .email_verification import build_verification_url, send_email_verification_message
 
 
 class HealthCheckView(APIView):
@@ -273,102 +281,283 @@ class UserDetailsView(APIView):
         }, status=status.HTTP_200_OK)
     
     @extend_schema(
-        summary="Обновление информации о пользователе",
-        description="Обновление информации о текущем пользователе. Поддерживает обновление всех полей, включая avatar (файл) и роль (группу).",
-        request=UserUpdateSerializer,
+        summary="Обновление профиля (ограниченные поля)",
+        description=(
+            "multipart/form-data: только first_name, last_name, avatar, date_of_birth. "
+            "Остальные поля (email, address и т.д.) меняются через POST /api/auth/user/register-profile/."
+        ),
+        request=UserLimitedProfileUpdateSerializer,
         responses={
             200: {
                 'type': 'object',
                 'properties': {
                     'success': {'type': 'boolean', 'example': True},
-                    'message': {'type': 'string', 'example': 'Информация о пользователе успешно обновлена'},
-                    'user': {'type': 'object'}
-                }
+                    'message': {'type': 'string', 'example': 'Profile updated'},
+                    'user': {'type': 'object'},
+                },
             },
-            400: {
-                'type': 'object',
-                'properties': {
-                    'success': {'type': 'boolean', 'example': False},
-                    'errors': {'type': 'object'}
-                }
-            },
-            401: {
-                'type': 'object',
-                'properties': {
-                    'detail': {'type': 'string', 'example': 'Authentication credentials were not provided.'}
-                }
-            }
+            400: {'type': 'object', 'properties': {'success': {'type': 'boolean'}, 'errors': {'type': 'object'}}},
+            401: {'type': 'object', 'properties': {'detail': {'type': 'string'}}},
         },
-        tags=['User Profile']
+        tags=['User Profile'],
     )
     def put(self, request):
-        """Полное обновление информации о пользователе"""
+        """Обновление только имени, фамилии, аватара и даты рождения (form-data)."""
         user = request.user
-        serializer = UserUpdateSerializer(user, data=request.data, partial=False, context={'request': request})
-        
+        serializer = UserLimitedProfileUpdateSerializer(
+            user, data=request.data, partial=True, context={'request': request}
+        )
         if serializer.is_valid():
             serializer.save()
-            # Возвращаем обновленные данные через UserDetailsSerializer
             detail_serializer = UserDetailsSerializer(user, context={'request': request})
-            return Response({
-                'success': True,
-                'message': 'Информация о пользователе успешно обновлена',
-                'user': detail_serializer.data
-            }, status=status.HTTP_200_OK)
-        
-        return Response({
-            'success': False,
-            'errors': serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
-    
+            return Response(
+                {
+                    'success': True,
+                    'message': 'Profile updated',
+                    'user': detail_serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        return Response({'success': False, 'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
     @extend_schema(
-        summary="Частичное обновление информации о пользователе",
-        description="Частичное обновление информации о текущем пользователе. Можно обновить только нужные поля. Поддерживает avatar (файл) и роль (группу).",
-        request=UserUpdateSerializer,
+        summary="Частичное обновление профиля (ограниченные поля)",
+        description="То же, что PUT: только first_name, last_name, avatar, date_of_birth (multipart/form-data).",
+        request=UserLimitedProfileUpdateSerializer,
         responses={
             200: {
                 'type': 'object',
                 'properties': {
-                    'success': {'type': 'boolean', 'example': True},
-                    'message': {'type': 'string', 'example': 'Информация о пользователе успешно обновлена'},
-                    'user': {'type': 'object'}
-                }
+                    'success': {'type': 'boolean'},
+                    'message': {'type': 'string'},
+                    'user': {'type': 'object'},
+                },
             },
-            400: {
-                'type': 'object',
-                'properties': {
-                    'success': {'type': 'boolean', 'example': False},
-                    'errors': {'type': 'object'}
-                }
-            },
-            401: {
-                'type': 'object',
-                'properties': {
-                    'detail': {'type': 'string', 'example': 'Authentication credentials were not provided.'}
-                }
-            }
+            400: {'type': 'object', 'properties': {'success': {'type': 'boolean'}, 'errors': {'type': 'object'}}},
+            401: {'type': 'object', 'properties': {'detail': {'type': 'string'}}},
         },
-        tags=['User Profile']
+        tags=['User Profile'],
     )
     def patch(self, request):
-        """Частичное обновление информации о пользователе"""
         user = request.user
-        serializer = UserUpdateSerializer(user, data=request.data, partial=True, context={'request': request})
-        
+        serializer = UserLimitedProfileUpdateSerializer(
+            user, data=request.data, partial=True, context={'request': request}
+        )
         if serializer.is_valid():
             serializer.save()
-            # Возвращаем обновленные данные через UserDetailsSerializer
             detail_serializer = UserDetailsSerializer(user, context={'request': request})
-            return Response({
+            return Response(
+                {
+                    'success': True,
+                    'message': 'Profile updated',
+                    'user': detail_serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        return Response({'success': False, 'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class UserLocationUpdateView(APIView):
+    """Update latitude/longitude for the authenticated user (from JWT)."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    @extend_schema(
+        summary="Update user coordinates",
+        description="JSON body: `latitude` and `longitude` (WGS84). Both fields are required.",
+        request=UserLocationUpdateSerializer,
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'success': {'type': 'boolean'},
+                    'message': {'type': 'string'},
+                    'user': {'type': 'object'},
+                },
+            },
+            400: {'type': 'object'},
+            401: {'type': 'object'},
+        },
+        tags=['User Profile'],
+    )
+    def put(self, request):
+        serializer = UserLocationUpdateSerializer(
+            request.user, data=request.data, partial=False, context={'request': request}
+        )
+        if serializer.is_valid():
+            serializer.save()
+            detail = UserDetailsSerializer(request.user, context={'request': request})
+            return Response(
+                {
+                    'success': True,
+                    'message': 'Location updated',
+                    'user': detail.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        return Response({'success': False, 'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class UserProfileRegistrationView(APIView):
+    """
+    POST multipart/form: first_name, last_name, email, avatar, date_of_birth, address.
+    If is_email_verified is False, saves profile and sends verification email (English HTML).
+    If True, responds that the user is already registered.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    @extend_schema(
+        summary="Register / complete profile + email verification",
+        description=(
+            "multipart/form-data. Updates profile for request.user. "
+            "If email is not verified yet, sends HTML email with link "
+            "`{FRONTEND_BASE}/email-verification/token={uuid}`. "
+            "If already verified, returns a message that you are already registered."
+        ),
+        request=UserProfileRegistrationSerializer,
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'success': {'type': 'boolean'},
+                    'message': {'type': 'string'},
+                    'user': {'type': 'object'},
+                },
+            },
+            400: {'type': 'object'},
+        },
+        tags=['User Profile'],
+    )
+    def post(self, request):
+        from django.conf import settings
+
+        user = request.user
+        if getattr(user, 'is_email_verified', False):
+            detail = UserDetailsSerializer(user, context={'request': request})
+            return Response(
+                {
+                    'success': False,
+                    'message': 'You are already registered. Your email is already verified.',
+                    'user': detail.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        serializer = UserProfileRegistrationSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {'success': False, 'errors': serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        data = serializer.validated_data
+        email = data['email'].strip().lower()
+        if CustomUser.objects.exclude(pk=user.pk).filter(email=email).exists():
+            return Response(
+                {'success': False, 'error': 'This email is already in use by another account.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.first_name = data['first_name']
+        user.last_name = data['last_name']
+        user.email = email
+        candidate_username = email[:150]
+        if CustomUser.objects.exclude(pk=user.pk).filter(username=candidate_username).exists():
+            candidate_username = f"{email.split('@')[0]}_{user.pk}"[:150]
+        user.username = candidate_username
+        if data.get('address') is not None:
+            user.address = data['address'] or ''
+        if 'date_of_birth' in data:
+            user.date_of_birth = data['date_of_birth']
+        if data.get('avatar') is not None:
+            user.avatar = data['avatar']
+        user.save()
+
+        hours = getattr(settings, 'EMAIL_VERIFICATION_TOKEN_HOURS', 48)
+        expires_at = timezone.now() + timedelta(hours=hours)
+        EmailVerificationToken.objects.filter(user=user, is_used=False).update(is_used=True)
+        token_obj = EmailVerificationToken.objects.create(
+            user=user,
+            email=email,
+            expires_at=expires_at,
+        )
+        url = build_verification_url(token_obj.token)
+        try:
+            send_email_verification_message(email, url)
+        except Exception as exc:
+            return Response(
+                {
+                    'success': False,
+                    'error': 'Profile saved but verification email could not be sent.',
+                    'detail': str(exc),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        detail = UserDetailsSerializer(user, context={'request': request})
+        return Response(
+            {
                 'success': True,
-                'message': 'Информация о пользователе успешно обновлена',
-                'user': detail_serializer.data
-            }, status=status.HTTP_200_OK)
-        
-        return Response({
-            'success': False,
-            'errors': serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
+                'message': 'Profile saved. Please check your email to verify your AutoHandy address.',
+                'user': detail.data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class EmailVerificationConfirmView(APIView):
+    """POST JSON or form: token (UUID) — marks email verified if token is valid."""
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Confirm email verification",
+        description="Body: `token` (UUID from email link). Sets is_email_verified and is_verified.",
+        request=EmailVerificationConfirmSerializer,
+        responses={
+            200: {'type': 'object', 'properties': {'success': {'type': 'boolean'}, 'message': {'type': 'string'}}},
+            400: {'type': 'object'},
+        },
+        tags=['User Profile'],
+    )
+    def post(self, request):
+        ser = EmailVerificationConfirmSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response({'success': False, 'errors': ser.errors}, status=status.HTTP_400_BAD_REQUEST)
+        token_uuid = ser.validated_data['token']
+        try:
+            rec = EmailVerificationToken.objects.select_related('user').get(token=token_uuid)
+        except EmailVerificationToken.DoesNotExist:
+            return Response(
+                {'success': False, 'error': 'Invalid or unknown verification token.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if rec.is_used:
+            return Response(
+                {'success': False, 'error': 'This verification link has already been used.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if rec.is_expired():
+            return Response(
+                {'success': False, 'error': 'This verification link has expired. Request a new one from the app.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        u = rec.user
+        if (u.email or '').lower() != (rec.email or '').lower():
+            return Response(
+                {'success': False, 'error': 'Email no longer matches this verification request.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        rec.is_used = True
+        rec.save(update_fields=['is_used'])
+        u.is_email_verified = True
+        u.is_verified = True
+        u.save(update_fields=['is_email_verified', 'is_verified'])
+        return Response(
+            {'success': True, 'message': 'Your email has been verified successfully.'},
+            status=status.HTTP_200_OK,
+        )
 
 
 class FAQListView(APIView):
@@ -414,58 +603,6 @@ class FAQListView(APIView):
             'success': True,
             'count': faqs.count(),
             'faqs': serializer.data
-        }, status=status.HTTP_200_OK)
-
-
-
-class UpdateTelegramChatIdView(APIView):
-    """
-    API для обновления Telegram Chat ID пользователя
-    """
-    permission_classes = [IsAuthenticated]
-    
-    @extend_schema(
-        summary="Обновить Telegram Chat ID",
-        description="Обновляет Telegram Chat ID текущего пользователя для получения SMS",
-        request=TelegramChatIdSerializer,
-        responses={
-            200: {
-                'type': 'object',
-                'properties': {
-                    'success': {'type': 'boolean', 'example': True},
-                    'message': {'type': 'string', 'example': 'Telegram Chat ID успешно обновлен'}
-                }
-            },
-            400: {
-                'type': 'object',
-                'properties': {
-                    'success': {'type': 'boolean', 'example': False},
-                    'errors': {'type': 'object'}
-                }
-            },
-            401: {'type': 'object', 'properties': {'detail': {'type': 'string'}}}
-        },
-        tags=['User Profile']
-    )
-    def post(self, request):
-        """Обновление Telegram Chat ID"""
-        serializer = TelegramChatIdSerializer(data=request.data, context={'request': request})
-        
-        if not serializer.is_valid():
-            return Response({
-                'success': False,
-                'errors': serializer.errors
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        chat_id = serializer.validated_data['chat_id']
-        
-        # Обновляем Chat ID пользователя
-        request.user.telegram_chat_id = chat_id
-        request.user.save()
-        
-        return Response({
-            'success': True,
-            'message': 'Telegram Chat ID успешно обновлен'
         }, status=status.HTTP_200_OK)
 
 

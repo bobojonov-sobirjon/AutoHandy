@@ -2,21 +2,31 @@ from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from django.db.models import Q
-from .models import Master, MasterService, MasterServiceItems, MasterEmployee, MasterImage
+from .models import Master, MasterBusySlot, MasterImage, MasterScheduleDay, MasterService, MasterServiceItems
 from .serializers import (
     MasterSerializer, MasterCreateSerializer, MasterUpdateSerializer, MasterNearbySerializer,
-    MasterServiceSerializer, MasterServiceItemsSerializer, MasterEmployeeCreateSerializer,
-    AddServiceItemsSerializer, UpdateServiceItemSerializer, AddMasterImagesSerializer, 
-    UpdateMasterImageSerializer, MasterImageSerializer, MasterEmployeeSerializer
+    MasterServiceSerializer, MasterServiceItemsSerializer,
+    AddServiceItemsSerializer, UpdateServiceItemSerializer, AddMasterImagesSerializer,
+    UpdateMasterImageSerializer, MasterImageSerializer,
+    MasterScheduleDaySerializer, MasterScheduleBulkSerializer,
+    MasterBusySlotSerializer,
 )
-from .permissions import IsMasterGroup, IsOwnerGroup
+from .permissions import IsMasterGroup
+from .images_utils import save_master_images_from_request
 from django.contrib.auth import get_user_model
 from apps.accounts.services import SMSService
 
 User = get_user_model()
+
+from .serializers import (
+    ServiceCardGroupSerializer,
+    ServiceCardSerializer,
+    ServiceCardsResponseSerializer,
+)
 
 
 class MasterProfileView(APIView):
@@ -24,42 +34,25 @@ class MasterProfileView(APIView):
     API для управления профилем мастера.
     
     Поддерживаемые операции:
-    - GET: получение профилей мастерских где пользователь является владельцем ИЛИ сотрудником
-    - POST: создание профиля мастера (доступно ТОЛЬКО для Owner группы)
+    - GET: получение профилей мастерских где пользователь является владельцем
+    - POST: создание профиля мастера (доступно ТОЛЬКО для группы Master)
     """
-    
+
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
     def get_permissions(self):
         """Разные права доступа для разных методов"""
         if self.request.method == 'POST':
-            return [IsOwnerGroup()]
+            return [IsMasterGroup()]
         elif self.request.method == 'GET':
             return [AllowAny()]
         return [IsMasterGroup()]
     
     def get_object(self):
         """
-        Получение всех профилей мастера текущего пользователя
-        
-        Ищет мастерские где:
-        1. Пользователь является владельцем (Master.user)
-        2. ИЛИ пользователь является сотрудником (MasterEmployee.employee)
+        Мастерские, где пользователь — владелец (Master.user).
         """
-        user = self.request.user
-        
-        # Сначала ищем мастерские где user - владелец
-        masters_as_owner = Master.objects.filter(user=user)
-        
-        # Затем ищем мастерские где user - сотрудник
-        employee_relations = MasterEmployee.objects.filter(employee=user).select_related('master')
-        masters_as_employee = Master.objects.filter(
-            id__in=[emp.master.id for emp in employee_relations]
-        )
-        
-        # Объединяем оба queryset'а (используем union или |)
-        # distinct() чтобы избежать дубликатов
-        all_masters = (masters_as_owner | masters_as_employee).distinct()
-        
-        return all_masters
+        return Master.objects.filter(user=self.request.user)
     
     @extend_schema(
         summary="Получить профиль мастера",
@@ -67,10 +60,8 @@ class MasterProfileView(APIView):
         Получить профили мастерских текущего пользователя. Доступно для всех пользователей (публичный доступ).
         
         **Логика поиска:**
-        - Если пользователь авторизован, возвращаются все мастерские где он является:
-          1. Владельцем (создал мастерскую)
-          2. ИЛИ сотрудником (добавлен через MasterEmployee)
-        - Если пользователь не авторизован, возвращается пустой список
+        - Если пользователь авторизован, возвращаются мастерские где он владелец (Master.user).
+        - Если не авторизован — пустой список
         """,
         responses={
             200: MasterSerializer(many=True)
@@ -89,11 +80,11 @@ class MasterProfileView(APIView):
             return Response([], status=status.HTTP_200_OK)
     
     @extend_schema(
-        summary="Создать профиль мастера (ТОЛЬКО для Owner)",
+        summary="Создать профиль мастера (только группа Master)",
         description="""
-        Создание нового профиля мастера. Эта операция доступна ТОЛЬКО пользователям с ролью 'Owner'.
+        Создание нового профиля мастера. Доступно только пользователям в группе **Master**.
         
-        **ВАЖНО**: Вы должны быть в группе 'Owner' для выполнения этой операции!
+        **ВАЖНО**: JWT обязателен; пользователь должен быть в группе Django `Master`.
         
         **ФОРМАТ ЗАПРОСА**: multipart/form-data (для загрузки изображений)
         
@@ -108,18 +99,16 @@ class MasterProfileView(APIView):
         - `longitude`: Долгота местоположения (число от -180 до 180, например: 69.2797)
         - `description`: Описание мастерской и услуг (текст)
         - `category`: Список ID категорий услуг (JSON массив строк, например: "[1, 2, 3]")
-        - `services`: Список услуг с ценами (JSON массив объектов, каждый содержит: name, price_from, price_to, category)
-        - `card_number`: Номер банковской карты для платежей (строка, до 19 символов)
-        - `card_expiry_month`: Месяц истечения срока карты (число 1-12)
-        - `card_expiry_year`: Год истечения срока карты (число, например: 2026)
-        - `card_cvv`: CVV код карты (строка, 3-4 цифры)
+        - `images`: Файлы (multipart) — поле можно повторять несколько раз для нескольких фото
+        
+        **Навыки (цены по подкатегориям)** не передаются при создании. Используйте
+        `POST /api/master/service-items/` (`master_id` не обязателен, если у вас одна мастерская).
         
         **Примечания:**
         - User автоматически берется из текущего авторизованного пользователя
         - Категории должны существовать в базе данных и иметь тип 'by_master'
-        - После создания мастерской, user автоматически добавляется в группу 'Master'
+        - После создания мастерской пользователь остаётся/снова добавляется в группу 'Master' (если ещё не был)
         - Можно создать мастерскую вообще без данных и заполнить потом через PUT/PATCH
-        - Изображения добавляются отдельно через POST /api/master/images/ после создания мастера
         """,
         request=MasterCreateSerializer,
         examples=[
@@ -135,24 +124,6 @@ class MasterProfileView(APIView):
                     "working_time": "Пн-Пт: 09:00-18:00, Сб: 10:00-16:00",
                     "description": "Автосервис с полным спектром услуг. Работаем с 2010 года. Опытные мастера, качественные запчасти.",
                     "category": [1, 2, 3],
-                    "services": [
-                        {
-                            "name": "Замена масла",
-                            "price_from": 150000,
-                            "price_to": 300000,
-                            "category": 1
-                        },
-                        {
-                            "name": "Диагностика двигателя",
-                            "price_from": 50000,
-                            "price_to": 100000,
-                            "category": 2
-                        }
-                    ],
-                    "card_number": "8600123456789012",
-                    "card_expiry_month": 12,
-                    "card_expiry_year": 2026,
-                    "card_cvv": "123"
                 },
                 request_only=True
             ),
@@ -174,15 +145,16 @@ class MasterProfileView(APIView):
         responses={
             201: MasterSerializer,
             400: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': 'Ошибка валидации данных'}}},
-            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': 'Только пользователи с ролью Owner могут создавать мастерские'}}}
+            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Нет доступа: нужна группа 'Master'"}}}
         },
         tags=['Masters']
     )
     def post(self, request):
-        """Создание профиля мастера (ТОЛЬКО для Owner)"""
+        """Создание профиля мастера (только группа Master)"""
         serializer = MasterCreateSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             master = serializer.save()
+            save_master_images_from_request(master, request)
             response_serializer = MasterSerializer(master, context={'request': request})
             return Response([response_serializer.data], status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -190,33 +162,31 @@ class MasterProfileView(APIView):
 
 class MasterListView(APIView):
     """
-    API для получения списка мастеров с фильтрацией (публичный доступ).
-    Если фильтры не указаны, возвращается пустой список!
+    API для получения списка мастеров (публичный доступ).
+    Без query-параметров возвращаются все мастера (сортировка по модели, обычно новые первые).
+    Опционально можно сузить выборку: category, name, lat/long/radius.
     """
     permission_classes = [AllowAny]
     
     @extend_schema(
-        summary="Получить список мастеров с фильтрацией",
+        summary="Получить список мастеров (все или с фильтрами)",
         description="""
-        Получить список мастеров с обязательной фильтрацией. 
+        Список мастеров. **Без параметров** — все записи из БД.
         
-        **ВАЖНО**: Если фильтры не указаны, возвращается пустой список!
-        
-        **Параметры фильтрации:**
-        - `category` - ID категории (by_order или by_master). При by_order ищет мастеров через service_type или название
+        **Опциональные query-параметры:**
+        - `category` - ID категории (by_order или by_master). При by_order ищет мастеров через дерево parent / название
         - `name` - Название мастерской (поиск по частичному совпадению)
-        - `lat` - Широта текущего местоположения пользователя (требуется вместе с long и radius)
-        - `long` - Долгота текущего местоположения пользователя (требуется вместе с lat и radius)
-        - `radius` - Радиус поиска в километрах (по умолчанию 10 км, требуется вместе с lat и long)
+        - `lat` / `long` - геоточка пользователя; вместе с `radius` (км, по умолчанию 10) оставляют мастеров в радиусе
         
-        **Примеры использования:**
+        **Примеры:**
+        - `/api/master/masters/list/` — полный список
         - `/api/master/masters/list/?category=1` - мастера по категории (умный поиск)
         - `/api/master/masters/list/?name=Авто` - поиск по названию
         - `/api/master/masters/list/?lat=41.3111&long=69.2797&radius=5` - мастера в радиусе 5 км
         - `/api/master/masters/list/?category=1&lat=41.3111&long=69.2797&radius=10` - комбинация фильтров
         
         **Умный поиск по категории:**
-        - Если category типа by_order: ищет мастеров через MasterServiceItems по service_type или названию
+        - Если category типа by_order: ищет мастеров через MasterServiceItems по parent / названию
         - Если category типа by_master: прямой поиск по категории мастера
         - Точность поиска: 80-90%
         
@@ -268,22 +238,17 @@ class MasterListView(APIView):
         tags=['Masters']
     )
     def get(self, request):
-        """Получение списка мастеров с фильтрацией"""
-        # Получаем параметры фильтрации
+        """Список мастеров: без параметров — все; иначе фильтрация."""
         category_id = request.query_params.get('category')
         name = request.query_params.get('name')
         user_lat = request.query_params.get('lat')
         user_long = request.query_params.get('long')
         radius = request.query_params.get('radius', 10)  # По умолчанию 10 км
-        
-        # Если нет ни одного фильтра, возвращаем пустой список
-        if not any([category_id, name, user_lat, user_long]):
-            return Response([], status=status.HTTP_200_OK)
-        
-        # Начинаем с всех мастеров
+
         masters = Master.objects.all()
         
         from apps.categories.models import Category
+        from apps.categories.query import master_by_order_category_smart_q
         from django.db.models import Q
         
         # Собираем все условия поиска (OR между ними)
@@ -297,39 +262,7 @@ class MasterListView(APIView):
                 
                 # Если category типа by_order (из заказа)
                 if category.type_category == 'by_order':
-                    # Ищем мастеров через MasterServiceItems
-                    category_conditions = Q()
-                    
-                    # 1. Поиск по service_type (если заполнен)
-                    if category.service_type:
-                        category_conditions |= Q(
-                            master_services__master_service_items__category__service_type__icontains=category.service_type
-                        )
-                        # Также ищем в категориях самого Master
-                        category_conditions |= Q(
-                            category__service_type__icontains=category.service_type
-                        )
-                    
-                    # 2. Поиск по названию категории (частичное совпадение)
-                    if category.name:
-                        # Ищем в названии услуги MasterServiceItems
-                        category_conditions |= Q(
-                            master_services__master_service_items__name__icontains=category.name
-                        )
-                        # Ищем в названии категории MasterServiceItems
-                        category_conditions |= Q(
-                            master_services__master_service_items__category__name__icontains=category.name
-                        )
-                        # Ищем в категориях самого Master
-                        category_conditions |= Q(
-                            category__name__icontains=category.name
-                        )
-                        # Ищем в названии мастерской
-                        category_conditions |= Q(
-                            name__icontains=category.name
-                        )
-                    
-                    search_conditions |= category_conditions
+                    search_conditions |= master_by_order_category_smart_q(category)
                 
                 # Если category типа by_master (напрямую)
                 elif category.type_category == 'by_master':
@@ -356,14 +289,12 @@ class MasterListView(APIView):
             # Поиск в названии мастерской
             name_conditions |= Q(name__icontains=name)
             # Поиск в названии услуг
-            name_conditions |= Q(master_services__master_service_items__name__icontains=name)
-            # Поиск в названии категорий услуг
+            # Поиск по названию услуги (подкатегория) и группы
             name_conditions |= Q(master_services__master_service_items__category__name__icontains=name)
-            # Поиск в service_type категорий услуг
-            name_conditions |= Q(master_services__master_service_items__category__service_type__icontains=name)
+            name_conditions |= Q(master_services__master_service_items__category__parent__name__icontains=name)
             # Поиск в категориях самого Master
             name_conditions |= Q(category__name__icontains=name)
-            name_conditions |= Q(category__service_type__icontains=name)
+            name_conditions |= Q(category__parent__name__icontains=name)
             # Поиск в адресе и городе
             name_conditions |= Q(city__icontains=name)
             name_conditions |= Q(address__icontains=name)
@@ -460,17 +391,27 @@ class MasterDetailsView(APIView):
     """
     API для операций с конкретным мастером по ID.
     GET - доступно всем пользователям (публичный доступ)
-    PUT/PATCH - доступно ТОЛЬКО для Owner
-    DELETE - доступно ТОЛЬКО для Owner
+    PUT/PATCH/DELETE - группа Master и только владелец профиля (Master.user)
     """
-    
+
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
     def get_permissions(self):
         """Разные права доступа для разных методов"""
         if self.request.method in ['PUT', 'PATCH', 'DELETE']:
-            return [IsOwnerGroup()]
+            return [IsMasterGroup()]
         elif self.request.method == 'GET':
             return [AllowAny()]
         return [IsAuthenticated()]
+
+    def _master_write_forbidden(self, request, master):
+        """Только владелец мастерской может менять/удалять этот профиль."""
+        if master.user_id != request.user.id:
+            return Response(
+                {'detail': 'Вы можете изменять только свою мастерскую.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return None
     
     def get_object(self, master_id):
         """Получение мастера по ID"""
@@ -501,11 +442,12 @@ class MasterDetailsView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
     
     @extend_schema(
-        summary="Обновить мастера по ID (ТОЛЬКО для Owner)",
+        summary="Обновить мастера по ID (группа Master, свой профиль)",
         description="""
-        Полное обновление информации о мастерской. Эта операция доступна ТОЛЬКО пользователям с ролью 'Owner'.
+        Полное обновление информации о мастерской. Доступно пользователям в группе **Master**,
+        и только для мастерской, где вы владелец (`Master.user` = текущий пользователь).
         
-        **ВАЖНО**: Вы должны быть в группе 'Owner' для выполнения этой операции!
+        **ВАЖНО**: JWT и группа `Master`; `master_id` должен быть вашей мастерской.
         
         **ФОРМАТ ЗАПРОСА**: multipart/form-data (для загрузки изображений)
         
@@ -519,22 +461,17 @@ class MasterDetailsView(APIView):
         - `latitude`: Широта местоположения (число от -90 до 90)
         - `longitude`: Долгота местоположения (число от -180 до 180)
         - `description`: Описание мастерской и услуг (текст)
-        - `card_number`: Номер банковской карты для платежей (строка)
-        - `card_expiry_month`: Месяц истечения срока карты (число 1-12)
-        - `card_expiry_year`: Год истечения срока карты (число)
-        - `card_cvv`: CVV код карты (строка, 3-4 цифры)
         
-        **Примечание**: Изображения обновляются через отдельные endpoint'ы:
-        - POST /api/master/images/ - добавить изображения
-        - PUT /api/master/images/{image_id}/ - заменить изображение
-        - DELETE /api/master/images/{image_id}/ - удалить изображение
+        Дополнительно в том же запросе можно передать новые файлы в поле `images`
+        (multipart, поле можно повторять). Старые фото не удаляются; удаление — через
+        DELETE /api/master/images/{image_id}/.
         """,
         request=MasterUpdateSerializer,
         responses={
             200: MasterSerializer,
             400: {'type': 'object', 'properties': {'detail': {'type': 'string'}}},
             404: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
-            403: {'type': 'object', 'properties': {'detail': {'type': 'string'}}}
+            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Нет доступа: группа Master и только своя мастерская"}}}
         },
         tags=['Masters']
     )
@@ -546,20 +483,22 @@ class MasterDetailsView(APIView):
                 {'error': 'Мастер не найден'}, 
                 status=status.HTTP_404_NOT_FOUND
             )
-        
+        denied = self._master_write_forbidden(request, master)
+        if denied:
+            return denied
+
         serializer = MasterUpdateSerializer(master, data=request.data, context={'request': request})
         if serializer.is_valid():
             updated_master = serializer.save()
+            save_master_images_from_request(updated_master, request)
             response_serializer = MasterSerializer(updated_master, context={'request': request})
             return Response(response_serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     @extend_schema(
-        summary="Частичное обновление мастера по ID (ТОЛЬКО для Owner)",
+        summary="Частичное обновление мастера по ID (группа Master, свой профиль)",
         description="""
-        Частичное обновление информации о мастерской. Эта операция доступна ТОЛЬКО пользователям с ролью 'Owner'.
-        
-        **ВАЖНО**: Вы должны быть в группе 'Owner' для выполнения этой операции!
+        Частичное обновление. Группа **Master**; можно менять только мастерскую, владельцем которой вы являетесь.
         
         **ФОРМАТ ЗАПРОСА**: multipart/form-data (для загрузки изображений)
         
@@ -573,66 +512,64 @@ class MasterDetailsView(APIView):
         - `latitude`: Широта местоположения (число от -90 до 90)
         - `longitude`: Долгота местоположения (число от -180 до 180)
         - `description`: Описание мастерской и услуг (текст)
-        - `card_number`: Номер банковской карты для платежей (строка)
-        - `card_expiry_month`: Месяц истечения срока карты (число 1-12)
-        - `card_expiry_year`: Год истечения срока карты (число)
-        - `card_cvv`: CVV код карты (строка, 3-4 цифры)
         
-        **Примечание**: Изображения обновляются через отдельные endpoint'ы:
-        - POST /api/master/images/ - добавить изображения
-        - PUT /api/master/images/{image_id}/ - заменить изображение
-        - DELETE /api/master/images/{image_id}/ - удалить изображение
+        Новые файлы в поле `images` (multipart, повторяемое) добавляются к галерее.
         """,
         request=MasterUpdateSerializer,
         responses={
             200: MasterSerializer,
             400: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': 'Ошибка валидации данных'}}},
             404: {'type': 'object', 'properties': {'error': {'type': 'string', 'example': 'Мастер не найден'}}},
-            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': 'Только пользователи с ролью Owner могут обновлять мастерские'}}}
+            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Нет доступа: группа Master и только своя мастерская"}}}
         },
         tags=['Masters']
     )
     def patch(self, request, master_id):
-        """Частичное обновление мастера (ТОЛЬКО для Owner)"""
+        """Частичное обновление мастера (группа Master)"""
         master = self.get_object(master_id)
         if not master:
             return Response(
                 {'error': 'Мастер не найден'}, 
                 status=status.HTTP_404_NOT_FOUND
             )
-        
+        denied = self._master_write_forbidden(request, master)
+        if denied:
+            return denied
+
         serializer = MasterUpdateSerializer(master, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
             updated_master = serializer.save()
+            save_master_images_from_request(updated_master, request)
             response_serializer = MasterSerializer(updated_master, context={'request': request})
             return Response(response_serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
     @extend_schema(
-        summary="Удалить мастера по ID (ТОЛЬКО для Owner)",
+        summary="Удалить мастера по ID (группа Master, свой профиль)",
         description="""
-        Удаление мастерской из системы. Эта операция доступна ТОЛЬКО пользователям с ролью 'Owner'.
-        
-        **ВАЖНО**: Вы должны быть в группе 'Owner' для выполнения этой операции!
+        Удаление мастерской. Группа **Master**; удалить можно только свою мастерскую (`Master.user`).
         
         **ВНИМАНИЕ**: Это действие удалит мастерскую и все связанные с ней данные (услуги, изображения и т.д.)
         """,
         responses={
             204: {'description': 'Мастер успешно удален'},
             404: {'type': 'object', 'properties': {'error': {'type': 'string', 'example': 'Мастер не найден'}}},
-            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': 'Только пользователи с ролью Owner могут удалять мастерские'}}}
+            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Нет доступа: группа Master и только своя мастерская"}}}
         },
         tags=['Masters']
     )
     def delete(self, request, master_id):
-        """Удаление мастера (ТОЛЬКО для Owner)"""
+        """Удаление мастера (группа Master)"""
         master = self.get_object(master_id)
         if not master:
             return Response(
                 {'error': 'Мастер не найден'}, 
                 status=status.HTTP_404_NOT_FOUND
             )
-        
+        denied = self._master_write_forbidden(request, master)
+        if denied:
+            return denied
+
         master.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -655,27 +592,7 @@ class MasterServiceView(APIView):
         description="""
         Добавление услуги с элементами мастеру. Доступно только для пользователей с ролью 'Master'.
         
-        **Формат запроса:**
-        ```json
-        {
-            "master_items": [
-                {
-                    "name": "Название услуги",
-                    "price_from": 100000,
-                    "price_to": 200000,
-                    "category": 1
-                },
-                {
-                    "name": "Другая услуга",
-                    "price_from": 50000,
-                    "price_to": 150000,
-                    "category": 2
-                }
-            ]
-        }
-        ```
-        
-        **Важно:** Поле `master_items` обязательно и должно быть массивом объектов!
+        **Формат:** `master_items`: `[{"category": <id категории by_master>, "price": 100}, ...]`
         """,
         request=MasterServiceSerializer,
         examples=[
@@ -683,18 +600,8 @@ class MasterServiceView(APIView):
                 'Пример создания услуги мастера',
                 value={
                     "master_items": [
-                        {
-                            "name": "Замена масла",
-                            "price_from": 150000,
-                            "price_to": 300000,
-                            "category": 1
-                        },
-                        {
-                            "name": "Диагностика двигателя",
-                            "price_from": 100000,
-                            "price_to": 250000,
-                            "category": 2
-                        }
+                        {"category": 101, "price": 150000},
+                        {"category": 102, "price": 100000},
                     ]
                 }
             )
@@ -956,213 +863,6 @@ class MasterServicesByMasterView(APIView):
             )
 
 
-class MasterEmployeeView(APIView):
-    """
-    API для управления сотрудниками мастерской
-    GET - поиск пользователя по private_id
-    POST - добавление сотрудника к мастерской
-    """
-    permission_classes = [IsAuthenticated]
-    
-    @extend_schema(
-        summary="Поиск пользователя по private_id",
-        description="Поиск пользователя по его уникальному private_id. Возвращает полную информацию о пользователе.",
-        parameters=[
-            OpenApiParameter(
-                name='private_id',
-                description='Уникальный 6-значный ID пользователя',
-                required=True,
-                type=str,
-                location=OpenApiParameter.QUERY
-            )
-        ],
-        responses={
-            200: {
-                'type': 'object',
-                'properties': {
-                    'success': {'type': 'boolean', 'example': True},
-                    'user': {
-                        'type': 'object',
-                        'properties': {
-                            'id': {'type': 'integer'},
-                            'private_id': {'type': 'string'},
-                            'full_name': {'type': 'string'},
-                            'phone_number': {'type': 'string'},
-                            'email': {'type': 'string'},
-                            'avatar': {'type': 'string'},
-                            'description': {'type': 'string'}
-                        }
-                    }
-                }
-            },
-            404: {'type': 'object', 'properties': {'error': {'type': 'string'}}}
-        },
-        tags=['Add Master to Owner Master']
-    )
-    def get(self, request):
-        """Поиск пользователя по private_id"""
-        private_id = request.query_params.get('private_id')
-        
-        if not private_id:
-            return Response(
-                {'error': 'private_id обязателен'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        try:
-            user = User.objects.get(private_id=private_id)
-            return Response({
-                'success': True,
-                'user': {
-                    'id': user.id,
-                    'private_id': user.private_id,
-                    'full_name': user.get_full_name(),
-                    'phone_number': user.phone_number,
-                    'email': user.email,
-                    'avatar': user.avatar.url if user.avatar else None,
-                    'description': user.description
-                }
-            }, status=status.HTTP_200_OK)
-        except User.DoesNotExist:
-            return Response(
-                {'error': 'Пользователь не найден'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-    
-    @extend_schema(
-        summary="Добавить сотрудника к мастерской",
-        description="""
-        Добавление сотрудника к мастерской. 
-        
-        **Важно:** 
-        - Владелец мастерской добавляется автоматически при создании.
-        - Один пользователь может быть сотрудником только одной мастерской.
-        - Если пользователь уже работает в другой мастерской, вернется ошибка.
-        """,
-        request=MasterEmployeeCreateSerializer,
-        examples=[
-            OpenApiExample(
-                'Пример добавления сотрудника',
-                value={
-                    "master_id": 1,
-                    "user_id": 5
-                },
-                request_only=True
-            )
-        ],
-        responses={
-            201: {
-                'type': 'object',
-                'properties': {
-                    'success': {'type': 'boolean', 'example': True},
-                    'message': {'type': 'string', 'example': 'Сотрудник успешно добавлен'}
-                }
-            },
-            400: {
-                'type': 'object',
-                'properties': {
-                    'success': {'type': 'boolean', 'example': False},
-                    'error': {'type': 'string', 'example': 'Этот пользователь уже является сотрудником мастерской "Иван Иванов". Один пользователь может работать только в одной мастерской.'},
-                    'errors': {'type': 'object', 'description': 'Ошибки валидации полей'}
-                },
-                'description': 'Ошибка валидации или пользователь уже работает в другой мастерской'
-            }
-        },
-        tags=['Add Master to Owner Master']
-    )
-    def post(self, request):
-        """Добавление сотрудника к мастерской"""
-        serializer = MasterEmployeeCreateSerializer(data=request.data)
-        
-        if not serializer.is_valid():
-            return Response({
-                'success': False,
-                'errors': serializer.errors
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Получаем валидированные данные
-        master_id = serializer.validated_data['master_id']
-        user_id = serializer.validated_data['user_id']
-        
-        master = Master.objects.get(id=master_id)
-        user = User.objects.get(id=user_id)
-        
-        # Добавление сотрудника (validation уже прошел в serializer)
-        MasterEmployee.objects.create(master=master, employee=user)
-        
-        # Отправка уведомления сотруднику
-        try:
-            owner_name = master.user.get_full_name() or master.user.email
-            master_address = master.address or "мастерской"
-            
-            # Формируем сообщение
-            notification_message = f"🎉 Вас добавили в мастерскую!\n\n"
-            notification_message += f"👤 Владелец: {owner_name}\n"
-            notification_message += f"📍 Адрес: {master_address}\n"
-            notification_message += f"🏙 Город: {master.city}\n\n"
-            notification_message += f"✅ Вы теперь являетесь сотрудником этой мастерской."
-            
-            # Отправляем уведомление через Telegram (если есть chat_id)
-            if user.telegram_chat_id:
-                import requests
-                bot_token = SMSService.BOT_TOKEN
-                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                
-                data = {
-                    'chat_id': user.telegram_chat_id,
-                    'text': notification_message,
-                    'parse_mode': 'HTML'
-                }
-                
-                try:
-                    response = requests.post(url, json=data, timeout=10)
-                    if response.status_code == 200:
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        logger.info(f"Notification sent to user {user.id} via Telegram")
-                except Exception as telegram_error:
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.error(f"Error sending Telegram notification: {str(telegram_error)}")
-            
-            # Альтернативно отправляем на email если есть
-            elif user.email:
-                # Отправляем через email (можно добавить email service)
-                from django.core.mail import send_mail
-                from django.conf import settings
-                
-                try:
-                    send_mail(
-                        subject='Вас добавили в мастерскую',
-                        message=notification_message,
-                        from_email=settings.DEFAULT_FROM_EMAIL,
-                        recipient_list=[user.email],
-                        fail_silently=True
-                    )
-                except Exception as email_error:
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.error(f"Error sending email notification: {str(email_error)}")
-            
-            # Или через SMS
-            elif user.phone_number:
-                SMSService.send_telegram_sms(
-                    phone_number=user.phone_number,
-                    message=notification_message
-                )
-                
-        except Exception as e:
-            # Логируем ошибку, но не прерываем процесс
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error sending notification to employee {user.id}: {str(e)}")
-        
-        return Response({
-            'success': True,
-            'message': 'Сотрудник успешно добавлен'
-        }, status=status.HTTP_201_CREATED)
-
-
 class MasterFilterChoicesView(APIView):
     """
     API для получения всех доступных фильтров для мастеров
@@ -1199,9 +899,13 @@ class MasterFilterChoicesView(APIView):
     def get(self, request):
         """Получить варианты фильтров"""
         
-        # Получаем уникальные услуги из MasterServiceItems
-        services = MasterServiceItems.objects.values_list('name', flat=True).distinct().order_by('name')
-        services_list = [service for service in services if service]  # Убираем пустые
+        services = (
+            MasterServiceItems.objects.select_related('category')
+            .values_list('category__name', flat=True)
+            .distinct()
+            .order_by('category__name')
+        )
+        services_list = [s for s in services if s]
         
         # Получаем уникальные города мастеров
         locations = Master.objects.values_list('city', flat=True).distinct().order_by('city')
@@ -1301,7 +1005,7 @@ GET /api/master/masters/by-user/?service_items=Шиномонтаж&category=1&c
                 name='service_items', 
                 type={'type': 'array', 'items': {'type': 'string'}}, 
                 location=OpenApiParameter.QUERY, 
-                description='Фильтр по услугам (multiple). Пример: service_items=Замена масла&service_items=Диагностика. Ищет по MasterServiceItems.name',
+                description='Фильтр по названию подкатегории услуги (category.name)',
                 required=False,
                 explode=True,
                 style='form'
@@ -1343,49 +1047,36 @@ GET /api/master/masters/by-user/?service_items=Шиномонтаж&category=1&c
         # Получаем всех мастеров
         masters = Master.objects.all().select_related('user').prefetch_related('category', 'master_services__master_service_items')
         
-        print(f"\n{'='*60}")
-        print(f"FILTER MASTERS BY USER")
-        print(f"Всего мастеров до фильтрации: {masters.count()}")
-        
-        # Фильтр по услугам (service_items) - MULTIPLE
+        # Фильтр по услугам (service_items) — по имени подкатегории
         service_items = request.query_params.getlist('service_items')
-        print(f"service_items параметр: {service_items}")
         if service_items:
-            # OR условие - мастер должен иметь хотя бы одну из указанных услуг
             service_conditions = Q()
             for service_item in service_items:
-                service_conditions |= Q(master_services__master_service_items__name__icontains=service_item)
-                print(f"  Добавлен фильтр по услуге: {service_item}")
+                service_conditions |= Q(
+                    master_services__master_service_items__category__name__icontains=service_item
+                )
+                service_conditions |= Q(
+                    master_services__master_service_items__category__parent__name__icontains=service_item
+                )
             masters = masters.filter(service_conditions).distinct()
-            print(f"Мастеров после фильтра service_items: {masters.count()}")
-        
+
         # Фильтр по категориям - MULTIPLE
         categories = request.query_params.getlist('category')
-        print(f"category параметр: {categories}")
         if categories:
             try:
-                # Игнорируем 0 и пустые значения
                 category_ids = [int(cat_id) for cat_id in categories if cat_id and int(cat_id) > 0]
-                print(f"  category_ids после фильтрации: {category_ids}")
                 if category_ids:
-                    # OR условие - мастер может иметь любую из указанных категорий
                     masters = masters.filter(category__id__in=category_ids).distinct()
-                    print(f"Мастеров после фильтра category: {masters.count()}")
-            except (ValueError, TypeError) as e:
-                print(f"  ОШИБКА при обработке category: {e}")
+            except (ValueError, TypeError):
                 pass
-        
+
         # Фильтр по городам/районам - MULTIPLE
         locations = request.query_params.getlist('location')
-        print(f"location параметр: {locations}")
         if locations:
-            # OR условие - мастер может быть в любом из указанных городов
             location_conditions = Q()
             for location in locations:
                 location_conditions |= Q(city__icontains=location) | Q(address__icontains=location)
-                print(f"  Добавлен фильтр по городу: {location}")
             masters = masters.filter(location_conditions)
-            print(f"Мастеров после фильтра location: {masters.count()}")
         
         # Фильтр по наивысшему рейтингу (4.5+)
         highest_rating = request.query_params.get('highest_rating', '').lower() == 'true'
@@ -1452,50 +1143,28 @@ GET /api/master/masters/by-user/?service_items=Шиномонтаж&category=1&c
             from apps.order.models import Rating
             masters = masters.annotate(avg_rating=Avg('ratings__rating')).order_by('-avg_rating', '-created_at')
         
-        # Сериализуем
-        print(f"ИТОГО мастеров после всех фильтров: {masters.count() if hasattr(masters, 'count') else len(masters)}")
-        print(f"{'='*60}\n")
-        
         serializer = MasterSerializer(masters, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class AddServiceItemsView(APIView):
     """
-    API для добавления услуг к существующему мастеру через master_id
+    Добавить навыки (подкатегория + цена) к мастерской.
+    `master_id` обязателен только если у пользователя несколько мастерских.
     """
-    permission_classes = [IsAuthenticated]
-    
+    permission_classes = [IsMasterGroup]
+
     @extend_schema(
         summary="Добавить услуги к мастеру",
         description="""
-        Добавление новых услуг к существующему мастеру по его ID.
-        
-        **Логика работы:**
-        1. Находим MasterService по master_id
-        2. Если не найден - создаем новый MasterService
-        3. Добавляем новые MasterServiceItems к этому MasterService
-        
-        **Request Body:**
-        ```json
-        {
-          "master_id": 1,
-          "services": [
-            {
-              "name": "Замена масла",
-              "price_from": 1000,
-              "price_to": 2000,
-              "category": 1
-            },
-            {
-              "name": "Диагностика",
-              "price_from": 500,
-              "price_to": 1500,
-              "category": 2
-            }
-          ]
-        }
-        ```
+        Добавление услуг к мастерской текущего пользователя.
+
+        **`master_id`** — если у вас **одна** мастерская (`Master.user`), поле можно не передавать.
+        Если мастерских **несколько** — укажите `master_id` (только своя).
+
+        **Логика:** находим или создаём `MasterService`, затем `MasterServiceItems` (upsert по паре master_service + category).
+
+        **Тело:** `services` — `[{"category": <id категории by_master>, "price": 100000}, ...]`
         """,
         request=AddServiceItemsSerializer,
         responses={
@@ -1508,8 +1177,8 @@ class AddServiceItemsView(APIView):
     def post(self, request):
         """Добавить услуги к мастеру"""
         from .serializers import AddServiceItemsSerializer, MasterServiceSerializer
-        
-        serializer = AddServiceItemsSerializer(data=request.data)
+
+        serializer = AddServiceItemsSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
@@ -1533,12 +1202,10 @@ class AddServiceItemsView(APIView):
         # Добавляем все услуги
         created_items = []
         for service_data in services:
-            item = MasterServiceItems.objects.create(
+            item, _ = MasterServiceItems.objects.update_or_create(
                 master_service=master_service,
-                name=service_data['name'],
-                price_from=service_data['price_from'],
-                price_to=service_data['price_to'],
-                category_id=service_data['category']
+                category_id=service_data['category'],
+                defaults={'price': service_data['price']},
             )
             created_items.append(item)
         
@@ -1565,15 +1232,7 @@ class UpdateServiceItemView(APIView):
         description="""
         Обновление конкретной услуги мастера по её ID.
         
-        **Request Body:**
-        ```json
-        {
-          "name": "Замена масла и фильтров",
-          "price_from": 1200,
-          "price_to": 2500,
-          "category": 1
-        }
-        ```
+        **Request Body:** `price` и/или `category` (категория by_master).
         """,
         request=UpdateServiceItemSerializer,
         responses={
@@ -1594,10 +1253,11 @@ class UpdateServiceItemView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        serializer = UpdateServiceItemSerializer(item, data=request.data, context={'request': request})
+        serializer = UpdateServiceItemSerializer(item, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            out = MasterServiceItemsSerializer(item, context={'request': request})
+            return Response(out.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -1921,121 +1581,422 @@ class DeleteMasterImageView(APIView):
         )
 
 
-class MasterEmployeeListView(APIView):
+def _resolve_schedule_master(request):
     """
-    API для получения списка сотрудников мастерской
+    Расписание и busy-слоты привязаны к модели Master (не напрямую к User).
+    JWT-user должен быть Master.user. Если мастерских несколько — передайте ?master_id=.
     """
-    permission_classes = [IsAuthenticated]
-    
+    user = request.user
+    qs = Master.objects.filter(user=user)
+    mid = request.query_params.get('master_id')
+    if mid in (None, ''):
+        if not qs.exists():
+            return None, Response(
+                {'error': 'Профиль мастера не найден'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if qs.count() > 1:
+            return None, Response(
+                {
+                    'error': 'Укажите master_id в query (несколько мастерских).',
+                    'master_ids': list(qs.values_list('id', flat=True)),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return qs.first(), None
+    try:
+        return qs.get(pk=int(mid)), None
+    except (ValueError, TypeError, Master.DoesNotExist):
+        return None, Response(
+            {'error': 'Мастер не найден или не ваш'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+
+class MasterScheduleListBulkView(APIView):
+    """GET: list schedule days; POST: bulk upsert days (owner = current master's user)."""
+
+    permission_classes = [IsMasterGroup]
+
     @extend_schema(
-        summary="Получить сотрудников мастерской",
-        description="""
-## Описание
-Возвращает список всех сотрудников (MasterEmployee) для указанного мастера/мастерской.
+        summary='Расписание мастера (список)',
+        parameters=[
+            OpenApiParameter(name='date_from', type=OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False),
+            OpenApiParameter(name='date_to', type=OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False),
+            OpenApiParameter(
+                name='master_id',
+                type=int,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Если у пользователя несколько мастерских — ID нужной мастерской',
+            ),
+        ],
+        responses={200: MasterScheduleDaySerializer(many=True)},
+        tags=['Master Schedule'],
+    )
+    def get(self, request):
+        master, err = _resolve_schedule_master(request)
+        if err:
+            return err
+        qs = MasterScheduleDay.objects.filter(master=master).order_by('date')
+        df = request.query_params.get('date_from')
+        dt = request.query_params.get('date_to')
+        if df:
+            qs = qs.filter(date__gte=df)
+        if dt:
+            qs = qs.filter(date__lte=dt)
+        return Response(MasterScheduleDaySerializer(qs, many=True).data)
 
-## 🎯 Когда использовать?
-- Для просмотра всех сотрудников мастерской
-- Для отображения команды мастера в приложении
-- Для выбора конкретного сотрудника при назначении на заказ
-
-## Параметры
-- `master_id`: ID мастера/мастерской (обязательный)
-
-## Пример запроса:
-```
-GET /api/master/employees/?master_id=5
-```
-
-## Response
-Возвращает список сотрудников с полной информацией:
-- ID сотрудника
-- Полное имя
-- Email
-- Телефон
-- Аватар
-- Дата добавления в команду
-
-## 📋 Формат ответа:
-```json
-[
-  {
-    "id": 1,
-    "master": 5,
-    "master_info": {
-      "id": 5,
-      "name": "Автосервис Али",
-      "city": "Ташкент"
-    },
-    "employee": 10,
-    "employee_info": {
-      "id": 10,
-      "full_name": "Иван Петров",
-      "email": "ivan@example.com",
-      "phone_number": "+998901234567",
-      "avatar": "http://example.com/media/avatar.jpg"
-    },
-    "added_at": "2026-01-15T10:30:00Z"
-  }
-]
-```
-        """,
-        tags=['Master'],
+    @extend_schema(
+        summary='Расписание: массовое сохранение дней',
         parameters=[
             OpenApiParameter(
                 name='master_id',
-                type=OpenApiTypes.INT,
+                type=int,
                 location=OpenApiParameter.QUERY,
-                description='ID мастера/мастерской',
-                required=True
+                required=False,
+                description='Несколько мастерских — ID мастерской (тот же query, что и у GET)',
             ),
         ],
-        responses={
-            200: MasterEmployeeSerializer(many=True),
-            400: {
-                'type': 'object',
-                'properties': {'error': {'type': 'string'}},
-                'example': {'error': 'Параметр master_id обязателен'}
-            },
-            404: {
-                'type': 'object',
-                'properties': {'error': {'type': 'string'}},
-                'example': {'error': 'Мастер не найден'}
-            },
-            401: {'type': 'object', 'properties': {'detail': {'type': 'string'}}},
-        }
+        request=MasterScheduleBulkSerializer,
+        responses={201: MasterScheduleDaySerializer(many=True)},
+        tags=['Master Schedule'],
+    )
+    def post(self, request):
+        master, err = _resolve_schedule_master(request)
+        if err:
+            return err
+        ser = MasterScheduleBulkSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        for day in ser.validated_data['days']:
+            MasterScheduleDay.objects.update_or_create(
+                master=master,
+                date=day['date'],
+                defaults={'start_time': day['start_time'], 'end_time': day['end_time']},
+            )
+        out = MasterScheduleDay.objects.filter(master=master).order_by('date')
+        return Response(MasterScheduleDaySerializer(out, many=True).data, status=status.HTTP_201_CREATED)
+
+
+class MasterScheduleDayDetailView(APIView):
+    permission_classes = [IsMasterGroup]
+
+    def get_object(self, pk, user):
+        try:
+            row = MasterScheduleDay.objects.select_related('master').get(pk=pk)
+        except MasterScheduleDay.DoesNotExist:
+            return None
+        if row.master.user_id != user.id:
+            return None
+        return row
+
+    @extend_schema(summary='Удалить день расписания', responses={204: None}, tags=['Master Schedule'])
+    def delete(self, request, pk):
+        row = self.get_object(pk, request.user)
+        if not row:
+            return Response({'error': 'Не найдено'}, status=status.HTTP_404_NOT_FOUND)
+        row.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @extend_schema(
+        summary='Изменить день расписания',
+        request=MasterScheduleDaySerializer,
+        responses={200: MasterScheduleDaySerializer},
+        tags=['Master Schedule'],
+    )
+    def patch(self, request, pk):
+        row = self.get_object(pk, request.user)
+        if not row:
+            return Response({'error': 'Не найдено'}, status=status.HTTP_404_NOT_FOUND)
+        ser = MasterScheduleDaySerializer(row, data=request.data, partial=True)
+        if ser.is_valid():
+            ser.save()
+            return Response(ser.data)
+        return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class MasterBusySlotListCreateView(APIView):
+    """Ручная занятость (без заказа) или просмотр своих слотов с заказами."""
+
+    permission_classes = [IsMasterGroup]
+
+    @extend_schema(
+        summary='Список занятых интервалов',
+        parameters=[
+            OpenApiParameter(name='date_from', type=OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False),
+            OpenApiParameter(name='date_to', type=OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False),
+            OpenApiParameter(name='manual_only', type=OpenApiTypes.BOOL, location=OpenApiParameter.QUERY, required=False),
+            OpenApiParameter(
+                name='master_id',
+                type=int,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Несколько мастерских — ID мастерской',
+            ),
+        ],
+        responses={200: MasterBusySlotSerializer(many=True)},
+        tags=['Master Schedule'],
     )
     def get(self, request):
-        """Получить сотрудников мастерской"""
-        master_id = request.query_params.get('master_id')
-        
-        if not master_id:
-            return Response(
-                {'error': 'Параметр master_id обязателен'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
+        master, err = _resolve_schedule_master(request)
+        if err:
+            return err
+        qs = MasterBusySlot.objects.filter(master=master).order_by('date', 'start_time')
+        df = request.query_params.get('date_from')
+        dt = request.query_params.get('date_to')
+        if df:
+            qs = qs.filter(date__gte=df)
+        if dt:
+            qs = qs.filter(date__lte=dt)
+        if request.query_params.get('manual_only', '').lower() in ('1', 'true', 'yes'):
+            qs = qs.filter(order__isnull=True)
+        data = MasterBusySlotSerializer(qs, many=True).data
+        return Response(data)
+
+    @extend_schema(
+        summary='Добавить ручной занятый интервал',
+        parameters=[
+            OpenApiParameter(
+                name='master_id',
+                type=int,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Несколько мастерских — ID мастерской',
+            ),
+        ],
+        request=MasterBusySlotSerializer,
+        responses={201: MasterBusySlotSerializer},
+        tags=['Master Schedule'],
+    )
+    def post(self, request):
+        master, err = _resolve_schedule_master(request)
+        if err:
+            return err
+        ser = MasterBusySlotSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        slot = MasterBusySlot.objects.create(
+            master=master,
+            date=ser.validated_data['date'],
+            start_time=ser.validated_data['start_time'],
+            end_time=ser.validated_data['end_time'],
+            reason=ser.validated_data.get('reason', ''),
+            order=None,
+        )
+        return Response(MasterBusySlotSerializer(slot).data, status=status.HTTP_201_CREATED)
+
+
+class MasterBusySlotDetailView(APIView):
+    permission_classes = [IsMasterGroup]
+
+    def get_object(self, pk, user):
         try:
-            master_id = int(master_id)
-        except ValueError:
+            slot = MasterBusySlot.objects.select_related('master').get(pk=pk)
+        except MasterBusySlot.DoesNotExist:
+            return None
+        if slot.master.user_id != user.id:
+            return None
+        return slot
+
+    @extend_schema(
+        summary='Изменить ручной слот (заказы нельзя менять здесь)',
+        request=MasterBusySlotSerializer,
+        responses={200: MasterBusySlotSerializer},
+        tags=['Master Schedule'],
+    )
+    def patch(self, request, pk):
+        slot = self.get_object(pk, request.user)
+        if not slot:
+            return Response({'error': 'Не найдено'}, status=status.HTTP_404_NOT_FOUND)
+        if slot.order_id:
             return Response(
-                {'error': 'Неверный формат master_id'},
-                status=status.HTTP_400_BAD_REQUEST
+                {'error': 'Слот привязан к заказу; измените заказ или отмените его.'},
+                status=status.HTTP_400_BAD_REQUEST,
             )
-        
-        # Проверяем существование мастера
-        try:
-            master = Master.objects.get(id=master_id)
-        except Master.DoesNotExist:
-            return Response(
-                {'error': 'Мастер не найден'},
-                status=status.HTTP_404_NOT_FOUND
+        ser = MasterBusySlotSerializer(slot, data=request.data, partial=True)
+        if ser.is_valid():
+            ser.save()
+            return Response(MasterBusySlotSerializer(slot).data)
+        return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @extend_schema(summary='Удалить ручной слот', responses={204: None}, tags=['Master Schedule'])
+    def delete(self, request, pk):
+        slot = self.get_object(pk, request.user)
+        if not slot:
+            return Response({'error': 'Не найдено'}, status=status.HTTP_404_NOT_FOUND)
+        if slot.order_id:
+            return Response({'error': 'Нельзя удалить слот заказа'}, status=status.HTTP_400_BAD_REQUEST)
+        slot.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MasterServiceCardsView(APIView):
+    """
+    UI uchun service cards:
+    - har bir by_master category bo'yicha (ota kategoriya bo'yicha group)
+    - price min/max/avg: MasterServiceItems.price dan
+    - stars: Masterga berilgan Rating dan (Avg)
+    - "most common": group ichida masters_count bo'yicha top service
+    """
+
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Service cards (category bo'yicha)",
+        description="""
+        by_master kategoriyalar asosida service cards qaytaradi.
+
+        Response'ni UI'ga "Locksmith service you need" kabi cardlar qilish uchun ishlating.
+
+        Query params:
+        - `parent_id` (int, ixtiyoriy): faqat shu ota kategoriyaning child service'lari chiqadi.
+        """,
+        tags=['Masters'],
+        parameters=[
+            OpenApiParameter(
+                name='parent_id',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='by_master parent category id (ixtiyoriy)',
+            ),
+        ],
+        responses={200: ServiceCardsResponseSerializer},
+    )
+    def get(self, request):
+        from django.db.models import Avg, Count, Max, Min
+        from apps.categories.models import Category
+        from apps.order.models import Rating
+
+        parent_id = request.query_params.get('parent_id')
+        if parent_id in (None, ''):
+            parent_id = None
+        else:
+            try:
+                parent_id = int(parent_id)
+            except (ValueError, TypeError):
+                return Response({'error': 'parent_id must be int'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1) price + masters_count (ratings join qilmasdan, duplication bo'lmasligi uchun)
+        price_qs = (
+            MasterServiceItems.objects.filter(category__type_category=Category.TypeCategory.BY_MASTER)
+            .values(
+                'category_id',
+                'category__name',
+                'category__icon',
+                'category__parent_id',
+                'category__parent__name',
+                'category__parent__icon',
             )
-        
-        # Получаем всех сотрудников этого мастера
-        employees = MasterEmployee.objects.filter(
-            master=master
-        ).select_related('employee', 'master').order_by('-added_at')
-        
-        # Сериализуем
-        serializer = MasterEmployeeSerializer(employees, many=True)
-        return Response(serializer.data)
+            .annotate(
+                masters_count=Count('master_service__master', distinct=True),
+                price_min=Min('price'),
+                price_max=Max('price'),
+                price_avg=Avg('price'),
+            )
+        )
+        if parent_id is not None:
+            price_qs = price_qs.filter(category__parent_id=parent_id)
+
+        price_rows = list(price_qs)
+        if not price_rows:
+            return Response({'groups': []}, status=status.HTTP_200_OK)
+
+        # 2) rating stats: category bo'yicha (again price joinsiz ishlaymiz)
+        rating_qs = (
+            MasterServiceItems.objects.filter(category__type_category=Category.TypeCategory.BY_MASTER)
+            .values('category_id')
+            .annotate(
+                average_rating=Avg('master_service__master__ratings__rating'),
+                rating_count=Count('master_service__master__ratings__id'),
+            )
+        )
+        rating_map = {r['category_id']: r for r in rating_qs}
+
+        # Group by parent
+        def abs_url(file_field):
+            """
+            Category.icon odatda FileField bo'ladi, lekin .values() ishlatsak u string path bo'lib keladi.
+            Shuning uchun ham FileField.url, ham string (MEDIA_ROOT ichidagi path)ni media url ga o'tkazamiz.
+            """
+            if not file_field:
+                return None
+
+            # absolute url bo'lsa, shunday qaytaramiz
+            if isinstance(file_field, str):
+                if file_field.startswith('http://') or file_field.startswith('https://'):
+                    return file_field
+
+                # request.build_absolute_uri faqat /media/... kabi pathlar bilan yaxshi ishlaydi
+                try:
+                    if file_field.startswith('/'):
+                        return request.build_absolute_uri(file_field)
+                except Exception:
+                    pass
+
+                from django.conf import settings
+                media_prefix = (settings.MEDIA_URL or '').rstrip('/') + '/'
+                # file_field ko'pincha "categories/icons/..." ko'rinishida keladi
+                return request.build_absolute_uri(media_prefix + file_field.lstrip('/'))
+
+            # FileField (FieldFile) bo'lsa
+            url = getattr(file_field, 'url', None)
+            if url:
+                try:
+                    return request.build_absolute_uri(url)
+                except Exception:
+                    return url
+            return None
+
+        groups_by_parent = {}
+        for row in price_rows:
+            pid = row['category__parent_id']
+            group_id = pid if pid is not None else 0
+
+            if group_id not in groups_by_parent:
+                parent_name = row['category__parent__name'] if pid is not None else 'Other'
+                parent_icon = abs_url(row['category__parent__icon'])
+                groups_by_parent[group_id] = {
+                    'parent_category_id': group_id if pid is not None else None,
+                    'parent_category_name': parent_name,
+                    'parent_category_icon': parent_icon,
+                    'services': [],
+                }
+
+            cat_icon = abs_url(row['category__icon'])
+            rating_row = rating_map.get(row['category_id'], {})
+
+            groups_by_parent[group_id]['services'].append({
+                'category_id': row['category_id'],
+                'name': row['category__name'],
+                'icon': cat_icon,
+                'price_min': float(row['price_min']),
+                'price_max': float(row['price_max']),
+                'price_avg': float(row['price_avg']) if row['price_avg'] is not None else 0.0,
+                'masters_count': row['masters_count'],
+                'average_rating': float(rating_row.get('average_rating')) if rating_row.get('average_rating') is not None else None,
+                'rating_count': int(rating_row.get('rating_count', 0) or 0),
+                'is_most_common': False,  # keyin belgilaymiz
+            })
+
+        # Mark "most common" per group
+        out_groups = []
+        for g in groups_by_parent.values():
+            services = g['services']
+            services.sort(key=lambda x: x['masters_count'], reverse=True)
+            if services:
+                max_count = services[0]['masters_count']
+                for s in services:
+                    if s['masters_count'] == max_count:
+                        s['is_most_common'] = True
+            out_groups.append({
+                'parent_category_id': g['parent_category_id'],
+                'parent_category_name': g['parent_category_name'],
+                'parent_category_icon': g['parent_category_icon'],
+                'services': services,
+            })
+
+        # sort groups (most services first)
+        out_groups.sort(key=lambda x: len(x['services']), reverse=True)
+        return Response({'groups': out_groups}, status=status.HTTP_200_OK)

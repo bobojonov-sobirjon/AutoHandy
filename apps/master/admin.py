@@ -1,105 +1,138 @@
 from django.contrib import admin
-# from django import forms
-# from .models import Master, MasterService, MasterServiceItems, MasterEmployee
-# from apps.categories.models import Category
+from django.utils.html import format_html
+from nested_admin import NestedModelAdmin, NestedTabularInline
 
-"""
-class MasterAdminForm(forms.ModelForm):
-    class Meta:
-        model = Master
-        fields = '__all__'
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if 'category' in self.fields:
-            self.fields['category'].queryset = Category.objects.filter(type_category='by_master')
-    def save(self, commit=True):
-        instance = super().save(commit=False)
-        if commit:
-            instance.save()
-        return instance
+from apps.categories.models import Category
 
-class MasterServiceItemsInline(admin.TabularInline):
+from .models import (
+    Master,
+    MasterBusySlot,
+    MasterImage,
+    MasterScheduleDay,
+    MasterService,
+    MasterServiceItems,
+)
+
+
+def _thumbnail(file_field, height=60):
+    """
+    Render an image thumbnail in Django admin.
+    If media is missing, returns a dash.
+    """
+    if not file_field:
+        return '-'
+    try:
+        return format_html("<img src='{}' style='height:{}px; width:auto;' />", file_field.url, height)
+    except Exception:
+        return '-'
+
+
+class MasterImageInline(NestedTabularInline):
+    model = MasterImage
+    extra = 1
+    ordering = ('-created_at',)
+    fields = ('image_preview', 'image', 'created_at')
+    readonly_fields = ('image_preview', 'created_at')
+
+    def image_preview(self, obj):
+        return _thumbnail(obj.image)
+
+
+class MasterScheduleDayInline(NestedTabularInline):
+    model = MasterScheduleDay
+    extra = 1
+    ordering = ('date',)
+    fields = ('date', 'start_time', 'end_time')
+
+
+class MasterBusySlotInline(NestedTabularInline):
+    model = MasterBusySlot
+    extra = 1
+    ordering = ('date', 'start_time')
+    fields = ('date', 'start_time', 'end_time', 'reason', 'order')
+    readonly_fields = ('order',)
+
+
+class MasterServiceItemsInline(NestedTabularInline):
     model = MasterServiceItems
     extra = 1
-    fields = ['name', 'price_from', 'price_to', 'category']
-    ordering = ['-created_at']
+    ordering = ('-created_at',)
+    fields = ('category_icon_preview', 'category', 'price')
+    readonly_fields = ('category_icon_preview',)
+
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         if db_field.name == 'category':
-            kwargs['queryset'] = Category.objects.filter(type_category='by_master')
+            kwargs['queryset'] = Category.objects.filter(type_category=Category.TypeCategory.BY_MASTER)
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
+    def category_icon_preview(self, obj):
+        if not obj or not obj.category_id:
+            return '-'
+        return _thumbnail(obj.category.icon)
+
+
+class MasterServiceInline(NestedTabularInline):
+    """
+    Master ichida services chiqarish uchun nested inline.
+    Bu inline 'master' FK ni avtomatik oladi (parent Master bo'lgani uchun).
+    """
+
+    model = MasterService
+    extra = 0
+    ordering = ('-created_at',)
+    # master FK parent Master ga to'g'ri bo'lgani uchun admin uni avtomatik bog'laydi.
+    inlines = [MasterServiceItemsInline]
+
+
 @admin.register(Master)
-class MasterAdmin(admin.ModelAdmin):
-    form = MasterAdminForm
-    def get_category(self, obj):
-        return ", ".join([category.name for category in obj.category.all()])
-    get_category.short_description = 'Category'
-    list_display = [
-        'full_name', 'name', 'phone_number', 'city', 'get_category', 'latitude', 'longitude', 'created_at'
-    ]
-    list_filter = [
-        'city', 'created_at'
-    ]
-    search_fields = [
-        'user__phone_number', 'user__first_name', 'user__last_name',
-        'name', 'city'
-    ]
-    ordering = ['-created_at']
+class MasterAdmin(NestedModelAdmin):
+    autocomplete_fields = ('category',)
+    list_display = ('full_name', 'name', 'phone_number', 'city', 'get_categories', 'latitude', 'longitude', 'created_at')
+    list_filter = ('city', 'created_at')
+    search_fields = ('user__phone_number', 'user__first_name', 'user__last_name', 'name', 'city')
+    ordering = ('-created_at',)
+
     fieldsets = (
-        ('User', {
-            'fields': ('user', 'name', 'category', 'description')
+        ('Profile', {
+            'fields': ('user', 'name', 'category', 'description'),
         }),
         ('Location', {
-            'fields': ('city', 'address', 'latitude', 'longitude')
+            'fields': ('city', 'address', 'latitude', 'longitude'),
         }),
-        ('Contact information', {
-            'fields': ('phone', 'working_time')
-        }),
-        ('Bank details', {
-            'fields': ('card_number', 'card_expiry_month', 'card_expiry_year', 'card_cvv'),
-            'classes': ('collapse',)
-        }),
-        ('Finance', {
-            'fields': ('balance', 'reserved_amount'),
-            'classes': ('collapse',)
+        ('Contact', {
+            'fields': ('phone', 'working_time'),
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at', 'last_activity'),
-            'classes': ('collapse',)
+            'classes': ('collapse',),
         }),
     )
-    readonly_fields = ['created_at', 'updated_at', 'last_activity']
+
+    readonly_fields = ('created_at', 'updated_at', 'last_activity')
+
+    def formfield_for_manytomany(self, db_field, request, **kwargs):
+        if db_field.name == 'category':
+            kwargs['queryset'] = Category.objects.filter(type_category=Category.TypeCategory.BY_MASTER)
+        return super().formfield_for_manytomany(db_field, request, **kwargs)
+
+    inlines = [
+        MasterServiceInline,
+        MasterImageInline,
+        MasterScheduleDayInline,
+        MasterBusySlotInline,
+    ]
+
+    def get_categories(self, obj):
+        return ", ".join([c.name for c in obj.category.all()])
+
+    get_categories.short_description = 'Categories'
+
     def full_name(self, obj):
         return obj.full_name
+
     full_name.short_description = 'Full name'
+
     def phone_number(self, obj):
         return obj.phone_number
+
     phone_number.short_description = 'Phone'
-    def services_display(self, obj):
-        from .models import MasterService
-        master_services = MasterService.objects.filter(master=obj)
-        return f"{master_services.count()} services"
-    services_display.short_description = 'Services'
-
-@admin.register(MasterService)
-class MasterServiceAdmin(admin.ModelAdmin):
-    list_display = ['master__address', 'master__city', 'master', 'items_count', 'created_at']
-    list_filter = ['created_at']
-    search_fields = ['master__user__phone_number', 'master__user__first_name']
-    ordering = ['-created_at']
-    inlines = [MasterServiceItemsInline]
-    def items_count(self, obj):
-        return obj.master_service_items.count()
-    items_count.short_description = 'Item count'
-
-@admin.register(MasterEmployee)
-class MasterEmployeeAdmin(admin.ModelAdmin):
-    list_display = ('id', 'master', 'employee', 'added_at')
-    list_filter = ('added_at',)
-    search_fields = ('master__user__email', 'employee__email', 'employee__phone_number')
-    readonly_fields = ('added_at',)
-    def get_readonly_fields(self, request, obj=None):
-        if obj:
-            return self.readonly_fields + ('master', 'employee')
-        return self.readonly_fields
-"""

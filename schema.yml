@@ -1321,8 +1321,8 @@ paths:
       description: "\n        Получить список мастеров с обязательной фильтрацией.\
         \ \n        \n        **ВАЖНО**: Если фильтры не указаны, возвращается пустой\
         \ список!\n        \n        **Параметры фильтрации:**\n        - `category`\
-        \ - ID категории (by_order или by_master). При by_order ищет мастеров через\
-        \ service_type или название\n        - `name` - Название мастерской (поиск\
+        \ - ID категории (by_order или by_master). При by_order — умный поиск по дереву\
+        \ parent и названию\n        - `name` - Название мастерской (поиск\
         \ по частичному совпадению)\n        - `lat` - Широта текущего местоположения\
         \ пользователя (требуется вместе с long и radius)\n        - `long` - Долгота\
         \ текущего местоположения пользователя (требуется вместе с lat и radius)\n\
@@ -1334,7 +1334,7 @@ paths:
         \ мастера в радиусе 5 км\n        - `/api/master/masters/list/?category=1&lat=41.3111&long=69.2797&radius=10`\
         \ - комбинация фильтров\n        \n        **Умный поиск по категории:**\n\
         \        - Если category типа by_order: ищет мастеров через MasterServiceItems\
-        \ по service_type или названию\n        - Если category типа by_master: прямой\
+        \ по дереву parent и названию\n        - Если category типа by_master: прямой\
         \ поиск по категории мастера\n        - Точность поиска: 80-90%\n        \n\
         \        **Геолокация:**\n        - Расчет расстояния выполняется по формуле\
         \ Haversine\n        - Возвращаются только мастера с заполненными координатами\
@@ -2254,12 +2254,11 @@ components:
             * `by_order` - По категории заказа
           x-spec-enum-id: 6572e7f4d22d9a6e
           title: Тип категории
-        service_type:
-          type: string
-          title: Тип услуги
-          description: 'Общий тип услуги для связи между by_order и by_master категориями
-            (например: remont, diagnostika, zamena)'
-          maxLength: 100
+        parent:
+          type: integer
+          nullable: true
+          title: Родительская категория
+          description: ID родительской категории (иерархия вместо service_type)
         created_at:
           type: string
           format: date-time

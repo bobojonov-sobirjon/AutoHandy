@@ -7,35 +7,27 @@ from rest_framework.permissions import AllowAny
 from drf_spectacular.utils import extend_schema, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 
+
+def _main_categories_queryset():
+    return Category.objects.filter(parent__isnull=True)
+
+
 class CategoryListAPIView(APIView):
     permission_classes = [AllowAny]
     
     @extend_schema(
         summary="Получить список категорий",
         description="""
-        Получить список всех категорий с возможностью фильтрации по типу.
-        
+        Возвращает только **основные (main) категории** — у которых нет родителя (`parent` = null).
+        Подкатегории смотрите в `GET /api/categories/subcategories/?parent_id=...`.
+
         **Фильтрация:**
-        - Используйте параметр `type` для фильтрации категорий по типу (TypeCategory)
-        - Доступные значения фильтра:
-          * `by_master` - Категории для мастерских (услуги мастеров)
-          * `by_car` - Категории для автомобилей (марки, модели и т.д.)
-          * `by_order` - Категории для заказов
-        - Если параметр `type` не указан, возвращаются все категории
-        
-        **Примеры использования:**
-        - `/api/categories/categories/` - все категории
-        - `/api/categories/categories/?type=by_master` - только категории мастеров
-        - `/api/categories/categories/?type=by_car` - только категории машин
-        - `/api/categories/categories/?type=by_order` - только категории заказов
-        
-        **Поля в ответе:**
-        - `id` - ID категории
-        - `name` - Название категории
-        - `type_category` - Тип категории (by_master, by_car, by_order)
-        - `icon` - URL иконки категории (полный URL)
-        - `created_at` - Дата создания
-        - `updated_at` - Дата обновления
+        - Параметр `type` — по типу (TypeCategory): `by_master`, `by_car`, `by_order`
+        - Без `type` — все основные категории
+
+        **Примеры:**
+        - `/api/categories/categories/` — все main-категории
+        - `/api/categories/categories/?type=by_order` — main по заказам
         """,
         parameters=[
             OpenApiParameter(
@@ -53,17 +45,71 @@ class CategoryListAPIView(APIView):
         tags=['Categories']
     )
     def get(self, request):
-        """Получение списка категорий с фильтрацией по TypeCategory"""
+        """Список только основных категорий с фильтром по TypeCategory."""
         type_filter = request.query_params.get('type')
-        
+        base = _main_categories_queryset()
+
         if type_filter == 'by_master':
-            categories = Category.by_master.all()
+            categories = base.filter(type_category='by_master')
         elif type_filter == 'by_car':
-            categories = Category.by_car.all()
+            categories = base.filter(type_category='by_car')
         elif type_filter == 'by_order':
-            categories = Category.by_order.all()
+            categories = base.filter(type_category='by_order')
         else:
-            categories = Category.objects.all()
-        
+            categories = base
+
+        categories = categories.order_by('-created_at')
         serializer = CategorySerializer(categories, many=True, context={'request': request})
+        return Response(serializer.data)
+
+
+class SubCategoryListAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Подкатегории по основной категории",
+        description="""
+        Список подкатегорий для указанной **основной** категории.
+        `parent_id` — ID main-категории (без родителя). Если категория не main или не найдена — 404.
+        """,
+        parameters=[
+            OpenApiParameter(
+                name='parent_id',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                description='ID основной (main) категории',
+                required=True,
+            ),
+        ],
+        responses={
+            200: CategorySerializer(many=True),
+            400: OpenApiTypes.OBJECT,
+            404: OpenApiTypes.OBJECT,
+        },
+        tags=['Categories'],
+    )
+    def get(self, request):
+        raw = request.query_params.get('parent_id')
+        if raw is None or raw == '':
+            return Response(
+                {'detail': 'Query parameter parent_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            parent_pk = int(raw)
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'parent_id must be an integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        main_exists = _main_categories_queryset().filter(pk=parent_pk).exists()
+        if not main_exists:
+            return Response(
+                {'detail': 'Main category not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        subs = Category.objects.filter(parent_id=parent_pk).order_by('-created_at')
+        serializer = CategorySerializer(subs, many=True, context={'request': request})
         return Response(serializer.data)

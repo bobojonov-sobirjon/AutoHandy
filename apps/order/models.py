@@ -421,7 +421,9 @@ class OrderService(models.Model):
         unique_together = ['order', 'master_service_item']
 
     def __str__(self):
-        return f"Order #{self.order.id} - {self.master_service_item.name}"
+        if self.master_service_item_id and self.master_service_item.category_id:
+            return f"Order #{self.order.id} - {self.master_service_item.category.name}"
+        return f"Order #{self.order.id} - service #{self.master_service_item_id}"
 
 
 class ScheduledOrderManager(models.Manager):

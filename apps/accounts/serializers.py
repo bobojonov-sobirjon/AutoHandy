@@ -130,7 +130,10 @@ class UserSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = CustomUser
-        fields = ['id', 'private_id', 'phone_number', 'first_name', 'last_name', 'email', 'description', 'is_verified', 'created_at', 'roles', 'balance']
+        fields = [
+            'id', 'private_id', 'phone_number', 'first_name', 'last_name', 'email',
+            'is_verified', 'is_email_verified', 'created_at', 'roles', 'balance',
+        ]
         read_only_fields = ['id', 'private_id', 'created_at', 'roles', 'balance']
     
     def get_roles(self, obj):
@@ -209,16 +212,16 @@ class UserDetailsSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
         fields = [
-            'id', 'private_id', 'username', 'email', 'phone_number', 'first_name', 
-            'last_name', 'date_of_birth', 'avatar', 'address', 
-            'longitude', 'latitude', 'is_verified', 'roles', 'balance',
+            'id', 'private_id', 'username', 'email', 'phone_number', 'first_name',
+            'last_name', 'date_of_birth', 'avatar', 'address',
+            'longitude', 'latitude', 'is_verified', 'is_email_verified', 'roles', 'balance',
             'reviews', 'rating', 'reviews_count', 'completed_orders', 'recommendation_percentage',
-            'created_at', 'updated_at', 'description'
+            'created_at', 'updated_at', 'description',
         ]
         read_only_fields = [
-            'id', 'private_id', 'email', 'phone_number', 'is_verified', 'roles', 'balance',
+            'id', 'private_id', 'email', 'phone_number', 'is_verified', 'is_email_verified', 'roles', 'balance',
             'reviews', 'rating', 'reviews_count', 'completed_orders', 'recommendation_percentage',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
         ]
     
     def get_roles(self, obj):
@@ -373,6 +376,67 @@ class UserDetailsSerializer(serializers.ModelSerializer):
             logger = logging.getLogger(__name__)
             logger.error(f"Error getting recommendation percentage for user {obj.id}: {str(e)}")
             return 0
+
+
+class UserProfileRegistrationSerializer(serializers.Serializer):
+    """Multipart/form POST: full profile fields + email verification flow."""
+    first_name = serializers.CharField(max_length=150, required=True)
+    last_name = serializers.CharField(max_length=150, required=True)
+    email = serializers.EmailField(required=True)
+    date_of_birth = serializers.DateField(required=False, allow_null=True)
+    address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    avatar = serializers.ImageField(required=False, allow_null=True)
+
+
+class UserLimitedProfileUpdateSerializer(serializers.ModelSerializer):
+    """PUT/PATCH: only first_name, last_name, avatar, date_of_birth (multipart/form-data)."""
+    avatar = serializers.ImageField(
+        use_url=True,
+        required=False,
+        allow_null=True,
+        help_text="Profile image file",
+    )
+
+    class Meta:
+        model = CustomUser
+        fields = ['first_name', 'last_name', 'avatar', 'date_of_birth']
+        extra_kwargs = {
+            'first_name': {'required': False},
+            'last_name': {'required': False},
+            'date_of_birth': {'required': False, 'allow_null': True},
+        }
+
+
+class UserLocationUpdateSerializer(serializers.ModelSerializer):
+    """JSON PUT: latitude and longitude (both required)."""
+
+    class Meta:
+        model = CustomUser
+        fields = ['latitude', 'longitude']
+        extra_kwargs = {
+            'latitude': {'required': True, 'allow_null': True},
+            'longitude': {'required': True, 'allow_null': True},
+        }
+
+    def validate_latitude(self, value):
+        if value is None:
+            return value
+        v = float(value)
+        if v < -90 or v > 90:
+            raise serializers.ValidationError('Latitude must be between -90 and 90.')
+        return value
+
+    def validate_longitude(self, value):
+        if value is None:
+            return value
+        v = float(value)
+        if v < -180 or v > 180:
+            raise serializers.ValidationError('Longitude must be between -180 and 180.')
+        return value
+
+
+class EmailVerificationConfirmSerializer(serializers.Serializer):
+    token = serializers.UUIDField(required=True)
 
 
 class UserUpdateSerializer(serializers.ModelSerializer):

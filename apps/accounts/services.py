@@ -6,6 +6,7 @@ import re
 import requests
 import random
 import logging
+from typing import Optional
 from django.conf import settings
 from django.core.cache import cache
 from django.contrib.auth import get_user_model
@@ -21,6 +22,13 @@ from .models import UserSMSCode
 logger = logging.getLogger(__name__)
 
 User = get_user_model()
+
+
+def _phone_cache_id(identifier_type: str, identifier: str, phone_e164: Optional[str]) -> str:
+    """Stable id for cache keys and User.phone_number (phone flow only)."""
+    if identifier_type == 'phone' and phone_e164:
+        return phone_e164
+    return identifier
 
 
 class SMSService:
@@ -167,7 +175,7 @@ class SMSService:
             if identifier_type == 'phone':
                 phone_number = SMSService.format_phone_to_e164(identifier)
                 try:
-                    user = User.objects.prefetch_related('groups').get(phone_number=identifier)
+                    user = User.objects.prefetch_related('groups').get(phone_number=phone_number)
                     user_exists = True
                     if role:
                         user_groups = user.groups.values_list('name', flat=True)
@@ -215,33 +223,45 @@ class SMSService:
                 if not sms_sent:
                     logger.warning(f"Twilio send failed for {phone_number}: {sms_error}")
 
-            UserSMSCode.objects.filter(
-                identifier=identifier,
-                identifier_type=identifier_type,
-                is_used=False
-            ).update(is_used=True, used_at=timezone.now())
+            cache_id = _phone_cache_id(identifier_type, identifier, phone_number if identifier_type == 'phone' else None)
+
+            if identifier_type == 'phone':
+                UserSMSCode.objects.filter(
+                    identifier_type=identifier_type,
+                    identifier__in=[identifier, phone_number],
+                    is_used=False,
+                ).update(is_used=True, used_at=timezone.now())
+            else:
+                UserSMSCode.objects.filter(
+                    identifier=identifier,
+                    identifier_type=identifier_type,
+                    is_used=False,
+                ).update(is_used=True, used_at=timezone.now())
 
             expires_at = timezone.now() + timedelta(minutes=5)
             created_by_user = None
             if user_exists:
                 try:
-                    created_by_user = User.objects.get(phone_number=identifier) if identifier_type == 'phone' else User.objects.get(email=identifier)
+                    if identifier_type == 'phone':
+                        created_by_user = User.objects.get(phone_number=phone_number)
+                    else:
+                        created_by_user = User.objects.get(email=identifier)
                 except User.DoesNotExist:
                     pass
 
             UserSMSCode.objects.create(
                 code=sms_code,
-                identifier=identifier,
+                identifier=cache_id,
                 identifier_type=identifier_type,
                 created_by=created_by_user,
                 expires_at=expires_at
             )
 
-            cache_key = f'sms_code_{identifier_type}_{identifier}'
+            cache_key = f'sms_code_{identifier_type}_{cache_id}'
             cache.set(cache_key, sms_code, timeout=300)
-            cache.set(f'user_exists_{identifier_type}_{identifier}', user_exists, timeout=300)
+            cache.set(f'user_exists_{identifier_type}_{cache_id}', user_exists, timeout=300)
             if role:
-                cache.set(f'user_role_{identifier_type}_{identifier}', role, timeout=300)
+                cache.set(f'user_role_{identifier_type}_{cache_id}', role, timeout=300)
 
             send_code_in_response = getattr(settings, 'SMS_SEND_CODE_IN_RESPONSE_IF_FAIL', True)
             if identifier_type == 'email':
@@ -292,20 +312,32 @@ class SMSService:
             if role and role not in ['Driver', 'Master', 'Owner']:
                 return {'success': False, 'error': 'Invalid role', 'status_code': status.HTTP_400_BAD_REQUEST}
 
+            phone_number = SMSService.format_phone_to_e164(identifier) if identifier_type == 'phone' else None
+            cache_id = _phone_cache_id(identifier_type, identifier, phone_number)
+
             # Get code from database (primary source)
             try:
-                sms_code_obj = UserSMSCode.objects.filter(
-                    identifier=identifier,
-                    identifier_type=identifier_type,
-                    code=sms_code,
-                    is_used=False
-                ).order_by('-created_at').first()
-                
+                if identifier_type == 'phone':
+                    sms_code_obj = UserSMSCode.objects.filter(
+                        identifier_type=identifier_type,
+                        identifier__in=[identifier, phone_number],
+                        code=sms_code,
+                        is_used=False,
+                    ).order_by('-created_at').first()
+                else:
+                    sms_code_obj = UserSMSCode.objects.filter(
+                        identifier=identifier,
+                        identifier_type=identifier_type,
+                        code=sms_code,
+                        is_used=False,
+                    ).order_by('-created_at').first()
+
                 if not sms_code_obj:
-                    # Try cache as fallback
-                    cache_key = f'sms_code_{identifier_type}_{identifier}'
+                    cache_key = f'sms_code_{identifier_type}_{cache_id}'
                     stored_code = cache.get(cache_key)
-                    
+                    if (not stored_code or stored_code != sms_code) and identifier_type == 'phone':
+                        stored_code = cache.get(f'sms_code_{identifier_type}_{identifier}')
+
                     if not stored_code or stored_code != sms_code:
                         return {'success': False, 'error': 'Invalid SMS code', 'status_code': status.HTTP_400_BAD_REQUEST}
                 else:
@@ -313,27 +345,32 @@ class SMSService:
                         return {'success': False, 'error': 'SMS code expired', 'status_code': status.HTTP_400_BAD_REQUEST}
                     sms_code_obj.mark_as_used()
                     logger.info(f"SMS code verified for {identifier}")
-                    
+
             except Exception as e:
                 logger.error(f"Error verifying SMS code: {str(e)}")
-                # Fallback to cache
-                cache_key = f'sms_code_{identifier_type}_{identifier}'
+                cache_key = f'sms_code_{identifier_type}_{cache_id}'
                 stored_code = cache.get(cache_key)
-                
+                if (not stored_code or stored_code != sms_code) and identifier_type == 'phone':
+                    stored_code = cache.get(f'sms_code_{identifier_type}_{identifier}')
+
                 if not stored_code or stored_code != sms_code:
                     return {'success': False, 'error': 'Invalid SMS code', 'status_code': status.HTTP_400_BAD_REQUEST}
 
             # Find or create user
-            user_exists = cache.get(f'user_exists_{identifier_type}_{identifier}', False)
-            
-            cached_role = cache.get(f'user_role_{identifier_type}_{identifier}')
+            user_exists = cache.get(f'user_exists_{identifier_type}_{cache_id}', False)
+            if not user_exists and identifier_type == 'phone':
+                user_exists = cache.get(f'user_exists_{identifier_type}_{identifier}', False)
+
+            cached_role = cache.get(f'user_role_{identifier_type}_{cache_id}')
+            if not cached_role and identifier_type == 'phone':
+                cached_role = cache.get(f'user_role_{identifier_type}_{identifier}')
             if not role and cached_role:
                 role = cached_role
             
             if user_exists:
                 try:
                     if identifier_type == 'phone':
-                        user = User.objects.prefetch_related('groups').get(phone_number=identifier)
+                        user = User.objects.prefetch_related('groups').get(phone_number=phone_number)
                     else:  # email
                         user = User.objects.prefetch_related('groups').get(email=identifier)
                     created = False
@@ -352,12 +389,12 @@ class SMSService:
                 except User.DoesNotExist:
                     if identifier_type == 'phone':
                         user, created = User.objects.prefetch_related('groups').get_or_create(
-                            phone_number=identifier,
+                            phone_number=phone_number,
                             defaults={
-                                'username': f'user_{identifier}',
-                                'email': f'{identifier}@example.com',
-                                'first_name': 'User',
-                                'last_name': identifier,
+                                'username': f'user_{phone_number}',
+                                'email': None,
+                                'first_name': '',
+                                'last_name': '',
                                 'is_verified': True
                             }
                         )
@@ -374,8 +411,8 @@ class SMSService:
                             defaults={
                                 'username': f'user_{identifier.split("@")[0]}',
                                 'phone_number': None,
-                                'first_name': 'User',
-                                'last_name': identifier.split("@")[0],
+                                'first_name': '',
+                                'last_name': '',
                                 'is_verified': True
                             }
                         )
@@ -388,16 +425,13 @@ class SMSService:
                                 logger.warning(f"Group {role} not found, skipping role assignment")
             else:
                 if identifier_type == 'phone':
-                    normalized = SMSService.format_phone_to_e164(identifier)
-                    country_code = normalized[:3] if len(normalized) >= 3 else normalized
-                    display_name = normalized[len(country_code):] if len(normalized) > len(country_code) else normalized
                     user, created = User.objects.prefetch_related('groups').get_or_create(
-                        phone_number=identifier,
+                        phone_number=phone_number,
                         defaults={
-                            'username': f'user_{identifier}',
-                            'email': f'{identifier}@example.com',
-                            'first_name': f'User_{country_code}',
-                            'last_name': display_name or identifier,
+                            'username': f'user_{phone_number}',
+                            'email': None,
+                            'first_name': '',
+                            'last_name': '',
                             'is_verified': True
                         }
                     )
@@ -414,8 +448,8 @@ class SMSService:
                         defaults={
                             'username': f'user_{identifier.split("@")[0]}',
                             'phone_number': None,
-                            'first_name': 'User',
-                            'last_name': identifier.split("@")[0],
+                            'first_name': '',
+                            'last_name': '',
                             'is_verified': True
                         }
                     )
@@ -427,12 +461,25 @@ class SMSService:
                         except Group.DoesNotExist:
                             logger.warning(f"Group {role} not found, skipping role assignment")
             
+            # Phone sign-up: never keep placeholder name/email (safety net after create).
+            if identifier_type == 'phone' and created:
+                User.objects.filter(pk=user.pk).update(
+                    first_name='',
+                    last_name='',
+                    email=None,
+                )
+                user.refresh_from_db(fields=['first_name', 'last_name', 'email'])
+
             refresh = RefreshToken.for_user(user)
             access_token = refresh.access_token
             
-            cache.delete(f'user_exists_{identifier_type}_{identifier}')
-            cache.delete(f'user_role_{identifier_type}_{identifier}')
-            cache.delete(f'sms_code_{identifier_type}_{identifier}')
+            cache.delete(f'user_exists_{identifier_type}_{cache_id}')
+            cache.delete(f'user_role_{identifier_type}_{cache_id}')
+            cache.delete(f'sms_code_{identifier_type}_{cache_id}')
+            if identifier_type == 'phone':
+                cache.delete(f'user_exists_{identifier_type}_{identifier}')
+                cache.delete(f'user_role_{identifier_type}_{identifier}')
+                cache.delete(f'sms_code_{identifier_type}_{identifier}')
 
             return {
                 'success': True,

@@ -8,6 +8,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q
 from django.contrib.auth import get_user_model
 
+from apps.categories.query import order_by_order_category_smart_q
+
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
 
@@ -403,80 +405,66 @@ Each slot has: **start**, **end** (HH:MM), **available** (true/false), **order_i
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Parse master working time (e.g. "09:00-18:00")
-        working_time = master.working_time or "09:00-18:00"
-        
-        try:
-            start_time_str, end_time_str = working_time.split('-')
-            start_hour, start_minute = map(int, start_time_str.strip().split(':'))
-            end_hour, end_minute = map(int, end_time_str.strip().split(':'))
-        except:
-            # If parsing failed, use default values
-            start_hour, start_minute = 9, 0
-            end_hour, end_minute = 18, 0
-        
-        # Generate time slots (every 2 hours)
+        from apps.master.models import MasterBusySlot, MasterScheduleDay
+
+        day_row = MasterScheduleDay.objects.filter(master=master, date=check_date).first()
+        schedule_source = 'master_schedule_day' if day_row else 'working_time_fallback'
+        if day_row:
+            start_hour, start_minute = day_row.start_time.hour, day_row.start_time.minute
+            end_hour, end_minute = day_row.end_time.hour, day_row.end_time.minute
+            working_hours_display = (
+                f'{day_row.start_time.strftime("%H:%M")}-{day_row.end_time.strftime("%H:%M")}'
+            )
+        else:
+            working_time = master.working_time or '09:00-18:00'
+            working_hours_display = working_time
+            try:
+                start_time_str, end_time_str = working_time.split('-')
+                start_hour, start_minute = map(int, start_time_str.strip().split(':'))
+                end_hour, end_minute = map(int, end_time_str.strip().split(':'))
+            except Exception:
+                start_hour, start_minute = 9, 0
+                end_hour, end_minute = 18, 0
+
         slots = []
         current_hour = start_hour
         current_minute = start_minute
-        
         while current_hour < end_hour:
             slot_start = time(current_hour, current_minute)
-            
-            # Add 2 hours
             next_hour = current_hour + 2
             next_minute = current_minute
-            
-            # Check we don't exceed working hours
             if next_hour > end_hour or (next_hour == end_hour and next_minute > end_minute):
                 break
-            
             slot_end = time(next_hour, next_minute)
-            
             slots.append({
                 'start': slot_start.strftime('%H:%M'),
                 'end': slot_end.strftime('%H:%M'),
             })
-            
             current_hour = next_hour
             current_minute = next_minute
-        
-        # Get existing orders on this date for this master
-        existing_orders = Order.objects.filter(
-            master=master,
-            order_type=OrderType.SCHEDULED,
-            scheduled_date=check_date,
-            status__in=[OrderStatus.PENDING, OrderStatus.IN_PROGRESS]
-        ).select_related('user')
-        
-        # Check availability of each slot
+
+        busy_qs = MasterBusySlot.objects.filter(master=master, date=check_date)
+        busy_list = list(busy_qs)
+
         for slot in slots:
+            slot_start_time = datetime.strptime(slot['start'], '%H:%M').time()
+            slot_end_time = datetime.strptime(slot['end'], '%H:%M').time()
             slot['available'] = True
-            
-            for order in existing_orders:
-                if not order.scheduled_time_start or not order.scheduled_time_end:
-                    continue
-                
-                order_start = order.scheduled_time_start.strftime('%H:%M')
-                order_end = order.scheduled_time_end.strftime('%H:%M')
-                
-                # Check time interval overlap
-                slot_start_time = datetime.strptime(slot['start'], '%H:%M').time()
-                slot_end_time = datetime.strptime(slot['end'], '%H:%M').time()
-                
-                # If order overlaps with slot
-                if (order.scheduled_time_start < slot_end_time and 
-                    order.scheduled_time_end > slot_start_time):
+            slot.pop('order_id', None)
+            for block in busy_list:
+                if block.start_time < slot_end_time and block.end_time > slot_start_time:
                     slot['available'] = False
-                    slot['order_id'] = order.id
+                    if block.order_id:
+                        slot['order_id'] = block.order_id
                     break
-        
+
         return Response({
             'date': date_str,
             'master_id': master.id,
             'master_name': master.name or master.user.get_full_name(),
-            'working_hours': working_time,
-            'slots': slots
+            'working_hours': working_hours_display,
+            'schedule_source': schedule_source,
+            'slots': slots,
         })
 
 
@@ -743,9 +731,8 @@ class OrdersByUserView(APIView):
 
 ### 3. Тип проблемы (category)
 - ID категории типа **by_order**
-- Использует **smart filter** через service_type
-- Пример: `category=1` (где 1 - это "Пробито колесо", service_type="Шиномонтаж")
-- Найдёт все заказы с похожим service_type или именем категории
+- Использует **smart filter** через дерево parent категории
+- Пример: `category=1` — заказы с той же категорией, соседями (общий parent), родителем или дочерними
 
 ### 4. Район (location)
 - Поиск по адресу заказа
@@ -812,7 +799,7 @@ GET /api/order/by-user/?order_type=scheduled&status=pending
         parameters=[
             OpenApiParameter(name='status', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по статусу заказа', required=False, enum=[choice[0] for choice in OrderStatus.choices]),
             OpenApiParameter(name='priority', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по приоритету (low, high)', required=False, enum=['low', 'high']),
-            OpenApiParameter(name='category', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Фильтр по типу проблемы. ID категории типа by_order. Использует smart filter через service_type.', required=False),
+            OpenApiParameter(name='category', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Фильтр по типу проблемы. ID категории by_order. Smart filter по parent-дереву.', required=False),
             OpenApiParameter(name='location', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по району (поиск по адресу заказа)', required=False),
             OpenApiParameter(name='car_category', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Фильтр по типу ТС (ID категории машины типа by_car)', required=False),
             OpenApiParameter(name='order_type', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по типу заказа (scheduled - запланированные, sos - экстренные)', required=False, enum=['scheduled', 'sos']),
@@ -853,20 +840,8 @@ GET /api/order/by-user/?order_type=scheduled&status=pending
                 category_id = int(category_filter)
                 category = Category.objects.get(id=category_id)
                 
-                # Если это by_order категория - используем smart filter через service_type
                 if category.type_category == 'by_order':
-                    category_conditions = Q()
-                    
-                    if category.service_type:
-                        # Ищем заказы с похожим service_type
-                        category_conditions |= Q(category__service_type__icontains=category.service_type)
-                    
-                    if category.name:
-                        # Также ищем по имени категории
-                        category_conditions |= Q(category__name__icontains=category.name)
-                    
-                    if category_conditions:
-                        orders = orders.filter(category_conditions)
+                    orders = orders.filter(order_by_order_category_smart_q(category))
                 else:
                     # Для других типов - прямой фильтр по ID
                     orders = orders.filter(category__id=category_id)
@@ -938,9 +913,8 @@ class OrdersByMasterView(APIView):
 
 ### 3. Тип проблемы (category)
 - ID категории типа **by_order**
-- Использует **smart filter** через service_type
-- Пример: `category=1` (где 1 - это "Пробито колесо", service_type="Шиномонтаж")
-- Найдёт все заказы с похожим service_type или именем категории
+- Использует **smart filter** через дерево parent категории
+- Пример: `category=1` — заказы с той же категорией, соседями (общий parent), родителем или дочерними
 
 ### 4. Район (location)
 - Поиск по адресу заказа
@@ -1041,7 +1015,7 @@ GET /api/order/by-master/?order_type=scheduled&status=pending
         parameters=[
             OpenApiParameter(name='status', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по статусу заказа', required=False, enum=[choice[0] for choice in OrderStatus.choices]),
             OpenApiParameter(name='priority', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по приоритету (low, high)', required=False, enum=['low', 'high']),
-            OpenApiParameter(name='category', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Фильтр по типу проблемы. ID категории типа by_order. Использует smart filter через service_type.', required=False),
+            OpenApiParameter(name='category', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Фильтр по типу проблемы. ID категории by_order. Smart filter по parent-дереву.', required=False),
             OpenApiParameter(name='location', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по району (поиск по адресу заказа)', required=False),
             OpenApiParameter(name='car_category', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Фильтр по типу ТС (ID категории машины типа by_car)', required=False),
             # Координаты полигона (4 точки)
@@ -1131,20 +1105,8 @@ GET /api/order/by-master/?order_type=scheduled&status=pending
                 category_id = int(category_filter)
                 category = Category.objects.get(id=category_id)
                 
-                # Если это by_order категория - используем smart filter через service_type
                 if category.type_category == 'by_order':
-                    category_conditions = Q()
-                    
-                    if category.service_type:
-                        # Ищем заказы с похожим service_type
-                        category_conditions |= Q(category__service_type__icontains=category.service_type)
-                    
-                    if category.name:
-                        # Также ищем по имени категории
-                        category_conditions |= Q(category__name__icontains=category.name)
-                    
-                    if category_conditions:
-                        orders = orders.filter(category_conditions)
+                    orders = orders.filter(order_by_order_category_smart_q(category))
                 else:
                     # Для других типов - прямой фильтр по ID
                     orders = orders.filter(category__id=category_id)
@@ -1704,9 +1666,8 @@ class AvailableOrdersForMasterView(APIView):
 
 ### 1. Тип проблемы (category)
 - ID категории типа **by_order**
-- Использует **smart filter** через service_type
-- Пример: `category=1` (где 1 - это "Пробито колесо", service_type="Шиномонтаж")
-- Найдёт все заказы с похожим service_type или именем категории
+- Использует **smart filter** через дерево parent категории
+- Пример: `category=1` — заказы с той же категорией, соседями (общий parent), родителем или дочерними
 
 ### 2. Район (location)
 - Поиск по адресу заказа
@@ -1783,7 +1744,7 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
                 name='category',
                 type=OpenApiTypes.INT,
                 location=OpenApiParameter.QUERY,
-                description='Фильтр по типу проблемы. ID категории типа by_order. Использует smart filter через service_type (например: 1 для "Пробито колесо").',
+                description='Фильтр по типу проблемы. ID категории by_order. Smart filter по parent-дереву.',
                 required=False
             ),
             OpenApiParameter(
@@ -1856,7 +1817,7 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
                                             'id': 1,
                                             'name': 'Пробито колесо',
                                             'type_category': 'by_order',
-                                            'service_type': 'Шиномонтаж'
+                                            'parent': None
                                         }
                                     ],
                                     'text': 'Нужна помощь с заменой колеса',
@@ -1982,20 +1943,8 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
                 category_id = int(category_filter)
                 category = Category.objects.get(id=category_id)
                 
-                # Если это by_order категория - используем smart filter через service_type
                 if category.type_category == 'by_order':
-                    category_conditions = Q()
-                    
-                    if category.service_type:
-                        # Ищем заказы с похожим service_type
-                        category_conditions |= Q(category__service_type__icontains=category.service_type)
-                    
-                    if category.name:
-                        # Также ищем по имени категории
-                        category_conditions |= Q(category__name__icontains=category.name)
-                    
-                    if category_conditions:
-                        orders = orders.filter(category_conditions)
+                    orders = orders.filter(order_by_order_category_smart_q(category))
                 else:
                     # Для других типов - прямой фильтр по ID
                     orders = orders.filter(category__id=category_id)
@@ -2172,12 +2121,7 @@ GET /api/order/services-list/?master_id=5
 ```
 
 ## Response
-Возвращает список услуг мастера с полной информацией:
-- ID услуги
-- Название
-- Цена (от - до)
-- Категория
-- Мастер
+Возвращает навыки мастера: подкатегория каталога (by_order) + цена мастера.
         """,
         tags=['Orders'],
         parameters=[
@@ -2196,24 +2140,23 @@ GET /api/order/services-list/?master_id=5
                     'type': 'object',
                     'properties': {
                         'id': {'type': 'integer'},
-                        'name': {'type': 'string'},
-                        'price_from': {'type': 'number'},
-                        'price_to': {'type': 'number'},
-                        'category': {'type': 'object'},
+                        'category': {'type': 'integer'},
+                        'service_name': {'type': 'string'},
+                        'parent_category_id': {'type': 'integer', 'nullable': True},
+                        'parent_category_name': {'type': 'string', 'nullable': True},
+                        'price': {'type': 'number'},
                         'master_service': {'type': 'integer'},
                     }
                 },
                 'example': [
                     {
                         'id': 1,
-                        'name': 'Замена масла',
-                        'price_from': 1000.0,
-                        'price_to': 2000.0,
-                        'category': {
-                            'id': 1,
-                            'name': 'Ремонт двигателя'
-                        },
-                        'master_service': 5
+                        'category': 12,
+                        'service_name': 'Headlight Restoration',
+                        'parent_category_id': 3,
+                        'parent_category_name': 'Lights',
+                        'price': 100.0,
+                        'master_service': 5,
                     }
                 ]
             },

@@ -12,12 +12,14 @@ class Category(models.Model):
 
     name = models.CharField(max_length=255, verbose_name='Category name')
     type_category = models.CharField(max_length=255, verbose_name='Category type', choices=TypeCategory.choices)
-    service_type = models.CharField(
-        max_length=100,
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
         blank=True,
-        default='',
-        verbose_name='Service type',
-        help_text='Common service type for linking by_order and by_master categories. Examples: Repair, Diagnostics, Replacement, Maintenance, Tire fitting, Painting, Body repair, Electrical, Air conditioning, Tuning, etc.'
+        related_name='children',
+        verbose_name='Parent category',
+        help_text='Optional parent to group related categories (e.g. same service family across by_order / by_master).',
     )
     icon = models.FileField(upload_to='categories/icons/', verbose_name='Category icon', null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
@@ -35,3 +37,21 @@ class Category(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class MainCategory(Category):
+    """Top-level category (no parent); use Main categories in admin."""
+
+    class Meta:
+        proxy = True
+        verbose_name = 'Main category'
+        verbose_name_plural = 'Main categories'
+
+
+class SubCategory(Category):
+    """Child category with a main category as parent; use Sub categories in admin."""
+
+    class Meta:
+        proxy = True
+        verbose_name = 'Sub category'
+        verbose_name_plural = 'Sub categories'

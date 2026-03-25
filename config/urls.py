@@ -22,9 +22,9 @@ urlpatterns += [
     path('api/auth/oauth/token/', SwaggerTokenView.as_view(), name='swagger-oauth-token'),
     path('api/car/', include('apps.car.urls')),
     path('api/master/', include('apps.master.urls')),
-    path('api/order/', include('apps.order.urls')),
+    # path('api/order/', include('apps.order.urls')),
     path('api/categories/', include('apps.categories.urls')),
-    path('api/chat/', include('apps.chat.urls')),
+    # path('api/chat/', include('apps.chat.urls')),
 ]
 
 urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)

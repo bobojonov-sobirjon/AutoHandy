@@ -1,8 +1,15 @@
 from django.urls import path
 from .views import (
-    LoginView, CheckSMSCodeView, SMSServiceStatusView, 
-    UserDetailsView, UserDetailsByIdView, FAQListView, UpdateTelegramChatIdView,
-    HealthCheckView
+    LoginView,
+    CheckSMSCodeView,
+    SMSServiceStatusView,
+    UserDetailsView,
+    UserLocationUpdateView,
+    UserDetailsByIdView,
+    UserProfileRegistrationView,
+    EmailVerificationConfirmView,
+    FAQListView,
+    HealthCheckView,
 )
 
 urlpatterns = [
@@ -18,10 +25,19 @@ urlpatterns = [
     
     # User details endpoints
     path('user/', UserDetailsView.as_view(), name='user_details'),
+    path('user/location/', UserLocationUpdateView.as_view(), name='user_location'),
     path('user/<int:user_id>/', UserDetailsByIdView.as_view(), name='user_details_by_id'),
+    path(
+        'user/register-profile/',
+        UserProfileRegistrationView.as_view(),
+        name='user_register_profile',
+    ),
+    path(
+        'email-verification/',
+        EmailVerificationConfirmView.as_view(),
+        name='email_verification_confirm',
+    ),
     
-    # Telegram Chat ID update endpoint
-    path('update-telegram-chat-id/', UpdateTelegramChatIdView.as_view(), name='update_telegram_chat_id'),
     
     # FAQ endpoints
     path('faq/', FAQListView.as_view(), name='faq_list'),

@@ -12,6 +12,12 @@ class Car(models.Model):
     brand = models.CharField(max_length=255, null=True, blank=True, verbose_name='Car brand')
     model = models.CharField(max_length=255, null=True, blank=True, verbose_name='Car model')
     year = models.IntegerField(null=True, blank=True, verbose_name='Manufacturing year')
+    image = models.ImageField(
+        upload_to='cars/images/',
+        verbose_name='Car image',
+        null=True,
+        blank=True,
+    )
 
     user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, null=True, blank=True, verbose_name='User')
 
