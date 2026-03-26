@@ -284,7 +284,8 @@ class UserDetailsView(APIView):
         summary="Обновление профиля (ограниченные поля)",
         description=(
             "multipart/form-data: только first_name, last_name, avatar, date_of_birth. "
-            "Остальные поля (email, address и т.д.) меняются через POST /api/auth/user/register-profile/."
+            "Остальные поля (email и т.д.) меняются через POST /api/auth/user/register-profile/. "
+            "Координаты и address меняются через PUT /api/auth/user/location/."
         ),
         request=UserLimitedProfileUpdateSerializer,
         responses={
@@ -358,14 +359,16 @@ class UserDetailsView(APIView):
 
 
 class UserLocationUpdateView(APIView):
-    """Update latitude/longitude for the authenticated user (from JWT)."""
+    """Update latitude/longitude/address for the authenticated user (from JWT)."""
 
     permission_classes = [IsAuthenticated]
     parser_classes = [JSONParser, FormParser]
 
     @extend_schema(
         summary="Update user coordinates",
-        description="JSON body: `latitude` and `longitude` (WGS84). Both fields are required.",
+        description=(
+            "JSON or form body: `latitude`, `longitude` (both required, WGS84) and optional `address`."
+        ),
         request=UserLocationUpdateSerializer,
         responses={
             200: {
@@ -401,7 +404,7 @@ class UserLocationUpdateView(APIView):
 
 class UserProfileRegistrationView(APIView):
     """
-    POST multipart/form: first_name, last_name, email, avatar, date_of_birth, address.
+    POST multipart/form: first_name, last_name, email, avatar, date_of_birth.
     If is_email_verified is False, saves profile and sends verification email (English HTML).
     If True, responds that the user is already registered.
     """
@@ -467,8 +470,6 @@ class UserProfileRegistrationView(APIView):
         if CustomUser.objects.exclude(pk=user.pk).filter(username=candidate_username).exists():
             candidate_username = f"{email.split('@')[0]}_{user.pk}"[:150]
         user.username = candidate_username
-        if data.get('address') is not None:
-            user.address = data['address'] or ''
         if 'date_of_birth' in data:
             user.date_of_birth = data['date_of_birth']
         if data.get('avatar') is not None:

@@ -384,7 +384,6 @@ class UserProfileRegistrationSerializer(serializers.Serializer):
     last_name = serializers.CharField(max_length=150, required=True)
     email = serializers.EmailField(required=True)
     date_of_birth = serializers.DateField(required=False, allow_null=True)
-    address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     avatar = serializers.ImageField(required=False, allow_null=True)
 
 
@@ -408,14 +407,15 @@ class UserLimitedProfileUpdateSerializer(serializers.ModelSerializer):
 
 
 class UserLocationUpdateSerializer(serializers.ModelSerializer):
-    """JSON PUT: latitude and longitude (both required)."""
+    """JSON/FORM PUT: latitude, longitude and optional address."""
 
     class Meta:
         model = CustomUser
-        fields = ['latitude', 'longitude']
+        fields = ['latitude', 'longitude', 'address']
         extra_kwargs = {
             'latitude': {'required': True, 'allow_null': True},
             'longitude': {'required': True, 'allow_null': True},
+            'address': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
 
     def validate_latitude(self, value):
