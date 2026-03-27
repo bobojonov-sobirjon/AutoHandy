@@ -90,17 +90,43 @@ class SMSService:
         token = getattr(settings, 'TWILIO_AUTH_TOKEN', None)
         from_number = getattr(settings, 'TWILIO_PHONE_NUMBER', None)
         if not sid or not token or not from_number:
-            return {'success': False, 'error': 'Twilio not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER)'}
+            return {
+                'success': False,
+                'error': 'Twilio not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER)',
+                'debug': {
+                    'twilio_configured': False,
+                    'twilio_sid_prefix': (sid[:2] if sid else None),
+                    'twilio_from_number': from_number,
+                },
+            }
         to_formatted = to_phone_e164 if to_phone_e164.startswith('+') else f'+{to_phone_e164}'
         try:
             from twilio.rest import Client
             client = Client(sid, token)
             message = client.messages.create(body=body, from_=from_number, to=to_formatted)
             logger.info(f"Twilio SMS sent to {to_formatted} sid={message.sid}")
-            return {'success': True, 'message_sid': message.sid}
+            return {
+                'success': True,
+                'message_sid': message.sid,
+                'debug': {
+                    'twilio_configured': True,
+                    'twilio_sid_prefix': sid[:2] if sid else None,
+                    'twilio_from_number': from_number,
+                    'twilio_to_number': to_formatted,
+                },
+            }
         except Exception as e:
             logger.warning(f"Twilio send failed: {e}")
-            return {'success': False, 'error': str(e)}
+            return {
+                'success': False,
+                'error': str(e),
+                'debug': {
+                    'twilio_configured': True,
+                    'twilio_sid_prefix': sid[:2] if sid else None,
+                    'twilio_from_number': from_number,
+                    'twilio_to_number': to_formatted,
+                },
+            }
     
     @staticmethod
     def send_email_code(email: str, sms_code: str) -> dict:
@@ -210,6 +236,7 @@ class SMSService:
             sms_code = str(random.randint(1000, 9999))
             sms_sent = False
             sms_error = None
+            sms_debug = {}
 
             if identifier_type == 'email':
                 email_result = SMSService.send_email_code(identifier, sms_code)
@@ -217,9 +244,10 @@ class SMSService:
                     return {'success': False, 'error': email_result['error'], 'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR}
                 sms_sent = True
             else:
-                twilio_result = SMSService.send_sms_via_twilio(phone_number, f'Your verification code: {sms_code}')
+                twilio_result = SMSService.send_sms_via_twilio(phone_number, f'Verification code to log in to the Autohandy mobile app: {sms_code}. This code will expire in 5 minutes. Do not share this code with anyone.')
                 sms_sent = twilio_result.get('success', False)
                 sms_error = twilio_result.get('error')
+                sms_debug = twilio_result.get('debug') or {}
                 if not sms_sent:
                     logger.warning(f"Twilio send failed for {phone_number}: {sms_error}")
 
@@ -285,6 +313,17 @@ class SMSService:
                 response_data['sms_code'] = sms_code
             if not sms_sent and identifier_type == 'phone' and sms_error:
                 response_data['sms_error'] = sms_error
+                response_data['sms_debug'] = {
+                    'provider': 'twilio',
+                    'sms_sent': False,
+                    **sms_debug,
+                }
+            elif identifier_type == 'phone':
+                response_data['sms_debug'] = {
+                    'provider': 'twilio',
+                    'sms_sent': bool(sms_sent),
+                    **sms_debug,
+                }
 
             return response_data
 

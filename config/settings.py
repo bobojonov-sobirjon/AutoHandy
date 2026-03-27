@@ -377,8 +377,8 @@ SPECTACULAR_SETTINGS = {
         'hideHostname': True,
     },
     'SERVERS': [
-        {'url': 'http://217.114.11.249:7002/', 'description': 'Production server'},
-        {'url': 'http://localhost:8000', 'description': 'Development server'},
+        # {'url': 'http://217.114.11.249:7002/', 'description': 'Production server'},
+        {'url': 'http://localhost:8001', 'description': 'Development server'},
     ],
     'TAGS': [
         {'name': 'Authentication', 'description': 'User authentication and authorization'},
