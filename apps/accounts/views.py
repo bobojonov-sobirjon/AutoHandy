@@ -139,10 +139,6 @@ class LoginView(APIView):
                 'user_exists': result.get('user_exists', False),
                 'sms_code': result.get('sms_code')  # Добавляем SMS код в response
             }
-            if result.get('sms_error'):
-                response_data['sms_error'] = result.get('sms_error')
-            if result.get('sms_debug'):
-                response_data['sms_debug'] = result.get('sms_debug')
             return Response(response_data, status=result['status_code'])
         else:
             return Response({
