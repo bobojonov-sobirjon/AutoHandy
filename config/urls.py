@@ -22,7 +22,7 @@ urlpatterns += [
     path('api/auth/oauth/token/', SwaggerTokenView.as_view(), name='swagger-oauth-token'),
     path('api/car/', include('apps.car.urls')),
     path('api/master/', include('apps.master.urls')),
-    # path('api/order/', include('apps.order.urls')),
+    path('api/order/', include('apps.order.urls')),
     path('api/categories/', include('apps.categories.urls')),
     # path('api/chat/', include('apps.chat.urls')),
 ]

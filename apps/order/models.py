@@ -101,13 +101,6 @@ class Order(models.Model):
         related_name='orders',
         verbose_name='Master'
     )
-    masters = models.ManyToManyField(
-        User,
-        related_name='assigned_orders',
-        blank=True,
-        verbose_name='Masters (users)',
-        help_text='List of master users assigned to this order'
-    )
 
     # Fields for scheduled orders (order_type=scheduled)
     scheduled_date = models.DateField(
@@ -271,10 +264,7 @@ class Rating(models.Model):
 
 
 class Review(models.Model):
-    """
-    Review model for order and master
-    Links Order + User (reviewer) + Masters (from order)
-    """
+    """Review for an order; rating updates the order's primary master (order.master)."""
     order = models.OneToOneField(
         Order,
         on_delete=models.CASCADE,
@@ -331,26 +321,20 @@ class Review(models.Model):
         self.clean()
         super().save(*args, **kwargs)
 
-        # After saving review, update rating of all masters from the order
+        # After saving review, update rating for order.master
         self.update_masters_rating()
 
     def update_masters_rating(self):
-        """Update rating of all masters assigned to the order"""
+        """Update rating for the primary master on the order."""
         if self.order.master:
             self._update_user_rating(self.order.master.user)
-
-        for master_user in self.order.masters.all():
-            self._update_user_rating(master_user)
 
     def _update_user_rating(self, user):
         """Update user average rating based on all their reviews"""
         from django.db.models import Avg
 
         orders_as_main_master = Order.objects.filter(master__user=user)
-        orders_as_assigned_master = Order.objects.filter(masters=user)
-
-        all_order_ids = set(orders_as_main_master.values_list('id', flat=True)) | \
-                       set(orders_as_assigned_master.values_list('id', flat=True))
+        all_order_ids = set(orders_as_main_master.values_list('id', flat=True))
 
         avg_rating = Review.objects.filter(order_id__in=all_order_ids).aggregate(Avg('rating'))['rating__avg']
 

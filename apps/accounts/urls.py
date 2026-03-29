@@ -10,10 +10,14 @@ from .views import (
     EmailVerificationConfirmView,
     FAQListView,
     HealthCheckView,
+    AppVersionView,
+    AppVersionDetailView,
 )
 
 urlpatterns = [
-    
+    # App version endpoints
+    path('app-version/', AppVersionView.as_view(), name='app_version'),
+    path('app-version/<int:app_version_id>/', AppVersionDetailView.as_view(), name='app_version_detail'),
     # Login (SMS kod yuborish)
     path('login/', LoginView.as_view(), name='login'),
     

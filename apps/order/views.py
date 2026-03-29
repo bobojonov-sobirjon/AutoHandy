@@ -15,16 +15,110 @@ from drf_spectacular.types import OpenApiTypes
 
 from .models import Order, OrderStatus, OrderType, Rating, OrderService, Review, ReviewTag
 from .serializers import (
-    OrderSerializer, OrderCreateSerializer, OrderUpdateSerializer,
-    AddServicesToOrderSerializer, OrderServiceSerializer, AddMastersToOrderSerializer,
-    ReviewSerializer, ReviewCreateSerializer
+    OrderSerializer,
+    OrderCreateSerializer,
+    OrderUpdateSerializer,
+    AddServicesToOrderSerializer,
+    AddMasterToOrderSerializer,
+    OrderServiceSerializer,
+    ReviewSerializer,
+    ReviewCreateSerializer,
 )
 from .permissions import IsOrderOwnerOrMaster, IsOrderOwner, IsMaster
 from apps.master.models import Master
 from apps.master.serializers import MasterSerializer
+from apps.master.views import MasterListView
 from apps.accounts.models import UserBalance
 
 User = get_user_model()
+
+# Swagger: order endpoints grouped by role/flow (see SPECTACULAR_SETTINGS['TAGS'])
+STAG_ORDER_DRIVER_CREATE = 'Order (Driver) — Create'
+STAG_ORDER_DRIVER_SLOTS = 'Order (Driver) — Time slots'
+STAG_ORDER_DRIVER_MY = 'Order (Driver) — My orders'
+STAG_ORDER_DRIVER_REVIEWS = 'Order (Driver) — Reviews'
+STAG_ORDER_DRIVER_LEGACY = 'Order (Driver) — Legacy'
+STAG_ORDER_DETAILS = 'Order — Details (Driver & Master)'
+STAG_ORDER_STATUS = 'Order — Status (Driver & Master)'
+STAG_ORDER_MASTER_AVAILABLE = 'Order (Master) — Available & accept'
+STAG_ORDER_MASTER_MY = 'Order (Master) — My orders'
+STAG_ORDER_MASTER_COMPLETE = 'Order (Master) — Complete'
+
+
+class NearbyMasterCandidatesView(MasterListView):
+    """
+    Masters near a GPS point — same logic as GET /api/master/masters/list/
+    with lat/long + radius; lat/long required here; default radius 50 km (order max).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Кандидаты-мастера рядом (выбор для заказа)',
+        description="""
+Тот же движок, что **`GET /api/master/masters/list/`** (Haversine, `distance` в ответе).
+
+**Обязательно в query:** `lat`, `long`. (В коде также принимаются синонимы `latitude` / `longitude` — в Swagger они не дублируются.)
+
+**По умолчанию:** `radius=50` км.
+
+**Опционально:** `category`, `name`.
+
+JWT обязателен.
+        """,
+        parameters=[
+            OpenApiParameter(
+                name='lat',
+                type=OpenApiTypes.DOUBLE,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description='Широта точки поиска',
+            ),
+            OpenApiParameter(
+                name='long',
+                type=OpenApiTypes.DOUBLE,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description='Долгота точки поиска',
+            ),
+            OpenApiParameter(
+                name='radius',
+                type=OpenApiTypes.DOUBLE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Радиус в км (по умолчанию 50)',
+            ),
+            OpenApiParameter(
+                name='category',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+            ),
+            OpenApiParameter(
+                name='name',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+            ),
+        ],
+        responses={200: MasterSerializer(many=True)},
+        tags=[STAG_ORDER_DRIVER_CREATE],
+    )
+    def get(self, request):
+        lat = request.query_params.get('lat') or request.query_params.get('latitude')
+        lng = request.query_params.get('long') or request.query_params.get('longitude')
+        if lat is None or lng is None:
+            return Response(
+                {'error': 'Укажите lat и long (или latitude и longitude)'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        q = request.query_params.copy()
+        q['lat'] = str(lat)
+        q['long'] = str(lng)
+        if not q.get('radius'):
+            q['radius'] = '50'
+        request._request.GET = q
+        return super().get(request)
 
 
 class OrderPagination(PageNumberPagination):
@@ -73,7 +167,7 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
 2. Start time must be before end time
 3. Distance to master <= 50 km
         """,
-        tags=['Orders'],
+        tags=[STAG_ORDER_DRIVER_CREATE],
         request={
             'application/json': {
                 'type': 'object',
@@ -196,7 +290,7 @@ Do NOT use for **planned work** (use `/api/order/scheduled/`).
 - Distance to master <= 50 km
 - Selected master receives notification
         """,
-        tags=['Orders'],
+        tags=[STAG_ORDER_DRIVER_CREATE],
         request={
             'application/json': {
                 'type': 'object',
@@ -296,7 +390,7 @@ Returns a list of time slots (every 2 hours) for booking with a master on a give
 
 Each slot has: **start**, **end** (HH:MM), **available** (true/false), **order_id** (if occupied).
         """,
-        tags=['Orders'],
+        tags=[STAG_ORDER_DRIVER_SLOTS],
         parameters=[
             OpenApiParameter(
                 name='master_id',
@@ -491,7 +585,7 @@ class OrderListCreateView(APIView):
     @extend_schema(
         summary="Получить список заказов",
         description="Возвращает список заказов с возможностью фильтрации, поиска и сортировки",
-        tags=['Orders'],
+        tags=[STAG_ORDER_DRIVER_MY],
         parameters=[
             {'name': 'status', 'in': 'query', 'description': 'Фильтр по статусу заказа', 'type': 'string', 'enum': [choice[0] for choice in OrderStatus.choices]},
             {'name': 'priority', 'in': 'query', 'description': 'Фильтр по приоритету заказа', 'type': 'string', 'enum': ['low', 'high']},
@@ -566,7 +660,7 @@ class OrderDetailView(APIView):
     @extend_schema(
         summary="Get order details",
         description="Returns detailed information about a specific order",
-        tags=['Orders'],
+        tags=[STAG_ORDER_DETAILS],
         parameters=[
             {'name': 'id', 'in': 'path', 'description': 'Order ID', 'type': 'integer', 'required': True},
         ],
@@ -593,7 +687,7 @@ class OrderDetailView(APIView):
         summary="Полное обновление заказа",
         description="Полностью обновляет все поля заказа. "
                   "Fields: text, location, priority (low/high), status (pending, in_progress, completed, cancelled, rejected), latitude, longitude, master (ID).",
-        tags=['Orders'],
+        tags=[STAG_ORDER_DETAILS],
         parameters=[
             {'name': 'id', 'in': 'path', 'description': 'Order ID', 'type': 'integer', 'required': True},
         ],
@@ -638,7 +732,7 @@ class OrderDetailView(APIView):
         summary="Частичное обновление заказа",
         description="Частично обновляет поля заказа. Можно указать только те поля, которые нужно обновить. "
                   "Fields: text, location, priority (low/high), status (pending, in_progress, completed, cancelled, rejected), latitude, longitude, master (ID).",
-        tags=['Orders'],
+        tags=[STAG_ORDER_DETAILS],
         parameters=[
             {'name': 'id', 'in': 'path', 'description': 'Order ID', 'type': 'integer', 'required': True},
         ],
@@ -682,7 +776,7 @@ class OrderDetailView(APIView):
     @extend_schema(
         summary="Удалить заказ",
         description="Удаляет заказ из системы",
-        tags=['Orders'],
+        tags=[STAG_ORDER_DETAILS],
         parameters=[
             {'name': 'id', 'in': 'path', 'description': 'Order ID', 'type': 'integer', 'required': True},
         ],
@@ -795,7 +889,7 @@ GET /api/order/by-user/?order_type=sos
 GET /api/order/by-user/?order_type=scheduled&status=pending
 ```
         """,
-        tags=['Orders'],
+        tags=[STAG_ORDER_DRIVER_MY],
         parameters=[
             OpenApiParameter(name='status', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по статусу заказа', required=False, enum=[choice[0] for choice in OrderStatus.choices]),
             OpenApiParameter(name='priority', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по приоритету (low, high)', required=False, enum=['low', 'high']),
@@ -934,7 +1028,7 @@ class OrdersByMasterView(APIView):
 ### 7. Новые заказы (is_new)
 - Фильтр для отображения новых заказов
 - Значение: `true` или `false`
-- Показывает заказы где master=null И masters пустой
+- Показывает заказы без назначенного master (FK master пустой)
 - Пример: `is_new=true`
 
 ### 8. В работе (is_work)
@@ -1011,7 +1105,7 @@ GET /api/order/by-master/?order_type=sos
 GET /api/order/by-master/?order_type=scheduled&status=pending
 ```
         """,
-        tags=['Orders'],
+        tags=[STAG_ORDER_MASTER_MY],
         parameters=[
             OpenApiParameter(name='status', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по статусу заказа', required=False, enum=[choice[0] for choice in OrderStatus.choices]),
             OpenApiParameter(name='priority', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по приоритету (low, high)', required=False, enum=['low', 'high']),
@@ -1027,7 +1121,7 @@ GET /api/order/by-master/?order_type=scheduled&status=pending
             OpenApiParameter(name='point3_lon', type=OpenApiTypes.FLOAT, location=OpenApiParameter.QUERY, description='Долгота точки 3', required=False),
             OpenApiParameter(name='point4_lat', type=OpenApiTypes.FLOAT, location=OpenApiParameter.QUERY, description='Широта точки 4', required=False),
             OpenApiParameter(name='point4_lon', type=OpenApiTypes.FLOAT, location=OpenApiParameter.QUERY, description='Долгота точки 4', required=False),
-            OpenApiParameter(name='is_new', type=OpenApiTypes.BOOL, location=OpenApiParameter.QUERY, description='Новые заказы (master=null и masters пустой)', required=False),
+            OpenApiParameter(name='is_new', type=OpenApiTypes.BOOL, location=OpenApiParameter.QUERY, description='Новые заказы (master не назначен)', required=False),
             OpenApiParameter(name='is_work', type=OpenApiTypes.BOOL, location=OpenApiParameter.QUERY, description='Заказы в работе (status=IN_PROGRESS)', required=False),
             OpenApiParameter(name='is_archive', type=OpenApiTypes.BOOL, location=OpenApiParameter.QUERY, description='Завершенные заказы (status=COMPLETED)', required=False),
             OpenApiParameter(name='order_type', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по типу заказа (scheduled - запланированные, sos - экстренные)', required=False, enum=['scheduled', 'sos']),
@@ -1059,17 +1153,10 @@ GET /api/order/by-master/?order_type=scheduled&status=pending
         # Получаем заказы для текущего мастера через foreign key
         orders = Order.objects.filter(master=master)
         
-        # Фильтр is_new - новые заказы (master=null и masters пустой)
+        # Фильтр is_new — заказы без назначенного master (FK)
         is_new = request.query_params.get('is_new', '').lower() == 'true'
         if is_new:
-            from django.db.models import Count
-            # Показываем заказы без мастера
-            orders = Order.objects.annotate(
-                masters_count=Count('masters')
-            ).filter(
-                master__isnull=True,
-                masters_count=0
-            )
+            orders = Order.objects.filter(master__isnull=True)
         
         # Фильтр is_work - заказы в работе (IN_PROGRESS)
         is_work = request.query_params.get('is_work', '').lower() == 'true'
@@ -1165,7 +1252,7 @@ class UpdateOrderStatusView(APIView):
         description="Обновляет статус заказа на новый. "
                   "Статусы: pending - ожидает, in_progress - в работе, completed - завершен, cancelled - отменен, rejected - отклонен. "
                   "Доступно только владельцу заказа или мастеру.",
-        tags=['Orders'],
+        tags=[STAG_ORDER_STATUS],
         parameters=[
             {'name': 'order_id', 'in': 'path', 'description': 'Order ID', 'type': 'integer', 'required': True},
         ],
@@ -1248,7 +1335,7 @@ class AcceptOrderView(APIView):
 
 **Важно:** Проверяется баланс **мастера**, который принимает заказ, а не клиента!
         """,
-        tags=['Orders'],
+        tags=[STAG_ORDER_MASTER_AVAILABLE],
         parameters=[
             {'name': 'order_id', 'in': 'path', 'description': 'Order ID', 'type': 'integer', 'required': True},
         ],
@@ -1391,7 +1478,7 @@ POST /api/order/5/complete/
 3. Заказ переходит в статус **COMPLETED**
 4. Клиент может оставить рейтинг и отзыв
         """,
-        tags=['Orders'],
+        tags=[STAG_ORDER_MASTER_COMPLETE],
         parameters=[
             {'name': 'order_id', 'in': 'path', 'description': 'Order ID', 'type': 'integer', 'required': True},
         ],
@@ -1493,13 +1580,10 @@ class CreateReviewView(APIView):
 
 ## Что происходит автоматически:
 1. ✅ Отзыв сохраняется в БД
-2. ✅ Рейтинг применяется ко ВСЕМ мастерам из заказа:
-   - Главный мастер (order.master)
-   - Все мастера из списка (order.masters)
-3. ✅ Обновляется средний рейтинг каждого мастера
-4. ✅ Рейтинг появляется в профиле мастера
+2. ✅ Рейтинг обновляется у мастера заказа (`order.master`)
+3. ✅ Средний рейтинг сохраняется в профиле мастера
         """,
-        tags=['Orders'],
+        tags=[STAG_ORDER_DRIVER_REVIEWS],
         request=ReviewCreateSerializer,
         responses={
             201: ReviewSerializer,
@@ -1686,7 +1770,7 @@ class AvailableOrdersForMasterView(APIView):
 
 ## Логика работы
 1. Берутся координаты мастера из его профиля (Master.latitude, Master.longitude)
-2. Фильтруются заказы где master=null И masters пустой список
+2. Фильтруются заказы где master не назначен (FK пустой)
 3. Применяются дополнительные фильтры (category, location, car_category, priority)
 4. Вычисляется расстояние от мастера до каждого заказа (Haversine formula)
 5. Фильтруются заказы в пределах указанного радиуса
@@ -1724,7 +1808,7 @@ GET /api/order/available/?master_id=5&radius=15&category=1&location=Ташкен
 GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
 ```
         """,
-        tags=['Orders'],
+        tags=[STAG_ORDER_MASTER_AVAILABLE],
         parameters=[
             OpenApiParameter(
                 name='master_id',
@@ -1827,7 +1911,6 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
                                     'latitude': '41.3111000',
                                     'longitude': '69.2797000',
                                     'master': None,
-                                    'masters': [],
                                     'distance': 2.35,
                                     'created_at': '2026-01-21T12:00:00Z',
                                     'updated_at': '2026-01-21T12:00:00Z'
@@ -1917,17 +2000,11 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
         master_lat = float(master.latitude)
         master_long = float(master.longitude)
         
-        # Получаем заказы без назначенного мастера
-        # master=null И masters пустой (ManyToMany)
-        from django.db.models import Count
-        
-        orders = Order.objects.annotate(
-            masters_count=Count('masters')
-        ).filter(
+        # Заказы без назначенного master (FK), с координатами
+        orders = Order.objects.filter(
             master__isnull=True,
-            masters_count=0,
             latitude__isnull=False,
-            longitude__isnull=False
+            longitude__isnull=False,
         )
         
         # Применяем дополнительные фильтры
@@ -2036,7 +2113,7 @@ class AddServicesToOrderView(APIView):
 ## Response
 Возвращает список добавленных услуг с полной информацией о каждой услуге.
         """,
-        tags=['Orders'],
+        tags=[STAG_ORDER_DRIVER_LEGACY],
         request=AddServicesToOrderSerializer,
         responses={
             201: OrderServiceSerializer(many=True),
@@ -2123,7 +2200,7 @@ GET /api/order/services-list/?master_id=5
 ## Response
 Возвращает навыки мастера: подкатегория каталога (by_order) + цена мастера.
         """,
-        tags=['Orders'],
+        tags=[STAG_ORDER_DRIVER_LEGACY],
         parameters=[
             OpenApiParameter(
                 name='master_id',
@@ -2217,84 +2294,70 @@ GET /api/order/services-list/?master_id=5
         return Response(serializer.data)
 
 
-class AddMastersToOrderView(APIView):
+class AddMasterToOrderView(APIView):
     """
-    API для добавления мастеров к заказу
+    Driver: assign primary master on order (`order.master` FK).
+    Body: order_id, master_id (Master profile id, same as /scheduled/).
     """
+
     permission_classes = [IsAuthenticated]
-    
+
     @extend_schema(
-        summary="Добавить мастеров к заказу",
+        summary='Назначить мастера на заказ (add master)',
         description="""
-## Описание
-Добавляет выбранных пользователей-мастеров к заказу.
-Эти мастера будут назначены на заказ и получат уведомление.
+**POST** — в теле `order_id` и `master_id` (ID профиля **Master**).
 
-## Request Body
-- `order_id`: ID заказа (обязательно)
-- `master_ids`: Список ID пользователей-мастеров [1, 2, 3, ...] (обязательно)
-
-## Пример запроса:
-```json
-{
-  "order_id": 5,
-  "master_ids": [1, 2, 3]
-}
-```
-
-## Response
-Возвращает обновленный заказ со списком назначенных мастеров.
-
-## 🎯 Когда использовать?
-- Когда нужно назначить несколько мастеров на один заказ
-- Когда мастер хочет делегировать заказ своим сотрудникам
-- Для командной работы над сложным заказом
+Устанавливает поле **`order.master`**. Доступно только **владельцу заказа** (водителю), пока статус **`pending`**. После принятия мастером (`in_progress`) смена через этот endpoint запрещена — используйте рабочий процесс accept / support.
         """,
-        tags=['Orders'],
-        request=AddMastersToOrderSerializer,
+        tags=[STAG_ORDER_DRIVER_LEGACY],
+        request=AddMasterToOrderSerializer,
         responses={
             200: OrderSerializer,
-            400: {
-                'type': 'object',
-                'properties': {'error': {'type': 'string'}},
-                'example': {'error': 'Заказ с ID 999 не найден'}
-            },
-            404: {
-                'type': 'object',
-                'properties': {'error': {'type': 'string'}},
-                'example': {'error': 'Order not found'}
-            },
+            400: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
+            403: {'type': 'object', 'properties': {'detail': {'type': 'string'}}},
+            404: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
             401: {'type': 'object', 'properties': {'detail': {'type': 'string'}}},
-        }
+        },
     )
     def post(self, request):
-        """Добавить мастеров к заказу"""
-        serializer = AddMastersToOrderSerializer(data=request.data)
-        
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        order_id = serializer.validated_data['order_id']
-        master_ids = serializer.validated_data['master_ids']
-        
-        # Получаем заказ
+        ser = AddMasterToOrderSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        order_id = ser.validated_data['order_id']
+        master_pk = ser.validated_data['master_id']
+
         try:
             order = Order.objects.get(id=order_id)
         except Order.DoesNotExist:
             return Response(
                 {'error': f'Заказ с ID {order_id} не найден'},
-                status=status.HTTP_404_NOT_FOUND
+                status=status.HTTP_404_NOT_FOUND,
             )
-        
-        # Добавляем мастеров к заказу (ManyToMany)
-        for master_id in master_ids:
-            try:
-                user = User.objects.get(id=master_id)
-                order.masters.add(user)
-            except User.DoesNotExist:
-                continue
-        
-        # Возвращаем обновленный заказ
-        order.refresh_from_db()
-        result_serializer = OrderSerializer(order, context={'request': request})
-        return Response(result_serializer.data, status=status.HTTP_200_OK)
+
+        if order.user_id != request.user.id:
+            return Response(
+                {'detail': 'Только владелец заказа может назначить мастера'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if order.status != OrderStatus.PENDING:
+            return Response(
+                {'error': 'Назначить мастера можно только для заказа в статусе pending'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            master = Master.objects.get(id=master_pk)
+        except Master.DoesNotExist:
+            return Response(
+                {'error': f'Master with ID {master_pk} not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        order.master = master
+        order.save(update_fields=['master', 'updated_at'])
+        return Response(
+            OrderSerializer(order, context={'request': request}).data,
+            status=status.HTTP_200_OK,
+        )

@@ -3,6 +3,7 @@ certifi==2025.8.3
 charset-normalizer==3.4.3
 Django==5.2.6
 django-jazzmin==3.0.4
+django-nested-admin==4.1.6
 django-cors-headers==4.9.0
 django-filter==25.1
 djangorestframework==3.16.1

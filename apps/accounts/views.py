@@ -22,10 +22,11 @@ from .serializers import (
     UserLocationUpdateSerializer,
     EmailVerificationConfirmSerializer,
     FAQSerializer,
+    AppVersionSerializer,
     TelegramChatIdSerializer,
 )
 from .services import SMSService
-from .models import CustomUser, FAQ, EmailVerificationToken
+from .models import AppVersion, CustomUser, FAQ, EmailVerificationToken
 from .email_verification import build_verification_url, send_email_verification_message
 
 
@@ -605,6 +606,57 @@ class FAQListView(APIView):
             'count': faqs.count(),
             'faqs': serializer.data
         }, status=status.HTTP_200_OK)
+
+
+class AppVersionView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Список версий приложения",
+        description="Все записи версий, от новых к старым.",
+        responses={200: AppVersionSerializer(many=True)},
+        tags=["System"],
+    )
+    def get(self, request):
+        versions = AppVersion.objects.all()
+        serializer = AppVersionSerializer(versions, many=True)
+        return Response(
+            {"success": True, "count": versions.count(), "versions": serializer.data},
+            status=status.HTTP_200_OK,
+        )
+
+
+class AppVersionDetailView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Версия приложения по ID",
+        parameters=[
+            OpenApiParameter(
+                name="app_version_id",
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.PATH,
+                required=True,
+            )
+        ],
+        responses={
+            200: AppVersionSerializer,
+            404: {"description": "Not found"},
+        },
+        tags=["System"],
+    )
+    def get(self, request, app_version_id):
+        try:
+            row = AppVersion.objects.get(pk=app_version_id)
+        except AppVersion.DoesNotExist:
+            return Response(
+                {"success": False, "error": "Версия не найдена"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(
+            {"success": True, "version": AppVersionSerializer(row).data},
+            status=status.HTTP_200_OK,
+        )
 
 
 class UserDetailsByIdView(APIView):

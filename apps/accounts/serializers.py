@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.core.exceptions import ValidationError
 import re
-from .models import CustomUser, FAQ
+from .models import AppVersion, CustomUser, FAQ
 
 
 class TelegramChatIdSerializer(serializers.Serializer):
@@ -270,10 +270,7 @@ class UserDetailsSerializer(serializers.ModelSerializer):
         try:
             from apps.order.models import Review, Order
             orders_as_main_master = Order.objects.filter(master__user=obj)
-            orders_as_assigned_master = Order.objects.filter(masters=obj)
-            
-            all_order_ids = set(orders_as_main_master.values_list('id', flat=True)) | \
-                           set(orders_as_assigned_master.values_list('id', flat=True))
+            all_order_ids = set(orders_as_main_master.values_list('id', flat=True))
             reviews = Review.objects.filter(order_id__in=all_order_ids).order_by('-created_at')
             
             return [
@@ -319,9 +316,7 @@ class UserDetailsSerializer(serializers.ModelSerializer):
         try:
             from apps.order.models import Review, Order
             orders_as_main_master = Order.objects.filter(master__user=obj)
-            orders_as_assigned_master = Order.objects.filter(masters=obj)
-            all_order_ids = set(orders_as_main_master.values_list('id', flat=True)) | \
-                           set(orders_as_assigned_master.values_list('id', flat=True))
+            all_order_ids = set(orders_as_main_master.values_list('id', flat=True))
             reviews_count = Review.objects.filter(order_id__in=all_order_ids).count()
             return reviews_count
         except Exception as e:
@@ -334,22 +329,10 @@ class UserDetailsSerializer(serializers.ModelSerializer):
         """Get completed orders count"""
         try:
             from apps.order.models import Order, OrderStatus
-            orders_as_main_master = Order.objects.filter(
+            return Order.objects.filter(
                 master__user=obj,
-                status=OrderStatus.COMPLETED
+                status=OrderStatus.COMPLETED,
             ).count()
-            
-            orders_as_assigned_master = Order.objects.filter(
-                masters=obj,
-                status=OrderStatus.COMPLETED
-            ).count()
-            from django.db.models import Q
-            total_orders = Order.objects.filter(
-                Q(master__user=obj) | Q(masters=obj),
-                status=OrderStatus.COMPLETED
-            ).distinct().count()
-            
-            return total_orders
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)
@@ -361,9 +344,7 @@ class UserDetailsSerializer(serializers.ModelSerializer):
         try:
             from apps.order.models import Review, Order
             orders_as_main_master = Order.objects.filter(master__user=obj)
-            orders_as_assigned_master = Order.objects.filter(masters=obj)
-            all_order_ids = set(orders_as_main_master.values_list('id', flat=True)) | \
-                           set(orders_as_assigned_master.values_list('id', flat=True))
+            all_order_ids = set(orders_as_main_master.values_list('id', flat=True))
             all_reviews = Review.objects.filter(order_id__in=all_order_ids)
             total_reviews = all_reviews.count()
             if total_reviews == 0:
@@ -509,9 +490,16 @@ class UserUpdateSerializer(serializers.ModelSerializer):
 
 class FAQSerializer(serializers.ModelSerializer):
     """FAQ serializer"""
-    
+
     class Meta:
         model = FAQ
         fields = ['id', 'question', 'answer', 'order', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class AppVersionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AppVersion
+        fields = ["id", "version", "created_at"]
+        read_only_fields = fields
 

@@ -5,8 +5,6 @@ from apps.car.models import Car
 from apps.categories.models import Category
 from apps.master.models import Master
 from apps.accounts.serializers import UserSerializer
-from apps.car.serializers import CarSerializer
-from apps.categories.serializers import CategorySerializer
 from apps.master.serializers import MasterSerializer
 
 User = get_user_model()
@@ -16,7 +14,6 @@ class OrderSerializer(serializers.ModelSerializer):
     """Order serializer"""
     user = serializers.SerializerMethodField()
     master = serializers.SerializerMethodField()
-    masters = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     order_type_display = serializers.CharField(source='get_order_type_display', read_only=True)
@@ -32,7 +29,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'id', 'user', 'order_type', 'order_type_display',
             'car_data', 'category_data',
             'text', 'status', 'status_display', 'priority', 'priority_display',
-            'location', 'latitude', 'longitude', 'master', 'masters',
+            'location', 'latitude', 'longitude', 'master',
             'scheduled_date', 'scheduled_time_start', 'scheduled_time_end',
             'discount', 'services', 'reviews', 'average_rating',
             'created_at', 'updated_at'
@@ -43,28 +40,9 @@ class OrderSerializer(serializers.ModelSerializer):
         return UserSerializer(obj.user, context=self.context).data
     
     def get_master(self, obj):
+        if not obj.master_id:
+            return None
         return MasterSerializer(obj.master, context=self.context).data
-    
-    def get_masters(self, obj):
-        """Get list of assigned masters (users)"""
-        masters = obj.masters.all()
-        return [
-            {
-                'id': user.id,
-                'private_id': user.private_id,
-                'full_name': user.get_full_name(),
-                'phone_number': user.phone_number,
-                'email': user.email,
-                'avatar': self.context['request'].build_absolute_uri(user.avatar.url) if user.avatar and self.context.get('request') else None
-            }
-            for user in masters
-        ]
-    
-    def get_car_data(self, obj):
-        return CarSerializer(obj.car, many=True, context=self.context).data
-    
-    def get_category_data(self, obj):
-        return CategorySerializer(obj.category, many=True, context=self.context).data
     
     def get_car_data(self, obj):
         """Get car data"""
@@ -98,7 +76,7 @@ class OrderSerializer(serializers.ModelSerializer):
         
         order_services = obj.order_services.all().select_related('master_service_item')
         return [
-            MasterServiceItemsSerializer(os.master_service_item).data
+            MasterServiceItemsSerializer(os.master_service_item, context=self.context).data
             for os in order_services if os.master_service_item
         ]
     
@@ -185,20 +163,12 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         write_only=True,
         help_text="List of category IDs [1, 2, 3, ...] (required)"
     )
-    masters_list = serializers.ListField(
-        child=serializers.IntegerField(),
-        required=False,
-        allow_empty=True,
-        write_only=True,
-        help_text="List of master user IDs [1, 2, 3, ...] to assign to order (optional)"
-    )
-    
     class Meta:
         model = Order
         fields = [
             'order_type', 'text', 'priority', 'location', 'latitude', 'longitude', 
             'master_id', 'scheduled_date', 'scheduled_time_start', 'scheduled_time_end',
-            'car_list', 'category_list', 'masters_list'
+            'car_list', 'category_list',
         ]
         extra_kwargs = {
             'text': {'required': True},
@@ -243,19 +213,6 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                 Category.objects.get(id=category_id)
             except Category.DoesNotExist:
                 raise serializers.ValidationError(f"Category with ID {category_id} not found")
-
-        return value
-
-    def validate_masters_list(self, value):
-        """Validate masters (users) list"""
-        if not isinstance(value, list):
-            raise serializers.ValidationError("masters_list must be a list of IDs")
-
-        for user_id in value:
-            try:
-                User.objects.get(id=user_id)
-            except User.DoesNotExist:
-                raise serializers.ValidationError(f"User with ID {user_id} not found")
 
         return value
 
@@ -362,11 +319,10 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        """Create order with cars, categories and masters"""
+        """Create order with cars and categories"""
         master_id = validated_data.pop('master_id', None)
         car_list = validated_data.pop('car_list', [])
         category_list = validated_data.pop('category_list', [])
-        masters_list = validated_data.pop('masters_list', [])
 
         if master_id:
             validated_data['master'] = Master.objects.get(id=master_id)
@@ -376,8 +332,6 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             order.car.set(car_list)
         if category_list:
             order.category.set(category_list)
-        if masters_list:
-            order.masters.set(masters_list)
 
         return order
 
@@ -474,37 +428,24 @@ class AddServicesToOrderSerializer(serializers.Serializer):
         return value
 
 
-class AddMastersToOrderSerializer(serializers.Serializer):
-    """Serializer for adding masters to order"""
-    order_id = serializers.IntegerField(
-        help_text='Order ID'
-    )
-    master_ids = serializers.ListField(
-        child=serializers.IntegerField(),
-        allow_empty=False,
-        help_text='List of master user IDs [1, 2, 3, ...]'
-    )
+class AddMasterToOrderSerializer(serializers.Serializer):
+    """Set primary master (FK) on order: `master_id` = Master profile id."""
+
+    order_id = serializers.IntegerField()
+    master_id = serializers.IntegerField()
 
     def validate_order_id(self, value):
-        """Check order exists"""
         try:
             Order.objects.get(id=value)
         except Order.DoesNotExist:
             raise serializers.ValidationError(f'Order with ID {value} not found')
         return value
 
-    def validate_master_ids(self, value):
-        """Check users exist"""
-        if not value:
-            raise serializers.ValidationError('master_ids list cannot be empty')
-
-        existing_users = User.objects.filter(id__in=value)
-        existing_ids = set(existing_users.values_list('id', flat=True))
-        invalid_ids = set(value) - existing_ids
-        if invalid_ids:
-            raise serializers.ValidationError(
-                f'Users with ID {list(invalid_ids)} not found'
-            )
+    def validate_master_id(self, value):
+        try:
+            Master.objects.get(id=value)
+        except Master.DoesNotExist:
+            raise serializers.ValidationError(f'Master with ID {value} not found')
         return value
 
 

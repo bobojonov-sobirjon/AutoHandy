@@ -407,3 +407,18 @@ class FAQ(models.Model):
 
     def __str__(self):
         return f"{self.question[:50]}..."
+
+
+class AppVersion(models.Model):
+    """Mobile app build version records (e.g. for update checks)."""
+
+    version = models.CharField(max_length=64, verbose_name="Version")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Created at")
+
+    class Meta:
+        verbose_name = "App version"
+        verbose_name_plural = "App versions"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.version

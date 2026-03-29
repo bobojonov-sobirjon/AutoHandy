@@ -18,9 +18,6 @@ from django.contrib.auth import get_user_model
 
 User = get_user_model()
 
-from apps.accounts.serializers import UserDetailsSerializer
-
-
 class MasterImageSerializer(serializers.ModelSerializer):
     """Master images — `image` maydoni har doim to‘liq (absolute) URL."""
 
@@ -46,7 +43,6 @@ class MasterSerializer(serializers.ModelSerializer):
     images = serializers.SerializerMethodField()
     category_data = serializers.SerializerMethodField()
     rating_data = serializers.SerializerMethodField()
-    masters = serializers.SerializerMethodField()
     distance = serializers.SerializerMethodField()
     skills_profile = serializers.SerializerMethodField()
     schedule_profile = serializers.SerializerMethodField()
@@ -57,7 +53,7 @@ class MasterSerializer(serializers.ModelSerializer):
             'id', 'user_info', 'name', 'city', 'address',
             'latitude', 'longitude', 'phone', 'working_time', 'services',
             'description', 'images',
-            'category_data', 'rating_data', 'masters', 'distance', 'created_at', 'updated_at',
+            'category_data', 'rating_data', 'distance', 'created_at', 'updated_at',
             'last_activity', 'skills_profile', 'schedule_profile',
         ]
         read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'last_activity', 'distance']
@@ -129,14 +125,6 @@ class MasterSerializer(serializers.ModelSerializer):
                 for r in ratings[:10]  # Last 10 ratings
             ]
         }
-    
-    def get_masters(self, obj):
-        """Workshop owner (MasterEmployee removed)."""
-        request = self.context.get('request')
-        owner_data = UserDetailsSerializer(obj.user, context={'request': request}).data
-        owner_data['is_owner'] = True
-        owner_data['added_at'] = obj.created_at
-        return [owner_data]
     
     def get_distance(self, obj):
         """Get distance from user (if computed)"""

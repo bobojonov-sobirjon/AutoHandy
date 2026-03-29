@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'daphne',  # Must be first for WebSocket support
     'django.contrib.sites',
     'jazzmin',  # Admin theme — must be before django.contrib.admin
+    'nested_admin',  # Master admin nested inlines; templates: nesting/admin/inlines/...
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -378,14 +379,26 @@ SPECTACULAR_SETTINGS = {
     },
     'SERVERS': [
         {'url': 'http://217.114.11.249:7002/', 'description': 'Production server'},
-        {'url': 'http://localhost:8000', 'description': 'Development server'},
+        {'url': 'http://localhost:8001', 'description': 'Development server'},
     ],
     'TAGS': [
         {'name': 'Authentication', 'description': 'User authentication and authorization'},
         {'name': 'Cars', 'description': 'Car management endpoints'},
         {'name': 'Masters', 'description': 'Master/service provider endpoints'},
-        {'name': 'Orders', 'description': 'Order management endpoints'},
+        {'name': 'Order (Driver) — Create', 'description': 'POST /scheduled/, POST /sos/, GET /nearby-masters/'},
+        {'name': 'Order (Driver) — Time slots', 'description': 'GET /available-slots/'},
+        {'name': 'Order (Driver) — My orders', 'description': 'GET / (list), GET /by-user/'},
+        {'name': 'Order (Driver) — Reviews', 'description': 'POST /reviews/create/'},
+        {'name': 'Order (Driver) — Legacy', 'description': 'POST /add-services/, GET /services-list/, POST /add-master/'},
+        {'name': 'Order — Details (Driver & Master)', 'description': 'GET/PUT/PATCH/DELETE /{id}/'},
+        {'name': 'Order — Status (Driver & Master)', 'description': 'POST /{id}/status/'},
+        {'name': 'Order (Master) — Available & accept', 'description': 'GET /available/, POST /{id}/accept/'},
+        {'name': 'Order (Master) — My orders', 'description': 'GET /by-master/'},
+        {'name': 'Order (Master) — Complete', 'description': 'POST /{id}/complete/'},
         {'name': 'Categories', 'description': 'Category management endpoints'},
+        {'name': 'System', 'description': 'Health check, app version'},
+        {'name': 'FAQ', 'description': 'Frequently asked questions'},
+        {'name': 'User Profile', 'description': 'User profile and registration'},
     ],
     'PREPROCESSING_HOOKS': [],
     'POSTPROCESSING_HOOKS': [],

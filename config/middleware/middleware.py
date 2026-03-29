@@ -14,7 +14,9 @@ class JsonErrorResponseMiddleware:
         return response
 
     def process_exception(self, request, exception):
-        # Process exceptions and return JSON error response
+        # Admin must render HTML/traceback; do not return JSON for /admin/
+        if request.path.startswith('/admin/'):
+            return None
         error_message = str(exception)
         response_data = {"error": error_message}
         return JsonResponse(response_data, status=500)
