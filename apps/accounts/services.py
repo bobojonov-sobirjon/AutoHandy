@@ -63,7 +63,7 @@ class SMSService:
         Normalize phone to E.164 (digits only with country code).
         Supports all countries: Uzbekistan (998), Russia (7), and others (e.g. 1, 44, 90, ...).
         """
-        cleaned = re.sub(r'\D', '', phone_number)
+        cleaned = re.sub(r'\D', '', phone_number or '')
         if not cleaned:
             return phone_number
         # Russia: 8XXXXXXXXXX -> 7XXXXXXXXXX
@@ -72,7 +72,13 @@ class SMSService:
         elif len(cleaned) == 10 and cleaned.startswith('9'):
             # Russia 9XXXXXXXXX -> 79XXXXXXXXX
             cleaned = '7' + cleaned
-        # Already has country code (e.g. 998..., 7..., 1..., 44...)
+        # If user entered national number without country code, optionally prepend default.
+        # Example: US national 10 digits -> +1XXXXXXXXXX (if DEFAULT_PHONE_COUNTRY_CODE=1)
+        default_cc = str(getattr(settings, 'DEFAULT_PHONE_COUNTRY_CODE', '') or '').strip()
+        if default_cc and cleaned.isdigit() and len(cleaned) == 10:
+            cleaned = f'{default_cc}{cleaned}'
+
+        # Already has country code (e.g. 998..., 7..., 1..., 44...) or default applied above.
         return cleaned
 
     @staticmethod
@@ -99,9 +105,10 @@ class SMSService:
                     'twilio_from_number': from_number,
                 },
             }
-        to_formatted = to_phone_e164 if to_phone_e164.startswith('+') else f'+{to_phone_e164}'
+        to_formatted = to_phone_e164 if (to_phone_e164 or '').startswith('+') else f'+{to_phone_e164}'
         try:
             from twilio.rest import Client
+            from twilio.base.exceptions import TwilioRestException
             client = Client(sid, token)
             message = client.messages.create(body=body, from_=from_number, to=to_formatted)
             logger.info(f"Twilio SMS sent to {to_formatted} sid={message.sid}")
@@ -115,8 +122,25 @@ class SMSService:
                     'twilio_to_number': to_formatted,
                 },
             }
+        except TwilioRestException as e:
+            # Twilio gives structured error details (useful for geo-permissions / invalid number / trial restrictions).
+            logger.warning(f"Twilio send failed: {e.status} {e.code} {e.msg}")
+            return {
+                'success': False,
+                'error': str(e),
+                'debug': {
+                    'twilio_configured': True,
+                    'twilio_sid_prefix': sid[:2] if sid else None,
+                    'twilio_from_number': from_number,
+                    'twilio_to_number': to_formatted,
+                    'twilio_error_status': getattr(e, 'status', None),
+                    'twilio_error_code': getattr(e, 'code', None),
+                    'twilio_error_message': getattr(e, 'msg', None),
+                    'twilio_more_info': getattr(e, 'more_info', None),
+                },
+            }
         except Exception as e:
-            logger.warning(f"Twilio send failed: {e}")
+            logger.warning(f"Twilio send failed (unknown): {e}")
             return {
                 'success': False,
                 'error': str(e),

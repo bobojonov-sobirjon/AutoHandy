@@ -18,6 +18,11 @@ def order_by_order_category_smart_q(category) -> Q:
     return q
 
 
+def master_by_order_category_strict_q(category) -> Q:
+    """Masters who have at least one MasterServiceItem for this exact category (no parent/sibling expansion)."""
+    return Q(master_services__master_service_items__category_id=category.id)
+
+
 def master_by_order_category_smart_q(category) -> Q:
     """Masters relevant to a by_order category: service items + M2M categories use parent tree."""
     q = Q()

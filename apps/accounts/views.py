@@ -127,6 +127,9 @@ class LoginView(APIView):
         
         # Отправка кода через SMS сервис
         result = SMSService.send_sms_code(identifier, identifier_type, role)
+
+        from django.conf import settings
+        expose_sms_debug = bool(getattr(settings, 'DEBUG', False) or getattr(settings, 'SMS_DEBUG_IN_RESPONSE', False))
         
         if result['success']:
             # Добавление информации о существовании пользователя
@@ -138,14 +141,22 @@ class LoginView(APIView):
                 'phone': result.get('phone'),
                 'email': result.get('email'),
                 'user_exists': result.get('user_exists', False),
-                'sms_code': result.get('sms_code')  # Добавляем SMS код в response
+                'sms_code': result.get('sms_code')
             }
+            if expose_sms_debug:
+                if result.get('sms_error'):
+                    response_data['sms_error'] = result.get('sms_error')
+                if result.get('sms_debug'):
+                    response_data['sms_debug'] = result.get('sms_debug')
             return Response(response_data, status=result['status_code'])
         else:
-            return Response({
+            resp = {
                 'success': False,
                 'error': result['error']
-            }, status=result['status_code'])
+            }
+            if expose_sms_debug and result.get('sms_debug'):
+                resp['sms_debug'] = result.get('sms_debug')
+            return Response(resp, status=result['status_code'])
 
 
 class CheckSMSCodeView(APIView):

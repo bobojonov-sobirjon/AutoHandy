@@ -52,6 +52,8 @@ class NearbyMasterCandidatesView(MasterListView):
     """
 
     permission_classes = [IsAuthenticated]
+    # Exact subcategory match on MasterServiceItems (no parent/sibling expansion).
+    _nearby_category_strict = True
 
     @extend_schema(
         summary='Кандидаты-мастера рядом (выбор для заказа)',

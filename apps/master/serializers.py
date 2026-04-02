@@ -65,14 +65,18 @@ class MasterSerializer(serializers.ModelSerializer):
             'full_name': obj.user.get_full_name(),
             'phone_number': obj.user.phone_number,
             'email': obj.user.email,
+            'avatar': obj.user.avatar.url if obj.user.avatar else None,
             'is_active': obj.user.is_active,
             'date_joined': obj.user.date_joined
         }
     
     def get_services(self, obj):
         """Get master services"""
-        master_services = MasterService.objects.filter(master=obj)
-        return MasterServiceSerializer(master_services, many=True, context=self.context).data
+        qs = MasterService.objects.filter(master=obj)
+        fid = self.context.get('filter_service_category_id')
+        if fid is not None:
+            qs = qs.filter(master_service_items__category_id=fid).distinct()
+        return MasterServiceSerializer(qs, many=True, context=self.context).data
     
     def get_images(self, obj):
         """Get master images"""
@@ -81,8 +85,25 @@ class MasterSerializer(serializers.ModelSerializer):
     
     def get_category_data(self, obj):
         """Get category data (id, name, icon, type_category)"""
-        categories = obj.category.all()
         request = self.context.get('request')
+        fid = self.context.get('filter_service_category_id')
+        if fid is not None:
+            category = Category.objects.filter(pk=fid).first()
+            if category:
+                return [
+                    {
+                        'id': category.id,
+                        'name': category.name,
+                        'type_category': category.type_category,
+                        'type_category_display': category.get_type_category_display(),
+                        'icon': (
+                            request.build_absolute_uri(category.icon.url)
+                            if category.icon and request
+                            else None
+                        ),
+                    }
+                ]
+        categories = obj.category.all()
         return [
             {
                 'id': category.id,
@@ -655,6 +676,9 @@ class MasterServiceSerializer(serializers.ModelSerializer):
         items = MasterServiceItems.objects.filter(master_service=obj).select_related(
             'category', 'category__parent',
         ).order_by('category__parent_id', 'category__name')
+        fid = self.context.get('filter_service_category_id')
+        if fid is not None:
+            items = items.filter(category_id=fid)
         groups = {}
         for item in items:
             parent = item.category.parent

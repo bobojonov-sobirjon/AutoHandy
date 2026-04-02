@@ -349,10 +349,12 @@ EMAIL_VERIFICATION_TOKEN_HOURS = int(os.getenv('EMAIL_VERIFICATION_TOKEN_HOURS',
 TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
 TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
 TWILIO_PHONE_NUMBER = os.environ.get('TWILIO_PHONE_NUMBER', '')  # E.164 e.g. +1234567890
+DEFAULT_PHONE_COUNTRY_CODE = os.environ.get('DEFAULT_PHONE_COUNTRY_CODE', '')  # e.g. 998 or 1
 
 # SMS service settings
 SMS_SERVICE = 'twilio'  # Primary: twilio
 SMS_SEND_CODE_IN_RESPONSE_IF_FAIL = True  # If Twilio fails, still return sms_code in response (for dev/testing)
+SMS_DEBUG_IN_RESPONSE = os.environ.get('SMS_DEBUG_IN_RESPONSE', '').lower() in ['1', 'true', 'yes']  # expose sms_debug in response (dev only)
 
 # Legacy SMSC.ru (optional fallback, kept for reference)
 SMSC_LOGIN = os.environ.get('SMSC_LOGIN', '')

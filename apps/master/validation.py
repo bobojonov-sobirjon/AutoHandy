@@ -10,7 +10,7 @@ def validate_skill_category(category: Category) -> None:
     Skills (MasterServiceItems.category) must use the master workshop catalog: by_master.
     Parent is optional (root or child by_master node).
     """
-    if category.type_category != Category.TypeCategory.BY_MASTER:
+    if category.type_category != Category.TypeCategory.BY_ORDER:
         raise drf_serializers.ValidationError(
-            'Skill category must be type by_master (workshop category catalog).'
+            'Skill category must be type by_order (workshop category catalog).'
         )

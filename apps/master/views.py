@@ -248,21 +248,30 @@ class MasterListView(APIView):
         masters = Master.objects.all()
         
         from apps.categories.models import Category
-        from apps.categories.query import master_by_order_category_smart_q
+        from apps.categories.query import (
+            master_by_order_category_smart_q,
+            master_by_order_category_strict_q,
+        )
         from django.db.models import Q
         
         # Собираем все условия поиска (OR между ними)
         search_conditions = Q()
+        filter_service_category_id = None
         
         # Фильтр по категории (умный поиск)
         if category_id:
             try:
                 category_id = int(category_id)
                 category = Category.objects.get(id=category_id)
+                strict = getattr(self, '_nearby_category_strict', False)
                 
                 # Если category типа by_order (из заказа)
                 if category.type_category == 'by_order':
-                    search_conditions |= master_by_order_category_smart_q(category)
+                    if strict:
+                        search_conditions |= master_by_order_category_strict_q(category)
+                        filter_service_category_id = category_id
+                    else:
+                        search_conditions |= master_by_order_category_smart_q(category)
                 
                 # Если category типа by_master (напрямую)
                 elif category.type_category == 'by_master':
@@ -356,7 +365,10 @@ class MasterListView(APIView):
             return Response([], status=status.HTTP_200_OK)
         
         # Сериализуем результаты
-        serializer = MasterSerializer(masters, many=True, context={'request': request})
+        sctx = {'request': request}
+        if filter_service_category_id is not None:
+            sctx['filter_service_category_id'] = filter_service_category_id
+        serializer = MasterSerializer(masters, many=True, context=sctx)
         return Response(serializer.data, status=status.HTTP_200_OK)
     
     def calculate_distance(self, lat1, lon1, lat2, lon2):
