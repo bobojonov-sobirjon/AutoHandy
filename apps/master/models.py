@@ -124,7 +124,7 @@ class MasterService(models.Model):
 
 class MasterServiceItems(models.Model):
     """
-    One skill line per by_master catalog category: master's fixed price.
+    One priced line per by_order service subcategory (same catalog as driver orders).
     """
 
     master_service = models.ForeignKey(

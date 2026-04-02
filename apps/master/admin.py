@@ -62,7 +62,10 @@ class MasterServiceItemsInline(NestedTabularInline):
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         if db_field.name == 'category':
-            kwargs['queryset'] = Category.objects.filter(type_category=Category.TypeCategory.BY_MASTER)
+            # API (validate_skill_category) allows only by_order catalog for line items.
+            kwargs['queryset'] = Category.objects.filter(
+                type_category=Category.TypeCategory.BY_ORDER,
+            ).select_related('parent').order_by('parent_id', 'name')
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
     def category_icon_preview(self, obj):
@@ -112,7 +115,12 @@ class MasterAdmin(NestedModelAdmin):
 
     def formfield_for_manytomany(self, db_field, request, **kwargs):
         if db_field.name == 'category':
-            kwargs['queryset'] = Category.objects.filter(type_category=Category.TypeCategory.BY_MASTER)
+            kwargs['queryset'] = Category.objects.filter(
+                type_category__in=(
+                    Category.TypeCategory.BY_ORDER,
+                    Category.TypeCategory.BY_MASTER,
+                )
+            ).order_by('type_category', 'parent_id', 'name')
         return super().formfield_for_manytomany(db_field, request, **kwargs)
 
     inlines = [

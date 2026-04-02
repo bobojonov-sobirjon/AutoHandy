@@ -7,8 +7,8 @@ from apps.categories.models import Category
 
 def validate_skill_category(category: Category) -> None:
     """
-    Skills (MasterServiceItems.category) must use the master workshop catalog: by_master.
-    Parent is optional (root or child by_master node).
+    Skills (MasterServiceItems.category) must use the order-service catalog: by_order
+    (subcategories used when drivers search/book, e.g. Lockout, Jump Start).
     """
     if category.type_category != Category.TypeCategory.BY_ORDER:
         raise drf_serializers.ValidationError(
