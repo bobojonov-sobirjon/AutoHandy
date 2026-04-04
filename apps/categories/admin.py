@@ -124,8 +124,8 @@ class SubCategoryAdmin(admin.ModelAdmin):
 @admin.register(Category)
 class CategoryAutocompleteAdmin(admin.ModelAdmin):
     """
-    Base Category model admin: enables autocomplete on Master.category M2M through inline.
-    Scoped to by_master categories; hidden from the admin index (Main/Sub category admins stay primary).
+    Base Category model admin (autocomplete helper for FKs to Category).
+    Scoped to by_order categories; hidden from the admin index (Main/Sub category admins stay primary).
     """
 
     search_fields = ('name', 'parent__name')
@@ -137,4 +137,4 @@ class CategoryAutocompleteAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
-        return qs.filter(type_category=Category.TypeCategory.BY_MASTER).select_related('parent')
+        return qs.filter(type_category=Category.TypeCategory.BY_ORDER).select_related('parent')

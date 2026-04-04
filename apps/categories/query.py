@@ -24,7 +24,7 @@ def master_by_order_category_strict_q(category) -> Q:
 
 
 def master_by_order_category_smart_q(category) -> Q:
-    """Masters relevant to a by_order category: service items + M2M categories use parent tree."""
+    """Masters relevant to a by_order category: MasterServiceItems + parent tree."""
     q = Q()
     item_path = 'master_services__master_service_items__category'
     q |= Q(**{f'{item_path}__id': category.id})
@@ -34,15 +34,6 @@ def master_by_order_category_smart_q(category) -> Q:
     else:
         q |= Q(**{f'{item_path}__parent_id': category.id})
 
-    q |= Q(category__id=category.id)
-    if category.parent_id:
-        q |= Q(category__parent_id=category.parent_id)
-        q |= Q(category__id=category.parent_id)
-    else:
-        q |= Q(category__parent_id=category.id)
-
     if category.name:
         q |= Q(master_services__master_service_items__category__name__icontains=category.name)
-        q |= Q(category__name__icontains=category.name)
-        q |= Q(name__icontains=category.name)
     return q

@@ -89,18 +89,26 @@ class MasterServiceInline(NestedTabularInline):
 
 @admin.register(Master)
 class MasterAdmin(NestedModelAdmin):
-    autocomplete_fields = ('category',)
-    list_display = ('full_name', 'name', 'phone_number', 'city', 'get_categories', 'latitude', 'longitude', 'created_at')
+    list_display = (
+        'full_name',
+        'phone_number',
+        'city',
+        'latitude',
+        'longitude',
+        'service_area_radius_miles',
+        'created_at',
+    )
     list_filter = ('city', 'created_at')
-    search_fields = ('user__phone_number', 'user__first_name', 'user__last_name', 'name', 'city')
+    search_fields = ('user__phone_number', 'user__first_name', 'user__last_name', 'city')
     ordering = ('-created_at',)
 
     fieldsets = (
         ('Profile', {
-            'fields': ('user', 'name', 'category', 'description'),
+            'fields': ('user', 'description'),
         }),
         ('Location', {
-            'fields': ('city', 'address', 'latitude', 'longitude'),
+            'fields': ('city', 'address', 'latitude', 'longitude', 'service_area_radius_miles'),
+            'description': 'Map pin (lat/lon) + optional service radius (15 / 45 / 100 miles).',
         }),
         ('Contact', {
             'fields': ('phone', 'working_time'),
@@ -113,27 +121,12 @@ class MasterAdmin(NestedModelAdmin):
 
     readonly_fields = ('created_at', 'updated_at', 'last_activity')
 
-    def formfield_for_manytomany(self, db_field, request, **kwargs):
-        if db_field.name == 'category':
-            kwargs['queryset'] = Category.objects.filter(
-                type_category__in=(
-                    Category.TypeCategory.BY_ORDER,
-                    Category.TypeCategory.BY_MASTER,
-                )
-            ).order_by('type_category', 'parent_id', 'name')
-        return super().formfield_for_manytomany(db_field, request, **kwargs)
-
     inlines = [
         MasterServiceInline,
         MasterImageInline,
         MasterScheduleDayInline,
         MasterBusySlotInline,
     ]
-
-    def get_categories(self, obj):
-        return ", ".join([c.name for c in obj.category.all()])
-
-    get_categories.short_description = 'Categories'
 
     def full_name(self, obj):
         return obj.full_name

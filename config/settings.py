@@ -2,6 +2,8 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from celery.schedules import crontab
+
 
 # Load environment variables from .env file
 try:
@@ -97,12 +99,21 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # ASGI Application for WebSocket support
 ASGI_APPLICATION = 'config.asgi.application'
 
-# Channel Layers Configuration (InMemory - no Redis needed)
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels.layers.InMemoryChannelLayer'
+# Channel layers: InMemory = one Python process only. HTTP and WebSocket must hit the SAME process
+# (e.g. one Daphne on :8001 for both). If API runs on runserver :8000 and WS on Daphne :8001, groups
+# do not match — use Redis (CHANNEL_LAYER_REDIS or REDIS_URL starting with redis://).
+_CHANNEL_REDIS = os.getenv('CHANNEL_LAYER_REDIS', '') or os.getenv('REDIS_URL', '')
+if _CHANNEL_REDIS.startswith('redis'):
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {'hosts': [_CHANNEL_REDIS]},
+        },
     }
-}
+else:
+    CHANNEL_LAYERS = {
+        'default': {'BACKEND': 'channels.layers.InMemoryChannelLayer'},
+    }
 
 
 # Database
@@ -160,6 +171,8 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 MEDIA_URL = "/media/"
 # Production uchun /var/www/media, development uchun local media folder
 MEDIA_ROOT = os.getenv('MEDIA_ROOT', '/var/www/media')
+# SOS WebSocket / Celery: /media/... ni to‘liq URL qilish (so‘ngida slash yo‘q). Masalan: http://localhost:8001
+API_PUBLIC_BASE_URL = os.getenv('API_PUBLIC_BASE_URL', '').rstrip('/')
 
 
 LOCALE_PATHS = [
@@ -289,6 +302,17 @@ JAZZMIN_SETTINGS = {
     'navigation_expanded': False,
     'hide_apps': [],
     'hide_models': [],
+    # Sidebar: Order ilovasi ichida modellarni alfavit emas, ish jarayoniga mos tartibda
+    'order_with_respect_to': [
+        'order.order',
+        'order.standardorder',
+        'order.sosorder',
+        'order.orderservice',
+        'order.review',
+        'order.rating',
+        'order.userrating',
+        'order.masterordercancellation',
+    ],
     'icons': {
         'auth': 'fas fa-users-cog',
         'auth.user': 'fas fa-user',
@@ -361,6 +385,78 @@ SMSC_LOGIN = os.environ.get('SMSC_LOGIN', '')
 SMSC_PASSWORD = os.environ.get('SMSC_PASSWORD', '')
 SMSC_API_URL = 'https://smsc.ru/sys/send.php'
 
+# Master must accept/decline assigned order within this window (minutes); then auto-decline.
+MASTER_OFFER_RESPONSE_MINUTES = int(os.environ.get('MASTER_OFFER_RESPONSE_MINUTES', '15'))
+# Legacy sequential SOS ring (unused for broadcast); kept for old clients reading payload fields.
+SOS_OFFER_SECONDS_PER_MASTER = int(os.environ.get('SOS_OFFER_SECONDS_PER_MASTER', '30'))
+# SOS broadcast: all in-zone masters in queue get the offer; shared countdown until auto-reject.
+SOS_BROADCAST_RESPONSE_SECONDS = int(os.environ.get('SOS_BROADCAST_RESPONSE_SECONDS', '120'))
+# Fallback when Celery countdown/beat is broken (e.g. Windows prefork): while masters stay on SOS WS,
+# run expire_stale_master_offers at most once per this many seconds (per ASGI process). 0 = off.
+SOS_WEBSOCKET_STALE_SWEEP_SEC = int(os.environ.get('SOS_WEBSOCKET_STALE_SWEEP_SEC', '8'))
+
+# Celery (install redis and run: celery -A config worker -l info && celery -A config beat -l info)
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://127.0.0.1:6379/0')
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
+CELERY_TASK_ALWAYS_EAGER = os.getenv('CELERY_TASK_ALWAYS_EAGER', '').lower() in ('1', 'true', 'yes')
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE
+# Celery 6: startup broker retries (silences deprecation when True).
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+# Beat: run `celery -A config.celery beat -l info` alongside the worker.
+# Standard (and non-queue SOS) pending orders use master_response_deadline = now + MASTER_OFFER_RESPONSE_MINUTES.
+# If the master does not accept/decline before that time, expire_stale_master_offers marks the order rejected
+# and clears master (same outcome as POST …/decline/). Per-order ETA tasks also call expire_master_offer_for_order;
+# this schedule is the time-based safety net if a worker missed an ETA.
+CELERY_BEAT_SCHEDULE = {
+    'expire-stale-master-offers': {
+        'task': 'apps.order.tasks.expire_stale_master_offers_task',
+        'schedule': crontab(minute='*'),
+    },
+    'sweep-penalty-free-unlock': {
+        'task': 'apps.order.tasks.sweep_client_penalty_free_unlock_task',
+        'schedule': crontab(minute='*/5'),
+    },
+}
+
+# After master is "on the way", client may cancel without penalty after this many hours (still on the way).
+CLIENT_CANCEL_NO_PENALTY_AFTER_ON_THE_WAY_HOURS = int(
+    os.getenv('CLIENT_CANCEL_NO_PENALTY_AFTER_ON_THE_WAY_HOURS', '2')
+)
+# Client cancellation fees (see client_cancellation_snapshot in order status_workflow).
+CLIENT_CANCEL_GRACE_MINUTES_AFTER_ACCEPT = int(
+    os.getenv('CLIENT_CANCEL_GRACE_MINUTES_AFTER_ACCEPT', '10')
+)
+CLIENT_CANCEL_PENALTY_PERCENT_ACCEPTED_LATE = int(
+    os.getenv('CLIENT_CANCEL_PENALTY_PERCENT_ACCEPTED_LATE', '10')
+)
+CLIENT_CANCEL_PENALTY_PERCENT_ON_THE_WAY = int(
+    os.getenv('CLIENT_CANCEL_PENALTY_PERCENT_ON_THE_WAY', '15')
+)
+CLIENT_CANCEL_PENALTY_PERCENT_ARRIVED = int(
+    os.getenv('CLIENT_CANCEL_PENALTY_PERCENT_ARRIVED', '25')
+)
+# Master "Start job" (in_progress): must be within this distance (meters) of order coordinates after arrived.
+ORDER_START_JOB_MAX_DISTANCE_M = int(os.getenv('ORDER_START_JOB_MAX_DISTANCE_M', '300'))
+# Max minutes master may declare for ETA when marking on_the_way (default 72h).
+ORDER_ETA_MAX_MINUTES = int(os.getenv('ORDER_ETA_MAX_MINUTES', str(72 * 60)))
+# Avg speed (km/h) for auto ETA: order GPS → master workshop/user GPS when status=on_the_way without manual eta.
+ORDER_ETA_ASSUMED_SPEED_KMH = float(os.getenv('ORDER_ETA_ASSUMED_SPEED_KMH', '35'))
+# If True: order.discount in 0..100 is a percent of subtotal; above 100 = fixed amount. If False: always fixed amount.
+ORDER_DISCOUNT_IS_PERCENT = os.getenv('ORDER_DISCOUNT_IS_PERCENT', 'false').lower() in (
+    '1',
+    'true',
+    'yes',
+)
+# Master cancel: first 3 cancellations in a calendar month do not cap schedule horizon; from the 4th on,
+# see master_schedule_forward_horizon_days in apps.order.services.status_workflow.
+MASTER_FREE_CANCELLATIONS_PER_MONTH = int(os.getenv('MASTER_FREE_CANCELLATIONS_PER_MONTH', '3'))
+# When the master is under no cancellation-policy cap, bulk schedule must cover this many days from today.
+MASTER_SCHEDULE_MIN_COVERAGE_DAYS_DEFAULT = int(os.getenv('MASTER_SCHEDULE_MIN_COVERAGE_DAYS_DEFAULT', '14'))
+
 # DRF Spectacular Configuration
 SPECTACULAR_SETTINGS = {
     'TITLE': 'AutoHandy APIs',
@@ -387,14 +483,14 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Authentication', 'description': 'User authentication and authorization'},
         {'name': 'Cars', 'description': 'Car management endpoints'},
         {'name': 'Masters', 'description': 'Master/service provider endpoints'},
-        {'name': 'Order (Driver) — Create', 'description': 'POST /scheduled/, POST /sos/, GET /nearby-masters/'},
+        {'name': 'Order (Driver) — Create', 'description': 'POST /standard/ (alias /scheduled/), POST /sos/, GET /nearby-masters/'},
         {'name': 'Order (Driver) — Time slots', 'description': 'GET /available-slots/'},
         {'name': 'Order (Driver) — My orders', 'description': 'GET / (list), GET /by-user/'},
         {'name': 'Order (Driver) — Reviews', 'description': 'POST /reviews/create/'},
         {'name': 'Order (Driver) — Legacy', 'description': 'POST /add-services/, GET /services-list/, POST /add-master/'},
         {'name': 'Order — Details (Driver & Master)', 'description': 'GET/PUT/PATCH/DELETE /{id}/'},
         {'name': 'Order — Status (Driver & Master)', 'description': 'POST /{id}/status/'},
-        {'name': 'Order (Master) — Available & accept', 'description': 'GET /available/, POST /{id}/accept/'},
+        {'name': 'Order (Master) — Available & accept', 'description': 'GET /available/, POST /{id}/accept/, POST /{id}/decline/'},
         {'name': 'Order (Master) — My orders', 'description': 'GET /by-master/'},
         {'name': 'Order (Master) — Complete', 'description': 'POST /{id}/complete/'},
         {'name': 'Categories', 'description': 'Category management endpoints'},

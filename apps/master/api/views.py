@@ -6,8 +6,8 @@ from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from django.db.models import Q
-from .models import Master, MasterBusySlot, MasterImage, MasterScheduleDay, MasterService, MasterServiceItems
-from .serializers import (
+from apps.master.models import Master, MasterBusySlot, MasterImage, MasterScheduleDay, MasterService, MasterServiceItems
+from apps.master.api.serializers import (
     MasterSerializer, MasterCreateSerializer, MasterUpdateSerializer, MasterNearbySerializer,
     MasterServiceSerializer, MasterServiceItemsSerializer,
     AddServiceItemsSerializer, UpdateServiceItemSerializer, AddMasterImagesSerializer,
@@ -15,14 +15,15 @@ from .serializers import (
     MasterScheduleDaySerializer, MasterScheduleBulkSerializer,
     MasterBusySlotSerializer,
 )
-from .permissions import IsMasterGroup
-from .images_utils import save_master_images_from_request
+from apps.master.permissions import IsMasterGroup
+from apps.master.images_utils import save_master_images_from_request
 from django.contrib.auth import get_user_model
 from apps.accounts.services import SMSService
+from apps.categories.models import Category
 
 User = get_user_model()
 
-from .serializers import (
+from apps.master.api.serializers import (
     ServiceCardGroupSerializer,
     ServiceCardSerializer,
     ServiceCardsResponseSerializer,
@@ -90,15 +91,13 @@ class MasterProfileView(APIView):
         
         **ВСЕ ПОЛЯ НЕОБЯЗАТЕЛЬНЫ!** Можно отправить пустой объект {} или заполнить только нужные поля:
         
-        - `name`: Название мастерской (строка, например: "СТО Авто-Сервис")
         - `city`: Город мастерской (строка)
         - `address`: Адрес мастерской (строка)
         - `phone`: Номер телефона мастерской (строка, например: +998901234567)
         - `working_time`: Режим работы (строка, например: "Пн-Пт: 09:00-18:00, Сб: 10:00-16:00")
-        - `latitude`: Широта местоположения (число от -90 до 90, например: 41.3111)
-        - `longitude`: Долгота местоположения (число от -180 до 180, например: 69.2797)
+        - `latitude` / `longitude`: точка на карте (мастерская / рабочая зона)
+        - `service_area_radius_miles`: **15**, **45** или **100** (мили) — радиус приёма заказов; задаётся вместе с `latitude` и `longitude`
         - `description`: Описание мастерской и услуг (текст)
-        - `category`: Список ID категорий услуг (JSON массив строк, например: "[1, 2, 3]")
         - `images`: Файлы (multipart) — поле можно повторять несколько раз для нескольких фото
         
         **Навыки (цены по подкатегориям)** не передаются при создании. Используйте
@@ -106,7 +105,6 @@ class MasterProfileView(APIView):
         
         **Примечания:**
         - User автоматически берется из текущего авторизованного пользователя
-        - Категории должны существовать в базе данных и иметь тип 'by_master'
         - После создания мастерской пользователь остаётся/снова добавляется в группу 'Master' (если ещё не был)
         - Можно создать мастерскую вообще без данных и заполнить потом через PUT/PATCH
         """,
@@ -115,7 +113,6 @@ class MasterProfileView(APIView):
             OpenApiExample(
                 'Полный пример создания мастерской',
                 value={
-                    "name": "СТО Авто-Сервис",
                     "city": "Ташкент",
                     "address": "ул. Амира Темура, 15",
                     "latitude": 41.3111,
@@ -123,14 +120,12 @@ class MasterProfileView(APIView):
                     "phone": "+998901234567",
                     "working_time": "Пн-Пт: 09:00-18:00, Сб: 10:00-16:00",
                     "description": "Автосервис с полным спектром услуг. Работаем с 2010 года. Опытные мастера, качественные запчасти.",
-                    "category": [1, 2, 3],
                 },
                 request_only=True
             ),
             OpenApiExample(
                 'Минимальный пример',
                 value={
-                    "name": "Мой Автосервис",
                     "city": "Москва",
                     "phone": "+79991234567"
                 },
@@ -164,7 +159,7 @@ class MasterListView(APIView):
     """
     API для получения списка мастеров (публичный доступ).
     Без query-параметров возвращаются все мастера (сортировка по модели, обычно новые первые).
-    Опционально можно сузить выборку: category, name, lat/long/radius.
+    Опционально можно сузить выборку: category (by_order), name (поиск), lat/long/radius.
     """
     permission_classes = [AllowAny]
     
@@ -174,40 +169,37 @@ class MasterListView(APIView):
         Список мастеров. **Без параметров** — все записи из БД.
         
         **Опциональные query-параметры:**
-        - `category` - ID категории (by_order или by_master). При by_order ищет мастеров через дерево parent / название
-        - `name` - Название мастерской (поиск по частичному совпадению)
-        - `lat` / `long` - геоточка пользователя; вместе с `radius` (км, по умолчанию 10) оставляют мастеров в радиусе
+        - `category` — ID категории типа **by_order** (умный поиск по навыкам / дереву parent)
+        - `name` — текстовый поиск: услуги (подкатегории), город/адрес, имя/телефон пользователя-мастера
+        - `lat` / `long` - геоточка пользователя; вместе с `radius` (**мили**, по умолчанию 10) оставляют мастеров в радиусе (внутри переводится в км для Haversine)
         
         **Примеры:**
         - `/api/master/masters/list/` — полный список
         - `/api/master/masters/list/?category=1` - мастера по категории (умный поиск)
-        - `/api/master/masters/list/?name=Авто` - поиск по названию
-        - `/api/master/masters/list/?lat=41.3111&long=69.2797&radius=5` - мастера в радиусе 5 км
+        - `/api/master/masters/list/?name=Авто` - поиск по тексту
+        - `/api/master/masters/list/?lat=41.3111&long=69.2797&radius=5` - мастера в радиусе 5 **миль**
         - `/api/master/masters/list/?category=1&lat=41.3111&long=69.2797&radius=10` - комбинация фильтров
         
-        **Умный поиск по категории:**
-        - Если category типа by_order: ищет мастеров через MasterServiceItems по parent / названию
-        - Если category типа by_master: прямой поиск по категории мастера
-        - Точность поиска: 80-90%
+        **Поиск по категории:** только **by_order** (каталог услуг / заказов). Для `by_car` вернётся ошибка 400.
         
         **Геолокация:**
         - Расчет расстояния выполняется по формуле Haversine
         - Возвращаются только мастера с заполненными координатами (latitude и longitude)
-        - Поле `distance` добавляется в ответ (расстояние в километрах от точки пользователя)
+        - Поле `distance` в ответе — **километры** от точки пользователя; параметр `radius` — **мили** поиска
         """,
         parameters=[
             OpenApiParameter(
                 name='category',
                 type=int,
                 location=OpenApiParameter.QUERY,
-                description='ID категории мастера',
+                description='ID категории by_order (фильтр по навыкам мастера)',
                 required=False
             ),
             OpenApiParameter(
                 name='name',
                 type=str,
                 location=OpenApiParameter.QUERY,
-                description='Название мастерской (поиск по частичному совпадению)',
+                description='Поиск: услуги, город/адрес, имя или телефон мастера (user)',
                 required=False
             ),
             OpenApiParameter(
@@ -228,7 +220,7 @@ class MasterListView(APIView):
                 name='radius',
                 type=float,
                 location=OpenApiParameter.QUERY,
-                description='Радиус поиска в километрах (по умолчанию 10 км)',
+                description='Радиус поиска в милях (по умолчанию 10 mi); distance в ответе — км',
                 required=False
             )
         ],
@@ -243,10 +235,10 @@ class MasterListView(APIView):
         name = request.query_params.get('name')
         user_lat = request.query_params.get('lat')
         user_long = request.query_params.get('long')
-        radius = request.query_params.get('radius', 10)  # По умолчанию 10 км
+        radius = request.query_params.get('radius', 10)  # мили (по умолчанию 10 mi)
 
-        masters = Master.objects.all()
-        
+        masters = Master.objects.all().select_related('user')
+
         from apps.categories.models import Category
         from apps.categories.query import (
             master_by_order_category_smart_q,
@@ -265,22 +257,21 @@ class MasterListView(APIView):
                 category = Category.objects.get(id=category_id)
                 strict = getattr(self, '_nearby_category_strict', False)
                 
-                # Если category типа by_order (из заказа)
-                if category.type_category == 'by_order':
+                if category.type_category == Category.TypeCategory.BY_ORDER:
                     if strict:
                         search_conditions |= master_by_order_category_strict_q(category)
                         filter_service_category_id = category_id
                     else:
                         search_conditions |= master_by_order_category_smart_q(category)
-                
-                # Если category типа by_master (напрямую)
-                elif category.type_category == 'by_master':
-                    search_conditions |= Q(category__id=category_id)
-                
                 else:
-                    # Для других типов (by_car) - прямой поиск
-                    search_conditions |= Q(category__id=category_id)
-                    
+                    return Response(
+                        {
+                            'error': 'Параметр category принимает только ID категории типа by_order '
+                            '(фильтр по навыкам мастера).'
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
             except Category.DoesNotExist:
                 return Response(
                     {'error': 'Категория не найдена'}, 
@@ -295,32 +286,29 @@ class MasterListView(APIView):
         # Фильтр по названию (расширенный поиск)
         if name:
             name_conditions = Q()
-            # Поиск в названии мастерской
-            name_conditions |= Q(name__icontains=name)
-            # Поиск в названии услуг
-            # Поиск по названию услуги (подкатегория) и группы
             name_conditions |= Q(master_services__master_service_items__category__name__icontains=name)
             name_conditions |= Q(master_services__master_service_items__category__parent__name__icontains=name)
-            # Поиск в категориях самого Master
-            name_conditions |= Q(category__name__icontains=name)
-            name_conditions |= Q(category__parent__name__icontains=name)
-            # Поиск в адресе и городе
             name_conditions |= Q(city__icontains=name)
             name_conditions |= Q(address__icontains=name)
-            
+            name_conditions |= Q(user__first_name__icontains=name)
+            name_conditions |= Q(user__last_name__icontains=name)
+            name_conditions |= Q(user__phone_number__icontains=name)
+
             search_conditions |= name_conditions
         
         # Применяем все условия поиска
         if search_conditions:
             masters = masters.filter(search_conditions).distinct()
         
-        # Фильтр по геолокации (расстояние)
+        # Фильтр по геолокации (расстояние): radius в query — мили; сравнение с distance в км
         if user_lat and user_long:
             try:
+                from apps.master.services.geo import MILES_TO_KM
+
                 user_lat = float(user_lat)
                 user_long = float(user_long)
-                radius = float(radius)
-                
+                radius_km = float(radius) * MILES_TO_KM
+
                 # Валидация координат
                 if not (-90 <= user_lat <= 90):
                     return Response(
@@ -333,25 +321,29 @@ class MasterListView(APIView):
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
-                # Фильтруем мастеров с координатами
-                masters = masters.exclude(latitude__isnull=True).exclude(longitude__isnull=True)
+                # Мастера с координатами на карте
+                masters = masters.filter(
+                    latitude__isnull=False,
+                    longitude__isnull=False,
+                )
                 
                 # Вычисляем расстояние для каждого мастера
                 filtered_masters = []
                 for master in masters:
+                    mlat, mlon = master.get_work_location_for_distance()
+                    if mlat is None:
+                        continue
                     distance = self.calculate_distance(
                         user_lat, user_long,
-                        float(master.latitude), float(master.longitude)
+                        mlat, mlon,
                     )
                     # Добавляем расстояние как атрибут для отображения
                     master.distance = round(distance, 2)
                     
-                    # Фильтруем только тех, кто в пределах радиуса
-                    if distance <= radius:
+                    # Фильтруем только тех, кто в пределах радиуса (мили → км)
+                    if distance <= radius_km:
                         filtered_masters.append(master)
-                
-                # Сортируем по расстоянию (ближайшие сначала)
-                filtered_masters.sort(key=lambda x: x.distance)
+
                 masters = filtered_masters
                 
             except (ValueError, TypeError):
@@ -363,9 +355,19 @@ class MasterListView(APIView):
         # Если после фильтрации нет результатов
         if not masters:
             return Response([], status=status.HTTP_200_OK)
-        
+
+        if not isinstance(masters, list):
+            masters = list(masters)
+        from apps.master.services.ranking import attach_master_list_metrics, sort_masters_with_new_boost
+
+        attach_master_list_metrics(masters)
+        masters = sort_masters_with_new_boost(masters)
+
         # Сериализуем результаты
-        sctx = {'request': request}
+        sctx = {
+            'request': request,
+            'hide_master_exact_location': True,
+        }
         if filter_service_category_id is not None:
             sctx['filter_service_category_id'] = filter_service_category_id
         serializer = MasterSerializer(masters, many=True, context=sctx)
@@ -450,7 +452,13 @@ class MasterDetailsView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        serializer = MasterSerializer(master, context={'request': request})
+        hide = not (
+            request.user.is_authenticated and master.user_id == request.user.id
+        )
+        serializer = MasterSerializer(
+            master,
+            context={'request': request, 'hide_master_exact_location': hide},
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
     
     @extend_schema(
@@ -465,13 +473,13 @@ class MasterDetailsView(APIView):
         
         Все поля необязательны, можно обновить только нужные поля:
         
-        - `name`: Название мастерской (строка)
         - `city`: Город мастерской (строка)
         - `address`: Адрес мастерской (строка)
         - `phone`: Номер телефона мастерской (строка)
         - `working_time`: Режим работы (строка)
         - `latitude`: Широта местоположения (число от -90 до 90)
         - `longitude`: Долгота местоположения (число от -180 до 180)
+        - `service_area_radius_miles`: 15, 45 или 100 (вместе с lat/lon)
         - `description`: Описание мастерской и услуг (текст)
         
         Дополнительно в том же запросе можно передать новые файлы в поле `images`
@@ -516,13 +524,13 @@ class MasterDetailsView(APIView):
         
         Можно обновить только нужные поля, не передавая все остальные:
         
-        - `name`: Название мастерской (строка)
         - `city`: Город мастерской (строка)
         - `address`: Адрес мастерской (строка)
         - `phone`: Номер телефона мастерской (строка)
         - `working_time`: Режим работы (строка)
         - `latitude`: Широта местоположения (число от -90 до 90)
         - `longitude`: Долгота местоположения (число от -180 до 180)
+        - `service_area_radius_miles`: 15, 45 или 100 (вместе с lat/lon)
         - `description`: Описание мастерской и услуг (текст)
         
         Новые файлы в поле `images` (multipart, повторяемое) добавляются к галерее.
@@ -586,6 +594,185 @@ class MasterDetailsView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class MasterServiceCategorySuggestionsView(APIView):
+    """
+    By_order subcategories for the catalog: which lines the master already has vs missing
+    (same tree as POST /api/master/service-items/).
+    """
+
+    permission_classes = [IsMasterGroup]
+
+    @staticmethod
+    def _abs_icon(request, category):
+        if not category or not category.icon:
+            return None
+        return request.build_absolute_uri(category.icon.url)
+
+    @extend_schema(
+        description="""
+Все **by_order** подкатегории (есть `parent`), сгруппированные по основной категории.
+
+Для каждой подкатегории:
+- **`has_skill`** — есть ли у мастера строка в `MasterServiceItems` с этой категорией
+- **`price`** — текущая цена или `null`
+
+**Query (необязательно):**
+- `only_related_groups=true` — только группы (родители), где у мастера уже есть хотя бы один навык
+  (удобно при узкой специализации: показать «соседей» по тому же направлению). Если навыков ещё нет — показываются все группы.
+
+JWT, группа **Master**; доступ только к **своей** мастерской (`master_id`).
+        """,
+        parameters=[
+            OpenApiParameter(
+                name='only_related_groups',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Только parent-группы, где уже есть хотя бы один skill (при skill_count>0)',
+            ),
+        ],
+        responses={
+            200: {
+                'description': 'OK',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'master_id': 1,
+                            'recommendation_message': 'Add more skills to increase your earnings.',
+                            'summary': {
+                                'subcategories_total': 8,
+                                'with_skill': 2,
+                                'missing': 6,
+                            },
+                            'groups': [
+                                {
+                                    'parent': {
+                                        'id': 26,
+                                        'name': 'Roadside Assistance',
+                                        'icon': 'https://example.com/media/categories/icons/x.png',
+                                    },
+                                    'items': [
+                                        {
+                                            'id': 31,
+                                            'name': 'Lockout',
+                                            'type_category': 'by_order',
+                                            'has_skill': False,
+                                            'price': None,
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    }
+                },
+            },
+            404: {'description': 'Мастер не найден или не ваш'},
+        },
+        tags=['Masters'],
+    )
+    def get(self, request, master_id):
+        try:
+            master = Master.objects.get(pk=master_id, user=request.user)
+        except Master.DoesNotExist:
+            return Response({'error': 'Master not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        rows = MasterServiceItems.objects.filter(master_service__master=master).values_list(
+            'category_id', 'price'
+        )
+        price_by_cat = {cid: price for cid, price in rows}
+        skill_count = len(price_by_cat)
+
+        only_related = request.query_params.get('only_related_groups', '').lower() in (
+            '1',
+            'true',
+            'yes',
+        )
+        filter_parent_ids = None
+        if only_related and skill_count > 0:
+            filter_parent_ids = set(
+                Category.objects.filter(
+                    id__in=price_by_cat.keys(),
+                    type_category=Category.TypeCategory.BY_ORDER,
+                ).values_list('parent_id', flat=True)
+            )
+            filter_parent_ids.discard(None)
+
+        subs = (
+            Category.objects.filter(
+                type_category=Category.TypeCategory.BY_ORDER,
+                parent_id__isnull=False,
+            )
+            .select_related('parent')
+            .order_by('parent_id', 'name')
+        )
+
+        from collections import defaultdict
+
+        by_parent = defaultdict(list)
+        for cat in subs:
+            if filter_parent_ids is not None and cat.parent_id not in filter_parent_ids:
+                continue
+            by_parent[cat.parent_id].append(cat)
+
+        groups_out = []
+        sorted_parent_ids = sorted(
+            by_parent.keys(),
+            key=lambda pid: (
+                0 if any(c.id in price_by_cat for c in by_parent[pid]) else 1,
+                by_parent[pid][0].parent.name.lower(),
+            ),
+        )
+        for parent_id in sorted_parent_ids:
+            children = by_parent[parent_id]
+            parent = children[0].parent
+            items = []
+            for c in children:
+                p = price_by_cat.get(c.id)
+                items.append(
+                    {
+                        'id': c.id,
+                        'name': c.name,
+                        'type_category': c.type_category,
+                        'has_skill': p is not None,
+                        'price': str(p) if p is not None else None,
+                    }
+                )
+            groups_out.append(
+                {
+                    'parent': {
+                        'id': parent.id,
+                        'name': parent.name,
+                        'icon': self._abs_icon(request, parent),
+                    },
+                    'items': items,
+                }
+            )
+
+        flat_total = sum(len(g['items']) for g in groups_out)
+        with_skill = sum(
+            1 for g in groups_out for it in g['items'] if it['has_skill']
+        )
+        missing = flat_total - with_skill
+
+        recommendation_message = None
+        if skill_count < 3:
+            recommendation_message = 'Add more skills to increase your earnings.'
+
+        return Response(
+            {
+                'master_id': master.id,
+                'recommendation_message': recommendation_message,
+                'summary': {
+                    'subcategories_total': flat_total,
+                    'with_skill': with_skill,
+                    'missing': missing,
+                },
+                'groups': groups_out,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class MasterServiceView(APIView):
     """
     API для добавления услуги мастеру.
@@ -604,7 +791,7 @@ class MasterServiceView(APIView):
         description="""
         Добавление услуги с элементами мастеру. Доступно только для пользователей с ролью 'Master'.
         
-        **Формат:** `master_items`: `[{"category": <id категории by_master>, "price": 100}, ...]`
+        **Формат:** `master_items`: `[{"category": <id подкатегории by_order>, "price": 100}, ...]`
         """,
         request=MasterServiceSerializer,
         examples=[
@@ -949,9 +1136,9 @@ class MastersByUserView(APIView):
 - Ищет мастеров у которых есть хотя бы одна из указанных услуг (OR)
 
 ### 2. Категория (category)
-- **Multiple** - Массив ID категорий мастера (by_master)
+- **Multiple** — ID подкатегорий **by_order** (навыки: MasterServiceItems)
 - Пример: `category=1&category=2`
-- Ищет мастеров с любой из указанных категорий (OR)
+- Мастера, у которых есть цена по любой из этих категорий (OR)
 
 ### 3. Координаты (latitude, longitude)
 - Широта и долгота пользователя для поиска ближайших мастеров
@@ -1026,7 +1213,7 @@ GET /api/master/masters/by-user/?service_items=Шиномонтаж&category=1&c
                 name='category', 
                 type={'type': 'array', 'items': {'type': 'integer'}}, 
                 location=OpenApiParameter.QUERY, 
-                description='Фильтр по категориям (multiple ID). Пример: category=1&category=2',
+                description='ID подкатегорий by_order (навыки). Пример: category=1&category=2',
                 required=False,
                 explode=True,
                 style='form'
@@ -1057,7 +1244,7 @@ GET /api/master/masters/by-user/?service_items=Шиномонтаж&category=1&c
         from django.db.models import Avg, Q
         
         # Получаем всех мастеров
-        masters = Master.objects.all().select_related('user').prefetch_related('category', 'master_services__master_service_items')
+        masters = Master.objects.all().select_related('user').prefetch_related('master_services__master_service_items')
         
         # Фильтр по услугам (service_items) — по имени подкатегории
         service_items = request.query_params.getlist('service_items')
@@ -1078,7 +1265,9 @@ GET /api/master/masters/by-user/?service_items=Шиномонтаж&category=1&c
             try:
                 category_ids = [int(cat_id) for cat_id in categories if cat_id and int(cat_id) > 0]
                 if category_ids:
-                    masters = masters.filter(category__id__in=category_ids).distinct()
+                    masters = masters.filter(
+                        master_services__master_service_items__category_id__in=category_ids
+                    ).distinct()
             except (ValueError, TypeError):
                 pass
 
@@ -1121,23 +1310,25 @@ GET /api/master/masters/by-user/?service_items=Шиномонтаж&category=1&c
                 # Вычисляем расстояние для каждого мастера
                 masters_with_distance = []
                 for master in masters:
-                    if master.latitude and master.longitude:
-                        # Haversine formula
-                        R = 6371.0
-                        lat1_rad = radians(user_lat)
-                        lon1_rad = radians(user_long)
-                        lat2_rad = radians(float(master.latitude))
-                        lon2_rad = radians(float(master.longitude))
-                        
-                        dlat = lat2_rad - lat1_rad
-                        dlon = lon2_rad - lon1_rad
-                        
-                        a = sin(dlat / 2)**2 + cos(lat1_rad) * cos(lat2_rad) * sin(dlon / 2)**2
-                        c = 2 * atan2(sqrt(a), sqrt(1 - a))
-                        distance = R * c
-                        
-                        master.distance = round(distance, 2)
-                        masters_with_distance.append(master)
+                    mlat, mlon = master.get_work_location_for_distance()
+                    if mlat is None:
+                        continue
+                    # Haversine formula
+                    R = 6371.0
+                    lat1_rad = radians(user_lat)
+                    lon1_rad = radians(user_long)
+                    lat2_rad = radians(mlat)
+                    lon2_rad = radians(mlon)
+                    
+                    dlat = lat2_rad - lat1_rad
+                    dlon = lon2_rad - lon1_rad
+                    
+                    a = sin(dlat / 2)**2 + cos(lat1_rad) * cos(lat2_rad) * sin(dlon / 2)**2
+                    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+                    distance = R * c
+                    
+                    master.distance = round(distance, 2)
+                    masters_with_distance.append(master)
                 
                 # Сортируем по расстоянию
                 masters_with_distance.sort(key=lambda x: x.distance)
@@ -1155,7 +1346,11 @@ GET /api/master/masters/by-user/?service_items=Шиномонтаж&category=1&c
             from apps.order.models import Rating
             masters = masters.annotate(avg_rating=Avg('ratings__rating')).order_by('-avg_rating', '-created_at')
         
-        serializer = MasterSerializer(masters, many=True, context={'request': request})
+        serializer = MasterSerializer(
+            masters,
+            many=True,
+            context={'request': request, 'hide_master_exact_location': True},
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
@@ -1176,7 +1371,7 @@ class AddServiceItemsView(APIView):
 
         **Логика:** находим или создаём `MasterService`, затем `MasterServiceItems` (upsert по паре master_service + category).
 
-        **Тело:** `services` — `[{"category": <id категории by_master>, "price": 100000}, ...]`
+        **Тело:** `services` — `[{"category": <id подкатегории by_order>, "price": 100000}, ...]`
         """,
         request=AddServiceItemsSerializer,
         responses={
@@ -1188,7 +1383,7 @@ class AddServiceItemsView(APIView):
     )
     def post(self, request):
         """Добавить услуги к мастеру"""
-        from .serializers import AddServiceItemsSerializer, MasterServiceSerializer
+        from apps.master.api.serializers import AddServiceItemsSerializer, MasterServiceSerializer
 
         serializer = AddServiceItemsSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
@@ -1244,7 +1439,7 @@ class UpdateServiceItemView(APIView):
         description="""
         Обновление конкретной услуги мастера по её ID.
         
-        **Request Body:** `price` и/или `category` (категория by_master).
+        **Request Body:** `price` и/или `category` (подкатегория by_order).
         """,
         request=UpdateServiceItemSerializer,
         responses={
@@ -1256,7 +1451,7 @@ class UpdateServiceItemView(APIView):
     )
     def put(self, request, item_id):
         """Обновить услугу"""
-        from .serializers import UpdateServiceItemSerializer
+        from apps.master.api.serializers import UpdateServiceItemSerializer
         
         item = self.get_object(item_id)
         if not item:
@@ -1625,6 +1820,8 @@ def _resolve_schedule_master(request):
         )
 
 
+
+
 class MasterScheduleListBulkView(APIView):
     """GET: list schedule days; POST: bulk upsert days (owner = current master's user)."""
 
@@ -1681,11 +1878,34 @@ class MasterScheduleListBulkView(APIView):
         ser = MasterScheduleBulkSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        from apps.order.services.status_workflow import (
+            master_schedule_coverage_span_days,
+            master_schedule_missing_coverage_dates,
+            validate_master_schedule_day_date,
+        )
+
         for day in ser.validated_data['days']:
+            ok, err_msg = validate_master_schedule_day_date(master, day['date'])
+            if not ok:
+                return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
             MasterScheduleDay.objects.update_or_create(
                 master=master,
                 date=day['date'],
                 defaults={'start_time': day['start_time'], 'end_time': day['end_time']},
+            )
+        missing = master_schedule_missing_coverage_dates(master)
+        if missing:
+            span = master_schedule_coverage_span_days(master)
+            return Response(
+                {
+                    'error': (
+                        f'Расписание должно покрывать {span} календарных дней подряд от сегодня '
+                        f'(рабочие часы на каждый день).'
+                    ),
+                    'missing_dates': [d.isoformat() for d in missing],
+                    'coverage_days_required': span,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
         out = MasterScheduleDay.objects.filter(master=master).order_by('date')
         return Response(MasterScheduleDaySerializer(out, many=True).data, status=status.HTTP_201_CREATED)
@@ -1722,10 +1942,17 @@ class MasterScheduleDayDetailView(APIView):
         if not row:
             return Response({'error': 'Не найдено'}, status=status.HTTP_404_NOT_FOUND)
         ser = MasterScheduleDaySerializer(row, data=request.data, partial=True)
-        if ser.is_valid():
-            ser.save()
-            return Response(ser.data)
-        return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        from apps.order.services.status_workflow import validate_master_schedule_day_date
+
+        data = ser.validated_data
+        new_date = data.get('date', row.date)
+        ok, err_msg = validate_master_schedule_day_date(row.master, new_date)
+        if not ok:
+            return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
+        ser.save()
+        return Response(ser.data)
 
 
 class MasterBusySlotListCreateView(APIView):
@@ -1788,6 +2015,11 @@ class MasterBusySlotListCreateView(APIView):
         ser = MasterBusySlotSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        from apps.order.services.status_workflow import validate_master_schedule_day_date
+
+        ok, err_msg = validate_master_schedule_day_date(master, ser.validated_data['date'])
+        if not ok:
+            return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
         slot = MasterBusySlot.objects.create(
             master=master,
             date=ser.validated_data['date'],
@@ -1827,10 +2059,17 @@ class MasterBusySlotDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         ser = MasterBusySlotSerializer(slot, data=request.data, partial=True)
-        if ser.is_valid():
-            ser.save()
-            return Response(MasterBusySlotSerializer(slot).data)
-        return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        from apps.order.services.status_workflow import validate_master_schedule_day_date
+
+        data = ser.validated_data
+        new_date = data.get('date', slot.date)
+        ok, err_msg = validate_master_schedule_day_date(slot.master, new_date)
+        if not ok:
+            return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
+        ser.save()
+        return Response(MasterBusySlotSerializer(slot).data)
 
     @extend_schema(summary='Удалить ручной слот', responses={204: None}, tags=['Master Schedule'])
     def delete(self, request, pk):
@@ -1846,7 +2085,7 @@ class MasterBusySlotDetailView(APIView):
 class MasterServiceCardsView(APIView):
     """
     UI uchun service cards:
-    - har bir by_master category bo'yicha (ota kategoriya bo'yicha group)
+    - har bir by_order (skill) category bo'yicha (ota kategoriya bo'yicha group)
     - price min/max/avg: MasterServiceItems.price dan
     - stars: Masterga berilgan Rating dan (Avg)
     - "most common": group ichida masters_count bo'yicha top service
@@ -1857,7 +2096,7 @@ class MasterServiceCardsView(APIView):
     @extend_schema(
         summary="Service cards (category bo'yicha)",
         description="""
-        by_master kategoriyalar asosida service cards qaytaradi.
+        by_order (xizmat podkategoriyalari) asosida service cards qaytaradi.
 
         Response'ni UI'ga "Locksmith service you need" kabi cardlar qilish uchun ishlating.
 
@@ -1871,7 +2110,7 @@ class MasterServiceCardsView(APIView):
                 type=OpenApiTypes.INT,
                 location=OpenApiParameter.QUERY,
                 required=False,
-                description='by_master parent category id (ixtiyoriy)',
+                description='by_order parent (ota) category id (ixtiyoriy)',
             ),
         ],
         responses={200: ServiceCardsResponseSerializer},
@@ -1892,7 +2131,7 @@ class MasterServiceCardsView(APIView):
 
         # 1) price + masters_count (ratings join qilmasdan, duplication bo'lmasligi uchun)
         price_qs = (
-            MasterServiceItems.objects.filter(category__type_category=Category.TypeCategory.BY_MASTER)
+            MasterServiceItems.objects.filter(category__type_category=Category.TypeCategory.BY_ORDER)
             .values(
                 'category_id',
                 'category__name',
@@ -1917,7 +2156,7 @@ class MasterServiceCardsView(APIView):
 
         # 2) rating stats: category bo'yicha (again price joinsiz ishlaymiz)
         rating_qs = (
-            MasterServiceItems.objects.filter(category__type_category=Category.TypeCategory.BY_MASTER)
+            MasterServiceItems.objects.filter(category__type_category=Category.TypeCategory.BY_ORDER)
             .values('category_id')
             .annotate(
                 average_rating=Avg('master_service__master__ratings__rating'),

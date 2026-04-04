@@ -31,9 +31,13 @@ urllib3==2.5.0
 django-redis==5.4.0
 redis==5.0.1
 
+# Celery (async tasks: offer expiry, 2h penalty-free cancel unlock)
+celery==5.4.0
+
 # PostgreSQL database adapter
 psycopg2-binary==2.9.9
 
 # WebSocket support for real-time chat
 channels==4.1.0
+channels-redis==4.2.0
 daphne==4.1.2

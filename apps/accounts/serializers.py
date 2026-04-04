@@ -269,6 +269,9 @@ class UserDetailsSerializer(serializers.ModelSerializer):
         """Get all reviews about user (as master)"""
         try:
             from apps.order.models import Review, Order
+            from apps.order.services.notifications import _media_url
+
+            request = self.context.get('request')
             orders_as_main_master = Order.objects.filter(master__user=obj)
             all_order_ids = set(orders_as_main_master.values_list('id', flat=True))
             reviews = Review.objects.filter(order_id__in=all_order_ids).order_by('-created_at')
@@ -283,7 +286,7 @@ class UserDetailsSerializer(serializers.ModelSerializer):
                     'reviewer': {
                         'id': review.reviewer.id,
                         'full_name': review.reviewer.get_full_name(),
-                        'avatar': review.reviewer.avatar.url if review.reviewer.avatar else None
+                        'avatar': _media_url(request, review.reviewer.avatar),
                     },
                     'order_id': review.order.id,
                     'created_at': review.created_at

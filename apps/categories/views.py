@@ -22,21 +22,21 @@ class CategoryListAPIView(APIView):
         Подкатегории смотрите в `GET /api/categories/subcategories/?parent_id=...`.
 
         **Фильтрация:**
-        - Параметр `type` — по типу (TypeCategory): `by_master`, `by_car`, `by_order`
+        - Параметр `type` — по типу (TypeCategory): `by_car`, `by_order`
         - Без `type` — все основные категории
 
         **Примеры:**
         - `/api/categories/categories/` — все main-категории
-        - `/api/categories/categories/?type=by_order` — main по заказам
+        - `/api/categories/categories/?type=by_order` — main по заказам / услугам
         """,
         parameters=[
             OpenApiParameter(
                 name='type',
                 type=str,
                 location=OpenApiParameter.QUERY,
-                description='Фильтр по типу категории (TypeCategory): by_master - Категории мастеров, by_car - Категории машин, by_order - Категории заказов',
+                description='Фильтр по типу категории: by_car — машина, by_order — заказы/услуги.',
                 required=False,
-                enum=['by_master', 'by_car', 'by_order']
+                enum=['by_car', 'by_order']
             )
         ],
         responses={
@@ -47,11 +47,11 @@ class CategoryListAPIView(APIView):
     def get(self, request):
         """Список только основных категорий с фильтром по TypeCategory."""
         type_filter = request.query_params.get('type')
+        if type_filter == 'by_master':
+            type_filter = 'by_order'
         base = _main_categories_queryset()
 
-        if type_filter == 'by_master':
-            categories = base.filter(type_category='by_master')
-        elif type_filter == 'by_car':
+        if type_filter == 'by_car':
             categories = base.filter(type_category='by_car')
         elif type_filter == 'by_order':
             categories = base.filter(type_category='by_order')

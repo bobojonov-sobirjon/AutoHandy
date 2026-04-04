@@ -1,12 +1,11 @@
 from django.db import models
-from apps.categories.manager.managers import ByMasterManager, ByCarManager, ByOrderManager
+from apps.categories.manager.managers import ByCarManager, ByOrderManager
 
 
 class Category(models.Model):
     """Category model"""
 
     class TypeCategory(models.TextChoices):
-        BY_MASTER = 'by_master', 'By master category'
         BY_CAR = 'by_car', 'By car category'
         BY_ORDER = 'by_order', 'By order category'
 
@@ -19,14 +18,13 @@ class Category(models.Model):
         blank=True,
         related_name='children',
         verbose_name='Parent category',
-        help_text='Optional parent to group related categories (e.g. same service family across by_order / by_master).',
+        help_text='Optional parent to group related categories (e.g. by_order service tree).',
     )
     icon = models.FileField(upload_to='categories/icons/', verbose_name='Category icon', null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
 
     objects = models.Manager()
-    by_master = ByMasterManager()
     by_car = ByCarManager()
     by_order = ByOrderManager()
 

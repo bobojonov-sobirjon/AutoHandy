@@ -18,7 +18,8 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 # is populated before importing code that may import ORM models.
 django_asgi_app = get_asgi_application()
 
-from apps.chat.routing import websocket_urlpatterns
+from apps.chat.routing import websocket_urlpatterns as chat_websocket_urlpatterns
+from apps.order.ws.routing import websocket_urlpatterns as order_websocket_urlpatterns
 from config.middleware.tokenauth_middleware import TokenAuthMiddleware
 
 application = ProtocolTypeRouter({
@@ -26,7 +27,7 @@ application = ProtocolTypeRouter({
     "websocket": AllowedHostsOriginValidator(
         TokenAuthMiddleware(
             URLRouter(
-                websocket_urlpatterns
+                chat_websocket_urlpatterns + order_websocket_urlpatterns,
             )
         )
     ),

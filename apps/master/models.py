@@ -2,9 +2,16 @@ from django.core.validators import MinValueValidator
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from apps.categories.models import Category
 
 User = get_user_model()
+
+
+class MasterServiceAreaRadiusMiles(models.IntegerChoices):
+    """Work zone radius tiers (miles). Separate from home / profile address."""
+
+    MILES_15 = 15, '15 miles (minimum)'
+    MILES_45 = 45, '45 miles (medium)'
+    MILES_100 = 100, '100 miles (extended)'
 
 
 class Master(models.Model):
@@ -16,20 +23,6 @@ class Master(models.Model):
         verbose_name='User'
     )
 
-    name = models.CharField(
-        max_length=255,
-        blank=True,
-        default='',
-        verbose_name='Workshop name',
-        help_text='Workshop name (e.g. "Auto Service Station")'
-    )
-
-    category = models.ManyToManyField(
-        Category,
-        verbose_name='Category',
-        related_name='master_categories'
-    )
-
     # Location
     city = models.CharField(max_length=100, blank=True, default='', verbose_name='City')
     address = models.TextField(blank=True, verbose_name='Address')
@@ -38,15 +31,26 @@ class Master(models.Model):
         decimal_places=9,
         null=True,
         blank=True,
-        verbose_name='Latitude'
+        verbose_name='Latitude',
+        help_text='Workshop / service point on map; used with service area radius for distance and visibility.',
     )
     longitude = models.DecimalField(
         max_digits=12,
         decimal_places=9,
         null=True,
         blank=True,
-        verbose_name='Longitude'
+        verbose_name='Longitude',
+        help_text='Workshop / service point on map; used with service area radius for distance and visibility.',
     )
+
+    service_area_radius_miles = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        choices=MasterServiceAreaRadiusMiles.choices,
+        verbose_name='Service area radius (miles)',
+        help_text='15 / 45 / 100 miles around latitude/longitude for order matching.',
+    )
+
     phone = models.CharField(max_length=20, default='', verbose_name='Phone')
     working_time = models.CharField(max_length=100, default='', verbose_name='Working hours')
 
@@ -79,6 +83,20 @@ class Master(models.Model):
     def completion_rate(self):
         """Order completion rate percentage"""
         return 0  # Field removed, always return 0
+
+    def get_work_location_for_distance(self):
+        """Point for distance to orders: latitude / longitude."""
+        if self.latitude is not None and self.longitude is not None:
+            return float(self.latitude), float(self.longitude)
+        return None, None
+
+    def max_order_distance_km(self) -> float:
+        """Max distance from work location to order/client location for this master."""
+        from apps.master.services.geo import MILES_TO_KM
+
+        if self.service_area_radius_miles:
+            return float(self.service_area_radius_miles) * MILES_TO_KM
+        return 50.0
 
 
 class MasterImage(models.Model):
@@ -134,7 +152,7 @@ class MasterServiceItems(models.Model):
         verbose_name='Master service',
     )
     category = models.ForeignKey(
-        Category,
+        'categories.Category',
         on_delete=models.CASCADE,
         related_name='master_service_items',
         verbose_name='Service (subcategory)',

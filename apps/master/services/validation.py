@@ -12,5 +12,5 @@ def validate_skill_category(category: Category) -> None:
     """
     if category.type_category != Category.TypeCategory.BY_ORDER:
         raise drf_serializers.ValidationError(
-            'Skill category must be type by_order (workshop category catalog).'
+            'Skill category must be type by_order (service catalog).'
         )

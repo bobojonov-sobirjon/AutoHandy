@@ -33,6 +33,18 @@ class IsOrderOwnerOrMaster(permissions.BasePermission):
         master = request.user.master_profiles.first()
         if master and obj.master == master:
             return True
+
+        # SOS pending: мастера из broadcast-очереди — только чтение (accept/decline — отдельные эндпоинты)
+        if master:
+            from apps.order.models import OrderStatus, OrderType
+            from apps.order.services.sos_rotation import master_in_sos_broadcast_queue
+
+            if (
+                getattr(obj, 'order_type', None) == OrderType.SOS
+                and getattr(obj, 'status', None) == OrderStatus.PENDING
+                and master_in_sos_broadcast_queue(obj, master.id)
+            ):
+                return request.method in permissions.SAFE_METHODS
         
         return False
 

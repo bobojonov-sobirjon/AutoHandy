@@ -3,18 +3,52 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
+from django.db import transaction
 from django.db.models import Q
 from django.contrib.auth import get_user_model
+from django.utils import timezone
+from django.conf import settings
+import json
+import logging
 
 from apps.categories.query import order_by_order_category_smart_q
+from apps.order.services.offer_expiry import expire_stale_master_offers
+from apps.order.services.master_offer import activate_pending_master_offer
+from apps.order.services.status_workflow import (
+    auto_eta_from_order_master,
+    client_cancellation_snapshot,
+    resolve_master_coordinates_for_start_job,
+    resolve_on_the_way_eta,
+    validate_master_cancel,
+)
+from apps.order.services.celery_schedule import schedule_client_penalty_free_unlock
+from apps.order.services.sos_rotation import (
+    master_eligible_for_pending_sos_offer,
+    master_in_sos_broadcast_queue,
+    order_ids_sos_currently_offered_to_master,
+    sos_broadcast_decline,
+)
+from apps.master.services.geo import MILES_TO_KM, haversine_distance_m, haversine_distance_km
 
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
 
-from .models import Order, OrderStatus, OrderType, Rating, OrderService, Review, ReviewTag
-from .serializers import (
+from apps.order.models import (
+    MasterOrderCancellation,
+    Order,
+    OrderStatus,
+    OrderType,
+    OrderWorkCompletionImage,
+    Rating,
+    OrderService,
+    Review,
+    ReviewTag,
+)
+from apps.order.api.payload import attach_order_images_from_request, normalize_order_create_request_data
+from apps.order.api.serializers import (
     OrderSerializer,
     OrderCreateSerializer,
     OrderUpdateSerializer,
@@ -23,14 +57,18 @@ from .serializers import (
     OrderServiceSerializer,
     ReviewSerializer,
     ReviewCreateSerializer,
+    CancelOrderRequestSerializer,
 )
-from .permissions import IsOrderOwnerOrMaster, IsOrderOwner, IsMaster
+from apps.order.services.order_pricing import estimate_cancellation_penalty_amount, order_payable_total_str
+from apps.order.permissions import IsOrderOwnerOrMaster, IsOrderOwner, IsMaster
 from apps.master.models import Master
-from apps.master.serializers import MasterSerializer
-from apps.master.views import MasterListView
+from apps.master.api.serializers import MasterSerializer
+from apps.master.api.views import MasterListView
 from apps.accounts.models import UserBalance
 
 User = get_user_model()
+
+logger = logging.getLogger(__name__)
 
 # Swagger: order endpoints grouped by role/flow (see SPECTACULAR_SETTINGS['TAGS'])
 STAG_ORDER_DRIVER_CREATE = 'Order (Driver) — Create'
@@ -44,11 +82,182 @@ STAG_ORDER_MASTER_AVAILABLE = 'Order (Master) — Available & accept'
 STAG_ORDER_MASTER_MY = 'Order (Master) — My orders'
 STAG_ORDER_MASTER_COMPLETE = 'Order (Master) — Complete'
 
+MASTER_ACTIVE_WORK_STATUSES = (
+    OrderStatus.ACCEPTED,
+    OrderStatus.ON_THE_WAY,
+    OrderStatus.ARRIVED,
+    OrderStatus.IN_PROGRESS,
+)
+
+
+def _normalize_order_type_query_param(raw: str | None) -> str | None:
+    """Legacy clients may send ``order_type=scheduled``; stored value is ``standard``."""
+    if not raw:
+        return None
+    v = raw.strip().lower()
+    if v == 'scheduled':
+        return OrderType.STANDARD
+    return v
+
+
+def _nearby_masters_debug_snapshot(
+    *,
+    user_lat: float,
+    user_lng: float,
+    radius_km: float,
+    category_id_raw: str | None,
+) -> dict:
+    """
+    Why /nearby-masters can return []: counts after each constraint (coords, strict category, radius).
+    """
+    from apps.categories.models import Category
+    from apps.categories.query import master_by_order_category_strict_q
+
+    out: dict = {
+        'search_point': {'lat': user_lat, 'lng': user_lng},
+        'radius_km': radius_km,
+        'category_query': category_id_raw,
+        'masters_total': Master.objects.count(),
+        'masters_with_coordinates': Master.objects.filter(
+            latitude__isnull=False,
+            longitude__isnull=False,
+        ).count(),
+    }
+    qs = Master.objects.filter(latitude__isnull=False, longitude__isnull=False)
+    if category_id_raw not in (None, ''):
+        try:
+            cid = int(category_id_raw)
+            cat = Category.objects.filter(pk=cid).first()
+            if not cat:
+                out['category_filter'] = 'not_found'
+            elif cat.type_category != Category.TypeCategory.BY_ORDER:
+                out['category_filter'] = f'wrong_type:{cat.type_category}'
+            else:
+                qs = qs.filter(master_by_order_category_strict_q(cat)).distinct()
+                out['category_filter'] = f'strict_by_order_id={cid}'
+        except (ValueError, TypeError):
+            out['category_filter'] = 'invalid_param'
+    else:
+        out['category_filter'] = 'none'
+
+    out['masters_after_category_and_coords'] = qs.count()
+
+    in_radius = 0
+    for m in qs.iterator(chunk_size=200):
+        mlat, mlon = m.get_work_location_for_distance()
+        if mlat is None or mlon is None:
+            continue
+        if haversine_distance_km(user_lat, user_lng, mlat, mlon) <= radius_km:
+            in_radius += 1
+    out['masters_within_radius'] = in_radius
+    return out
+
+
+def _nearby_nearest_outside_radius(
+    *,
+    user_lat: float,
+    user_lng: float,
+    radius_km: float,
+    category_id_raw: str | None,
+    limit: int = 20,
+) -> list[dict]:
+    """Masters that pass category+coords but are farther than radius — sorted nearest first."""
+    from apps.categories.models import Category
+    from apps.categories.query import master_by_order_category_strict_q
+
+    qs = Master.objects.filter(latitude__isnull=False, longitude__isnull=False)
+    if category_id_raw not in (None, ''):
+        try:
+            cid = int(category_id_raw)
+            cat = Category.objects.filter(pk=cid).first()
+            if cat and cat.type_category == Category.TypeCategory.BY_ORDER:
+                qs = qs.filter(master_by_order_category_strict_q(cat)).distinct()
+            else:
+                qs = qs.none()
+        except (ValueError, TypeError):
+            qs = qs.none()
+
+    rows: list[dict] = []
+    for m in qs.iterator(chunk_size=200):
+        mlat, mlon = m.get_work_location_for_distance()
+        if mlat is None or mlon is None:
+            continue
+        d = haversine_distance_km(user_lat, user_lng, mlat, mlon)
+        if d > radius_km:
+            rows.append(
+                {
+                    'master_id': m.id,
+                    'distance_km': round(d, 2),
+                    'km_beyond_radius': round(d - radius_km, 2),
+                }
+            )
+    rows.sort(key=lambda x: x['distance_km'])
+    return rows[:limit]
+
+
+def _nearby_strict_category_missing_coords_count(category_id_raw: str | None) -> int | None:
+    """How many masters have the strict skill but no lat/lon."""
+    from django.db.models import Q
+
+    from apps.categories.models import Category
+    from apps.categories.query import master_by_order_category_strict_q
+
+    if category_id_raw in (None, ''):
+        return None
+    try:
+        cat = Category.objects.get(pk=int(category_id_raw))
+    except (Category.DoesNotExist, ValueError, TypeError):
+        return None
+    if cat.type_category != Category.TypeCategory.BY_ORDER:
+        return None
+    return (
+        Master.objects.filter(master_by_order_category_strict_q(cat))
+        .filter(Q(latitude__isnull=True) | Q(longitude__isnull=True))
+        .distinct()
+        .count()
+    )
+
+
+def _nearby_build_full_explain(
+    *,
+    user_lat: float,
+    user_lng: float,
+    radius_km: float,
+    radius_miles: float,
+    category_id_raw: str | None,
+    coord_source: str,
+) -> dict:
+    snap = _nearby_masters_debug_snapshot(
+        user_lat=user_lat,
+        user_lng=user_lng,
+        radius_km=radius_km,
+        category_id_raw=category_id_raw,
+    )
+    snap['radius_miles'] = radius_miles
+    snap['coord_source'] = coord_source
+    snap['nearest_outside_radius'] = _nearby_nearest_outside_radius(
+        user_lat=user_lat,
+        user_lng=user_lng,
+        radius_km=radius_km,
+        category_id_raw=category_id_raw,
+        limit=20,
+    )
+    snap['masters_skill_match_but_no_coordinates'] = _nearby_strict_category_missing_coords_count(
+        category_id_raw
+    )
+    snap['hint'] = (
+        'radius query is in miles; radius_km is the effective search radius. '
+        'nearest_outside_radius: same filters (category if any) + coords, but distance_km > radius_km; '
+        'km_beyond_radius = km past that circle. '
+        'masters_skill_match_but_no_coordinates: have the skill but lat/lon empty.'
+    )
+    return snap
+
 
 class NearbyMasterCandidatesView(MasterListView):
     """
     Masters near a GPS point — same logic as GET /api/master/masters/list/
-    with lat/long + radius; lat/long required here; default radius 50 km (order max).
+    with lat/long + radius (**miles**); default 50 mi. Coordinates from query or user profile.
     """
 
     permission_classes = [IsAuthenticated]
@@ -60,11 +269,19 @@ class NearbyMasterCandidatesView(MasterListView):
         description="""
 Тот же движок, что **`GET /api/master/masters/list/`** (Haversine, `distance` в ответе).
 
-**Обязательно в query:** `lat`, `long`. (В коде также принимаются синонимы `latitude` / `longitude` — в Swagger они не дублируются.)
+**Координаты точки поиска:**
+- Если в query переданы `lat` и `long` (или `latitude` / `longitude`) — используются они.
+- Иначе берутся **`request.user.latitude` и `request.user.longitude`** из профиля (если заданы).
+- Если ни query, ни профиль не дают координаты — **400** с подсказкой.
 
-**По умолчанию:** `radius=50` км.
+**По умолчанию:** `radius=50` **миль** (в ответе `distance` по-прежнему в км).
 
-**Опционально:** `category`, `name`.
+**Опционально:** `category` (by_order; **строгое** совпадение навыка), `name`.
+
+**Пояснение в теле ответа (не ошибка):** `explain=1` или `debug=1` — вместо голого массива приходит объект:
+`{ "masters": [...], "nearby_explain": { счётчики, nearest_outside_radius (ближайшие за пределами radius с distance_km и km_beyond_radius), ... } }`.
+
+Без `explain` ответ по-прежнему **массив** мастеров (как раньше).
 
 JWT обязателен.
         """,
@@ -73,22 +290,22 @@ JWT обязателен.
                 name='lat',
                 type=OpenApiTypes.DOUBLE,
                 location=OpenApiParameter.QUERY,
-                required=True,
-                description='Широта точки поиска',
+                required=False,
+                description='Широта точки поиска (если не задана — из профиля пользователя)',
             ),
             OpenApiParameter(
                 name='long',
                 type=OpenApiTypes.DOUBLE,
                 location=OpenApiParameter.QUERY,
-                required=True,
-                description='Долгота точки поиска',
+                required=False,
+                description='Долгота точки поиска (если не задана — из профиля пользователя)',
             ),
             OpenApiParameter(
                 name='radius',
                 type=OpenApiTypes.DOUBLE,
                 location=OpenApiParameter.QUERY,
                 required=False,
-                description='Радиус в км (по умолчанию 50)',
+                description='Радиус поиска в милях (по умолчанию 50 mi); distance в списке мастеров — км',
             ),
             OpenApiParameter(
                 name='category',
@@ -102,6 +319,20 @@ JWT обязателен.
                 location=OpenApiParameter.QUERY,
                 required=False,
             ),
+            OpenApiParameter(
+                name='explain',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='1/true — тело: { masters, nearby_explain } (почему пусто, кто чуть дальше radius)',
+            ),
+            OpenApiParameter(
+                name='debug',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='То же что explain=1 (алиас)',
+            ),
         ],
         responses={200: MasterSerializer(many=True)},
         tags=[STAG_ORDER_DRIVER_CREATE],
@@ -109,18 +340,82 @@ JWT обязателен.
     def get(self, request):
         lat = request.query_params.get('lat') or request.query_params.get('latitude')
         lng = request.query_params.get('long') or request.query_params.get('longitude')
+        coord_source = 'query'
+
         if lat is None or lng is None:
-            return Response(
-                {'error': 'Укажите lat и long (или latitude и longitude)'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            u = request.user
+            ulat = getattr(u, 'latitude', None)
+            ulng = getattr(u, 'longitude', None)
+            if ulat is not None and ulng is not None:
+                lat = str(ulat)
+                lng = str(ulng)
+                coord_source = 'user_profile'
+            else:
+                return Response(
+                    {
+                        'error': (
+                            'Укажите lat и long в query (или latitude / longitude) '
+                            'либо задайте latitude и longitude в профиле пользователя.'
+                        ),
+                        'code': 'location_required',
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         q = request.query_params.copy()
         q['lat'] = str(lat)
         q['long'] = str(lng)
         if not q.get('radius'):
-            q['radius'] = '50'
+            q['radius'] = '50'  # miles (≈80.5 km)
         request._request.GET = q
-        return super().get(request)
+
+        want_explain = request.query_params.get('explain', '').lower() in ('1', 'true', 'yes') or request.query_params.get(
+            'debug', ''
+        ).lower() in ('1', 'true', 'yes')
+
+        response = super().get(request)
+
+        explain = None
+        need_explain_build = want_explain or (
+            response.status_code == status.HTTP_200_OK
+            and isinstance(response.data, list)
+            and len(response.data) == 0
+        )
+        if need_explain_build:
+            try:
+                u_lat_f = float(lat)
+                u_lng_f = float(lng)
+                r_mi = float(q.get('radius') or '50')
+                r_km = r_mi * MILES_TO_KM
+                explain = _nearby_build_full_explain(
+                    user_lat=u_lat_f,
+                    user_lng=u_lng_f,
+                    radius_km=r_km,
+                    radius_miles=r_mi,
+                    category_id_raw=request.query_params.get('category'),
+                    coord_source=coord_source,
+                )
+            except (TypeError, ValueError) as e:
+                explain = {'coord_source': coord_source, 'snapshot_error': str(e)}
+
+        if (
+            response.status_code == status.HTTP_200_OK
+            and isinstance(response.data, list)
+            and len(response.data) == 0
+            and explain
+        ):
+            logger.warning(
+                'nearby_masters_empty user_id=%s coord_source=%s category=%s explain=%s',
+                request.user.pk,
+                coord_source,
+                request.query_params.get('category'),
+                explain,
+            )
+
+        if want_explain and response.status_code == status.HTTP_200_OK and isinstance(response.data, list):
+            return Response({'masters': response.data, 'nearby_explain': explain or {}})
+
+        return response
 
 
 class OrderPagination(PageNumberPagination):
@@ -130,64 +425,88 @@ class OrderPagination(PageNumberPagination):
     max_page_size = 100
 
 
-class ScheduledOrderCreateView(APIView):
-    """Create scheduled order (Order by Date)"""
+class StandardOrderCreateView(APIView):
+    """Create standard order (normal booking with a chosen master)."""
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     @extend_schema(
-        summary="Create scheduled order (Order by Date)",
+        summary="Create standard order",
         description="""
-# Scheduled order (Order by Date)
+# Standard order
 
-This endpoint creates a **scheduled order** when the client:
-- Selects master/workshop in advance
-- Selects visit date and time slot (e.g. 10:00-11:00)
-- Specifies required services
+This endpoint creates a **standard** (non-emergency) order when the client:
+- Selects **master/workshop** in advance
+- Sends **location** and **service** details (cars, categories)
+
+There is **no visit date or time slot** on the order (per product spec). Use free-text **preferred_time** on the user/profile side if the app needs to convey timing informally.
+
+## Content types
+
+- **application/json** — `car_list` / `category_list` as JSON arrays.
+- **multipart/form-data** — same fields as strings; `car_list` / `category_list` as **JSON strings** (e.g. `[1,2]`) or comma-separated IDs; the API **parses them to int lists** before validation. Optional file field **`images`** (repeat for multiple photos).
+
+`order_type` is set server-side to **`standard`** — you do not need to send it (JSON or multipart).
+
+**URL:** `POST /api/order/standard/` (legacy alias: `POST /api/order/scheduled/`).
 
 ## When to use
 
 - Planned maintenance (oil change, tire fitting, diagnostics)
-- Booking a specific time
 - Client has chosen a workshop from the list
 
 Do NOT use for **emergencies** (use `/api/order/sos/`).
 
-## Required fields
+## Typical payload (validated server-side; missing fields → 400)
 
-- **order_type**: always "scheduled"
-- **text**: service description
-- **car_list**: list of client car IDs [1, 2]
-- **category_list**: list of service category IDs [1, 2]
-- **master_id**: selected master/workshop ID
-- **scheduled_date**: visit date (YYYY-MM-DD)
-- **scheduled_time_start**, **scheduled_time_end**: time slot (HH:MM)
-- **location**, **latitude**, **longitude**: workshop address and coordinates
+- **master_id**, **text**, **location**, **latitude**, **longitude**, **car_list**, **category_list**
+- Optional: **parts_purchase_required**, **images** (multipart)
 
 ## Validation
 
-1. Visit date must not be in the past
-2. Start time must be before end time
-3. Distance to master <= 50 km
+- Order coordinates must fall within the selected master’s **acceptance zone** (map pin + radius).
         """,
         tags=[STAG_ORDER_DRIVER_CREATE],
         request={
             'application/json': {
                 'type': 'object',
-                'required': ['order_type', 'master_id', 'scheduled_date', 'scheduled_time_start', 'scheduled_time_end', 'text', 'location', 'latitude', 'longitude', 'car_list', 'category_list'],
                 'properties': {
-                    'order_type': {'type': 'string', 'enum': ['scheduled'], 'description': 'Order type (always "scheduled")', 'example': 'scheduled'},
-                    'master_id': {'type': 'integer', 'description': 'Master/workshop ID (required)', 'example': 5},
-                    'scheduled_date': {'type': 'string', 'format': 'date', 'description': 'Visit date (YYYY-MM-DD)', 'example': '2026-01-30'},
-                    'scheduled_time_start': {'type': 'string', 'format': 'time', 'description': 'Start time (HH:MM)', 'example': '14:00'},
-                    'scheduled_time_end': {'type': 'string', 'format': 'time', 'description': 'End time (HH:MM)', 'example': '15:00'},
+                    'order_type': {
+                        'type': 'string',
+                        'enum': ['standard'],
+                        'description': 'Optional in body; server always sets `standard` for this endpoint.',
+                        'example': 'standard',
+                    },
+                    'master_id': {'type': 'integer', 'description': 'Master/workshop ID', 'example': 5},
                     'text': {'type': 'string', 'description': 'Service description', 'example': 'Oil and filter change'},
                     'location': {'type': 'string', 'description': 'Workshop address', 'example': 'Auto Service, Main St. 15'},
                     'latitude': {'type': 'number', 'description': 'Workshop latitude', 'example': 41.3111},
                     'longitude': {'type': 'number', 'description': 'Workshop longitude', 'example': 69.2797},
                     'car_list': {'type': 'array', 'items': {'type': 'integer'}, 'description': 'List of car IDs', 'example': [2]},
-                    'category_list': {'type': 'array', 'items': {'type': 'integer'}, 'description': 'List of category IDs', 'example': [1]}
-                }
-            }
+                    'category_list': {'type': 'array', 'items': {'type': 'integer'}, 'description': 'List of category IDs', 'example': [1]},
+                    'parts_purchase_required': {'type': 'boolean', 'default': False},
+                },
+            },
+            'multipart/form-data': {
+                'type': 'object',
+                'properties': {
+                    'master_id': {'type': 'integer'},
+                    'text': {'type': 'string'},
+                    'location': {'type': 'string'},
+                    'latitude': {'type': 'string', 'description': 'Decimal as string'},
+                    'longitude': {'type': 'string', 'description': 'Decimal as string'},
+                    'car_list': {
+                        'type': 'string',
+                        'description': 'JSON array as string e.g. [1,2] or comma-separated 1,2 (parsed server-side)',
+                    },
+                    'category_list': {
+                        'type': 'string',
+                        'description': 'JSON array as string e.g. [5] or comma-separated (parsed server-side)',
+                    },
+                    'parts_purchase_required': {'type': 'boolean', 'default': False},
+                    'images': {'type': 'array', 'items': {'type': 'string', 'format': 'binary'}},
+                },
+            },
         },
         responses={
             201: {
@@ -198,11 +517,8 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
                             'message': 'Your order has been created and sent to the master',
                             'order': {
                                 'id': 123,
-                                'order_type': 'scheduled',
+                                'order_type': 'standard',
                                 'status': 'pending',
-                                'scheduled_date': '2026-01-30',
-                                'scheduled_time_start': '14:00',
-                                'scheduled_time_end': '15:00',
                                 'master': {'id': 5, 'name': 'Auto Service'},
                                 'text': 'Oil and filter change'
                             }
@@ -217,15 +533,7 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
                         'examples': {
                             'missing_master': {
                                 'summary': 'Master not specified',
-                                'value': {'master_id': ['Master is required for scheduled order']}
-                            },
-                            'missing_date': {
-                                'summary': 'Date not specified',
-                                'value': {'scheduled_date': ['Visit date is required for scheduled order']}
-                            },
-                            'past_date': {
-                                'summary': 'Date in past',
-                                'value': {'scheduled_date': ['Visit date cannot be in the past']}
+                                'value': {'master_id': ['Master is required for standard order']}
                             },
                             'distance_error': {
                                 'summary': 'Master too far',
@@ -239,14 +547,15 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
         }
     )
     def post(self, request):
-        """Create scheduled order"""
-        data = request.data.copy()
-        data['order_type'] = OrderType.SCHEDULED
+        """Create standard order"""
+        data = normalize_order_create_request_data(request)
+        data['order_type'] = OrderType.STANDARD
 
-        serializer = OrderCreateSerializer(data=data)
+        serializer = OrderCreateSerializer(data=data, context={'request': request})
         if serializer.is_valid():
             order = serializer.save(user=request.user)
-            order_serializer = OrderSerializer(order)
+            attach_order_images_from_request(order, request)
+            order_serializer = OrderSerializer(order, context={'request': request})
             return Response({
                 'message': 'Your order has been created and sent to the master',
                 'order': order_serializer.data
@@ -257,6 +566,7 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
 class SOSOrderCreateView(APIView):
     """Create SOS order (emergency assistance)"""
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     @extend_schema(
         summary="Create SOS order (emergency assistance)",
@@ -269,6 +579,13 @@ This endpoint creates an **emergency order** when the client:
 - Sends current **GPS location**
 - System finds nearest available masters within radius
 
+## Content types
+
+- **application/json** — arrays for `car_list` / `category_list`.
+- **multipart/form-data** — `car_list` / `category_list` as **JSON strings**; optional **`images`** (multiple files).
+
+`order_type` is set server-side to `sos`.
+
 ## When to use
 
 - Car broke down on the road
@@ -276,39 +593,67 @@ This endpoint creates an **emergency order** when the client:
 - Engine won't start
 - Any emergency requiring immediate help
 
-Do NOT use for **planned work** (use `/api/order/scheduled/`).
+Do NOT use for **planned work** (use `/api/order/standard/`).
 
 ## Required fields
 
-- **order_type**: always "sos"
-- **master_id**: master/workshop ID (required)
 - **text**: problem description
-- **priority**: "low" or "high"
-- **car_list**, **category_list**: car and category IDs
+- **car_list**, **category_list**: car and category IDs (**нужна хотя бы одна by_order** категория)
 - **location**, **latitude**, **longitude**: current location (GPS)
+
+## Optional
+
+- **priority** (default **high**)
+- **parts_purchase_required** (boolean, default false)
+- **images** (multipart)
 
 ## Validation
 
-- Distance to master <= 50 km
-- Selected master receives notification
+- Очередь мастеров по расстоянию и услуге (**by_order**); **ws/sos/master/?token=JWT** для мастера.
         """,
         tags=[STAG_ORDER_DRIVER_CREATE],
         request={
             'application/json': {
                 'type': 'object',
-                'required': ['order_type', 'master_id', 'priority', 'text', 'location', 'latitude', 'longitude', 'car_list', 'category_list'],
+                'required': ['text', 'location', 'latitude', 'longitude', 'car_list', 'category_list'],
                 'properties': {
-                    'order_type': {'type': 'string', 'enum': ['sos'], 'description': 'Order type (always "sos")', 'example': 'sos'},
-                    'master_id': {'type': 'integer', 'description': 'Master/workshop ID (required)', 'example': 5},
-                    'priority': {'type': 'string', 'enum': ['low', 'high'], 'description': 'Order priority: low or high', 'example': 'high'},
+                    'order_type': {
+                        'type': 'string',
+                        'enum': ['sos'],
+                        'description': 'Optional in body; server always sets `sos` for this endpoint.',
+                        'example': 'sos',
+                    },
+                    'priority': {'type': 'string', 'enum': ['low', 'high'], 'description': 'Optional; default high', 'example': 'high'},
                     'text': {'type': 'string', 'description': 'Problem description', 'example': 'Flat tire on highway'},
                     'location': {'type': 'string', 'description': 'Current location description', 'example': 'Highway M39, km 45, near Shell station'},
                     'latitude': {'type': 'number', 'description': 'Current latitude (GPS)', 'example': 41.2548},
                     'longitude': {'type': 'number', 'description': 'Current longitude (GPS)', 'example': 69.2107},
                     'car_list': {'type': 'array', 'items': {'type': 'integer'}, 'description': 'List of car IDs', 'example': [2]},
-                    'category_list': {'type': 'array', 'items': {'type': 'integer'}, 'description': 'List of category IDs', 'example': [1]}
-                }
-            }
+                    'category_list': {'type': 'array', 'items': {'type': 'integer'}, 'description': 'List of category IDs', 'example': [1]},
+                    'parts_purchase_required': {'type': 'boolean', 'default': False},
+                },
+            },
+            'multipart/form-data': {
+                'type': 'object',
+                'required': ['text', 'location', 'latitude', 'longitude', 'car_list', 'category_list'],
+                'properties': {
+                    'priority': {'type': 'string', 'enum': ['low', 'high']},
+                    'text': {'type': 'string'},
+                    'location': {'type': 'string'},
+                    'latitude': {'type': 'string'},
+                    'longitude': {'type': 'string'},
+                    'car_list': {
+                        'type': 'string',
+                        'description': 'JSON array as string e.g. [1,2] or comma-separated 1,2 (parsed server-side)',
+                    },
+                    'category_list': {
+                        'type': 'string',
+                        'description': 'JSON array as string e.g. [5] or comma-separated (parsed server-side)',
+                    },
+                    'parts_purchase_required': {'type': 'boolean', 'default': False},
+                    'images': {'type': 'array', 'items': {'type': 'string', 'format': 'binary'}},
+                },
+            },
         },
         responses={
             201: {
@@ -337,9 +682,9 @@ Do NOT use for **planned work** (use `/api/order/scheduled/`).
                 'content': {
                     'application/json': {
                         'examples': {
-                            'missing_master': {
-                                'summary': 'Master not specified',
-                                'value': {'master_id': ['Master is required for SOS order']}
+                            'sos_category_by_order': {
+                                'summary': 'SOS without master: need by_order category',
+                                'value': {'category_list': ['Для авто-SOS выберите хотя бы одну услугу (категория by_order).']}
                             },
                             'missing_location': {
                                 'summary': 'Location not specified',
@@ -358,13 +703,14 @@ Do NOT use for **planned work** (use `/api/order/scheduled/`).
     )
     def post(self, request):
         """Create SOS order"""
-        data = request.data.copy()
+        data = normalize_order_create_request_data(request)
         data['order_type'] = OrderType.SOS
 
-        serializer = OrderCreateSerializer(data=data)
+        serializer = OrderCreateSerializer(data=data, context={'request': request})
         if serializer.is_valid():
             order = serializer.save(user=request.user)
-            order_serializer = OrderSerializer(order)
+            attach_order_images_from_request(order, request)
+            order_serializer = OrderSerializer(order, context={'request': request})
             return Response({
                 'message': 'Your emergency order has been created and sent to the master',
                 'order': order_serializer.data
@@ -500,7 +846,13 @@ Each slot has: **start**, **end** (HH:MM), **available** (true/false), **order_i
                 {'error': 'Master not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
-        
+
+        from apps.order.services.status_workflow import validate_master_schedule_day_date
+
+        ok, err_msg = validate_master_schedule_day_date(master, check_date)
+        if not ok:
+            return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
+
         from apps.master.models import MasterBusySlot, MasterScheduleDay
 
         day_row = MasterScheduleDay.objects.filter(master=master, date=check_date).first()
@@ -557,7 +909,7 @@ Each slot has: **start**, **end** (HH:MM), **available** (true/false), **order_i
         return Response({
             'date': date_str,
             'master_id': master.id,
-            'master_name': master.name or master.user.get_full_name(),
+            'master_name': master.user.get_full_name() or master.user.phone_number,
             'working_hours': working_hours_display,
             'schedule_source': schedule_source,
             'slots': slots,
@@ -602,12 +954,13 @@ class OrderListCreateView(APIView):
     )
     def get(self, request):
         """Get order list"""
-        queryset = self.get_queryset()
+        expire_stale_master_offers()
+        queryset = self.get_queryset().prefetch_related('images', 'category', 'car')
 
         # Apply filters
         queryset = self.apply_filters(queryset, request)
         
-        serializer = OrderSerializer(queryset, many=True)
+        serializer = OrderSerializer(queryset, many=True, context={'request': request})
         return Response(serializer.data)
 
     def apply_filters(self, queryset, request):
@@ -675,6 +1028,7 @@ class OrderDetailView(APIView):
     )
     def get(self, request, id):
         """Get order details"""
+        expire_stale_master_offers()
         order = self.get_object(id)
         if not order:
             return Response(
@@ -682,7 +1036,7 @@ class OrderDetailView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        serializer = OrderSerializer(order)
+        serializer = OrderSerializer(order, context={'request': request})
         return Response(serializer.data)
 
     @extend_schema(
@@ -842,9 +1196,10 @@ class OrdersByUserView(APIView):
 
 ### 6. Тип заказа (order_type)
 - Фильтр по типу заказа
-- Значения: `scheduled` (запланированный) или `sos` (экстренный)
-- Пример: `order_type=scheduled` - показывает только запланированные заказы
-- Пример: `order_type=sos` - показывает только SOS заказы
+- Значения: `standard` (обычный заказ с мастером) или `sos` (экстренный)
+- Устаревшее значение `scheduled` воспринимается как `standard`
+- Пример: `order_type=standard` — только стандартные заказы
+- Пример: `order_type=sos` — только SOS заказы
 
 ### 7. Имя мастера (name)
 - Поиск по имени мастера
@@ -876,9 +1231,9 @@ GET /api/order/by-user/?category=1
 GET /api/order/by-user/?status=pending&priority=high&category=1&location=Ташкент
 ```
 
-**Только запланированные заказы (Order by Date):**
+**Только стандартные заказы:**
 ```
-GET /api/order/by-user/?order_type=scheduled
+GET /api/order/by-user/?order_type=standard
 ```
 
 **Только SOS заказы (экстренные):**
@@ -886,9 +1241,9 @@ GET /api/order/by-user/?order_type=scheduled
 GET /api/order/by-user/?order_type=sos
 ```
 
-**Запланированные заказы со статусом pending:**
+**Стандартные заказы со статусом pending:**
 ```
-GET /api/order/by-user/?order_type=scheduled&status=pending
+GET /api/order/by-user/?order_type=standard&status=pending
 ```
         """,
         tags=[STAG_ORDER_DRIVER_MY],
@@ -898,7 +1253,7 @@ GET /api/order/by-user/?order_type=scheduled&status=pending
             OpenApiParameter(name='category', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Фильтр по типу проблемы. ID категории by_order. Smart filter по parent-дереву.', required=False),
             OpenApiParameter(name='location', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по району (поиск по адресу заказа)', required=False),
             OpenApiParameter(name='car_category', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Фильтр по типу ТС (ID категории машины типа by_car)', required=False),
-            OpenApiParameter(name='order_type', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по типу заказа (scheduled - запланированные, sos - экстренные)', required=False, enum=['scheduled', 'sos']),
+            OpenApiParameter(name='order_type', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр: standard или sos (устар. scheduled = standard)', required=False, enum=['standard', 'sos', 'scheduled']),
             OpenApiParameter(name='name', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Поиск по имени мастера', required=False),
             OpenApiParameter(name='page', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Номер страницы для пагинации', required=False),
             OpenApiParameter(name='page_size', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Количество заказов на странице (макс. 100)', required=False),
@@ -910,7 +1265,8 @@ GET /api/order/by-user/?order_type=scheduled&status=pending
     )
     def get(self, request):
         """Получить заказы текущего пользователя"""
-        orders = Order.objects.filter(user=request.user)
+        expire_stale_master_offers()
+        orders = Order.objects.filter(user=request.user).prefetch_related('images', 'category', 'car')
         
         # Фильтр по статусу
         status_filter = request.query_params.get('status')
@@ -922,10 +1278,10 @@ GET /api/order/by-user/?order_type=scheduled&status=pending
         if priority_filter:
             orders = orders.filter(priority=priority_filter)
         
-        # Фильтр по типу заказа (scheduled или sos)
-        order_type_filter = request.query_params.get('order_type')
+        # Фильтр по типу заказа (standard / sos; legacy scheduled → standard)
+        order_type_filter = _normalize_order_type_query_param(request.query_params.get('order_type'))
         if order_type_filter:
-            if order_type_filter in ['scheduled', 'sos']:
+            if order_type_filter in (OrderType.STANDARD, OrderType.SOS):
                 orders = orders.filter(order_type=order_type_filter)
         
         # Smart фильтр по категории проблемы (Тип проблемы)
@@ -1047,9 +1403,9 @@ class OrdersByMasterView(APIView):
 
 ### 10. Тип заказа (order_type)
 - Фильтр по типу заказа
-- Значения: `scheduled` (запланированный) или `sos` (экстренный)
-- Пример: `order_type=scheduled` - показывает только запланированные заказы
-- Пример: `order_type=sos` - показывает только SOS заказы
+- Значения: `standard` или `sos` (устар. `scheduled` = standard)
+- Пример: `order_type=standard` — только стандартные заказы
+- Пример: `order_type=sos` — только SOS заказы
 
 ## Pagination
 - По умолчанию 10 заказов на страницу
@@ -1092,9 +1448,9 @@ GET /api/order/by-master/?category=1
 GET /api/order/by-master/?status=pending&priority=high&category=1&location=Ташкент
 ```
 
-**Только запланированные заказы (Order by Date):**
+**Только стандартные заказы:**
 ```
-GET /api/order/by-master/?order_type=scheduled
+GET /api/order/by-master/?order_type=standard
 ```
 
 **Только SOS заказы (экстренные):**
@@ -1102,9 +1458,9 @@ GET /api/order/by-master/?order_type=scheduled
 GET /api/order/by-master/?order_type=sos
 ```
 
-**Запланированные заказы со статусом pending:**
+**Стандартные заказы со статусом pending:**
 ```
-GET /api/order/by-master/?order_type=scheduled&status=pending
+GET /api/order/by-master/?order_type=standard&status=pending
 ```
         """,
         tags=[STAG_ORDER_MASTER_MY],
@@ -1126,7 +1482,7 @@ GET /api/order/by-master/?order_type=scheduled&status=pending
             OpenApiParameter(name='is_new', type=OpenApiTypes.BOOL, location=OpenApiParameter.QUERY, description='Новые заказы (master не назначен)', required=False),
             OpenApiParameter(name='is_work', type=OpenApiTypes.BOOL, location=OpenApiParameter.QUERY, description='Заказы в работе (status=IN_PROGRESS)', required=False),
             OpenApiParameter(name='is_archive', type=OpenApiTypes.BOOL, location=OpenApiParameter.QUERY, description='Завершенные заказы (status=COMPLETED)', required=False),
-            OpenApiParameter(name='order_type', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр по типу заказа (scheduled - запланированные, sos - экстренные)', required=False, enum=['scheduled', 'sos']),
+            OpenApiParameter(name='order_type', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, description='Фильтр: standard или sos (устар. scheduled = standard)', required=False, enum=['standard', 'sos', 'scheduled']),
             OpenApiParameter(name='page', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Номер страницы для пагинации', required=False),
             OpenApiParameter(name='page_size', type=OpenApiTypes.INT, location=OpenApiParameter.QUERY, description='Количество заказов на странице (макс. 100)', required=False),
         ],
@@ -1138,6 +1494,7 @@ GET /api/order/by-master/?order_type=scheduled&status=pending
     )
     def get(self, request):
         """Получить заказы текущего мастера в области"""
+        expire_stale_master_offers()
         # Проверяем, что пользователь является мастером
         try:
             master = request.user.master_profiles.first()
@@ -1152,18 +1509,23 @@ GET /api/order/by-master/?order_type=scheduled&status=pending
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        # Получаем заказы для текущего мастера через foreign key
-        orders = Order.objects.filter(master=master)
+        # Заказы: FK master + pending SOS где сейчас этот мастер в очереди (FK может быть null)
+        extra_ids = order_ids_sos_currently_offered_to_master(master.id)
+        if extra_ids:
+            orders = Order.objects.filter(Q(master=master) | Q(pk__in=extra_ids))
+        else:
+            orders = Order.objects.filter(master=master)
+        orders = orders.prefetch_related('images', 'category', 'car')
         
         # Фильтр is_new — заказы без назначенного master (FK)
         is_new = request.query_params.get('is_new', '').lower() == 'true'
         if is_new:
             orders = Order.objects.filter(master__isnull=True)
         
-        # Фильтр is_work - заказы в работе (IN_PROGRESS)
+        # Фильтр is_work — активные после принятия мастером
         is_work = request.query_params.get('is_work', '').lower() == 'true'
         if is_work:
-            orders = Order.objects.filter(master=master, status=OrderStatus.IN_PROGRESS)
+            orders = Order.objects.filter(master=master, status__in=MASTER_ACTIVE_WORK_STATUSES)
         
         # Фильтр is_archive - завершенные заказы (COMPLETED)
         is_archive = request.query_params.get('is_archive', '').lower() == 'true'
@@ -1180,10 +1542,10 @@ GET /api/order/by-master/?order_type=scheduled&status=pending
         if priority_filter:
             orders = orders.filter(priority=priority_filter)
         
-        # Фильтр по типу заказа (scheduled или sos)
-        order_type_filter = request.query_params.get('order_type')
+        # Фильтр по типу заказа (standard / sos; legacy scheduled → standard)
+        order_type_filter = _normalize_order_type_query_param(request.query_params.get('order_type'))
         if order_type_filter:
-            if order_type_filter in ['scheduled', 'sos']:
+            if order_type_filter in (OrderType.STANDARD, OrderType.SOS):
                 orders = orders.filter(order_type=order_type_filter)
         
         # Smart фильтр по категории проблемы (Тип проблемы)
@@ -1245,15 +1607,25 @@ GET /api/order/by-master/?order_type=scheduled&status=pending
 
 class UpdateOrderStatusView(APIView):
     """
-    API для обновления статуса заказа
+    Строгий workflow: мастер — accepted → on_the_way → arrived → in_progress
+    (для проверки дистанции: lat/lon в теле опционально — иначе из профиля Master / user).
+    Клиент / мастер — отмена заказа: предпочтительно **POST /api/order/{id}/cancel/** (там же оценка штрафа). Здесь `status=cancelled` оставлен для совместимости. Завершение — POST /complete/.
     """
+
     permission_classes = [IsAuthenticated, IsOrderOwnerOrMaster]
-    
+
     @extend_schema(
-        summary="Обновить статус заказа",
-        description="Обновляет статус заказа на новый. "
-                  "Статусы: pending - ожидает, in_progress - в работе, completed - завершен, cancelled - отменен, rejected - отклонен. "
-                  "Доступно только владельцу заказа или мастеру.",
+        summary="Обновить статус заказа (workflow)",
+        description=(
+            'Мастер: on_the_way (опционально eta_minutes или estimated_arrival_at — ETA для клиента), '
+            'arrived, in_progress (для in_progress — опционально latitude/longitude; '
+            'если не переданы, берутся из профиля Master, иначе из аккаунта пользователя; '
+            'расстояние до точки заказа ≤ ORDER_START_JOB_MAX_DISTANCE_M). '
+            'Отмена мастером: status=cancelled, cancel_reason. '
+            'Клиент: status=cancelled. '
+            'После N ч «в пути» (Celery / таймер) — client_penalty_free_cancel_unlocked и отмена без штрафа. '
+            'В in_progress отмена клиентом запрещена (см. cancellation в Order).'
+        ),
         tags=[STAG_ORDER_STATUS],
         parameters=[
             {'name': 'order_id', 'in': 'path', 'description': 'Order ID', 'type': 'integer', 'required': True},
@@ -1265,50 +1637,312 @@ class UpdateOrderStatusView(APIView):
                 'properties': {
                     'status': {
                         'type': 'string',
-                        'enum': ['pending', 'in_progress', 'completed', 'cancelled', 'rejected'],
-                        'description': 'Статус заказа: pending (Ожидает), in_progress (В работе), completed (Завершен), cancelled (Отменен), rejected (Отклонен)',
-                        'example': 'in_progress'
-                    }
-                }
+                        'enum': [c[0] for c in OrderStatus.choices],
+                    },
+                    'latitude': {
+                        'type': 'number',
+                        'description': 'Опционально для in_progress; иначе — координаты из профиля мастера / user',
+                    },
+                    'longitude': {
+                        'type': 'number',
+                        'description': 'Опционально для in_progress; иначе — координаты из профиля мастера / user',
+                    },
+                    'cancel_reason': {
+                        'type': 'string',
+                        'description': 'При отмене мастером: client_request, vehicle_unavailable, duplicate, emergency, other',
+                    },
+                    'eta_minutes': {
+                        'type': 'integer',
+                        'description': 'Опционально при on_the_way: минут до прибытия (1…ORDER_ETA_MAX_MINUTES).',
+                    },
+                    'estimated_arrival_at': {
+                        'type': 'string',
+                        'format': 'date-time',
+                        'description': 'Опционально при on_the_way: ожидаемое время прибытия (ISO 8601). Имеет приоритет над eta_minutes.',
+                    },
+                },
             }
         },
         responses={
             200: OrderSerializer,
-            400: {'type': 'object', 'properties': {'detail': {'type': 'string'}}},
+            400: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
             404: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
             401: {'type': 'object', 'properties': {'detail': {'type': 'string'}}},
             403: {'type': 'object', 'properties': {'detail': {'type': 'string'}}},
-        }
+        },
     )
     def post(self, request, order_id):
-        """Обновить статус заказа"""
+        expire_stale_master_offers()
         try:
             order = Order.objects.get(id=order_id)
-            new_status = request.data.get('status')
-            
-            if not new_status:
-                return Response(
-                    {'error': 'Статус обязателен'}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            if new_status not in [choice[0] for choice in OrderStatus.choices]:
-                return Response(
-                    {'error': 'Недопустимый статус'}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            order.status = new_status
-            order.save()
-            
-            serializer = OrderSerializer(order)
-            return Response(serializer.data)
-        
+            self.check_object_permissions(request, order)
         except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        new_status = request.data.get('status')
+        if not new_status:
+            return Response({'error': 'Статус обязателен'}, status=status.HTTP_400_BAD_REQUEST)
+        if new_status not in [c[0] for c in OrderStatus.choices]:
+            return Response({'error': 'Недопустимый статус'}, status=status.HTTP_400_BAD_REQUEST)
+
+        master = request.user.master_profiles.first()
+        is_assigned_master = bool(master and order.master_id == master.id)
+        is_owner = order.user_id == request.user.id
+        now = timezone.now()
+
+        if new_status in (OrderStatus.COMPLETED, OrderStatus.REJECTED, OrderStatus.PENDING):
             return Response(
-                {'error': 'Order not found'}, 
-                status=status.HTTP_404_NOT_FOUND
+                {'error': 'Используйте /accept/, /decline/ или /complete/ для этих статусов.'},
+                status=status.HTTP_400_BAD_REQUEST,
             )
+
+        extra_response = {}
+
+        if new_status == OrderStatus.CANCELLED:
+            if is_owner:
+                snap = client_cancellation_snapshot(order)
+                if not snap['client_can_cancel']:
+                    return Response(
+                        {'error': snap['summary'], 'cancellation': snap},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                extra_response['cancellation_penalty_applies'] = snap['penalty_applies']
+                extra_response['cancellation_penalty_percent'] = snap['penalty_percent']
+                extra_response['order_total'] = order_payable_total_str(order)
+                extra_response['penalty_amount_estimate'] = estimate_cancellation_penalty_amount(
+                    order, snap['penalty_percent'] if snap['penalty_applies'] else 0
+                )
+                order.status = OrderStatus.CANCELLED
+                order.client_penalty_free_cancel_unlocked = False
+                order.estimated_arrival_at = None
+                order.eta_minutes = None
+                order.save()
+                data = OrderSerializer(order, context={'request': request}).data
+                data.update(extra_response)
+                return Response(data)
+
+            if is_assigned_master:
+                reason = request.data.get('cancel_reason')
+                ok, err_msg = validate_master_cancel(order, master, reason)
+                if not ok:
+                    return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
+                MasterOrderCancellation.objects.create(master=master, order=order, reason=reason)
+                order.status = OrderStatus.CANCELLED
+                order.client_penalty_free_cancel_unlocked = False
+                order.estimated_arrival_at = None
+                order.eta_minutes = None
+                order.save()
+                return Response(OrderSerializer(order, context={'request': request}).data)
+
+            return Response({'error': 'Нет прав на отмену'}, status=status.HTTP_403_FORBIDDEN)
+
+        if not is_assigned_master:
+            return Response(
+                {'error': 'Менять рабочий статус может только назначенный мастер.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if order.status == OrderStatus.ACCEPTED and new_status == OrderStatus.ON_THE_WAY:
+            est, em, eta_err = resolve_on_the_way_eta(request.data, now)
+            if eta_err:
+                eta_messages = {
+                    'invalid_estimated_arrival_at': 'Некорректный estimated_arrival_at (ожидается ISO datetime).',
+                    'estimated_arrival_in_past': 'estimated_arrival_at не может быть раньше текущего момента.',
+                    'estimated_arrival_too_far': 'Слишком большой интервал до прибытия (см. ORDER_ETA_MAX_MINUTES).',
+                    'invalid_eta_minutes': 'eta_minutes: укажите целое число от 1 до ORDER_ETA_MAX_MINUTES.',
+                }
+                return Response(
+                    {'error': eta_messages.get(eta_err, eta_err)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if est is None and em is None:
+                est, em = auto_eta_from_order_master(order, master, now)
+            order.status = OrderStatus.ON_THE_WAY
+            order.on_the_way_at = now
+            order.client_penalty_free_cancel_unlocked = False
+            order.estimated_arrival_at = est
+            order.eta_minutes = em
+            order.save(
+                update_fields=[
+                    'status',
+                    'on_the_way_at',
+                    'client_penalty_free_cancel_unlocked',
+                    'estimated_arrival_at',
+                    'eta_minutes',
+                    'updated_at',
+                ]
+            )
+            schedule_client_penalty_free_unlock(order.pk, order.on_the_way_at)
+            return Response(OrderSerializer(order, context={'request': request}).data)
+
+        if order.status == OrderStatus.ON_THE_WAY and new_status == OrderStatus.ARRIVED:
+            order.status = OrderStatus.ARRIVED
+            order.arrived_at = now
+            order.client_penalty_free_cancel_unlocked = False
+            order.estimated_arrival_at = None
+            order.eta_minutes = None
+            order.save(
+                update_fields=[
+                    'status',
+                    'arrived_at',
+                    'client_penalty_free_cancel_unlocked',
+                    'estimated_arrival_at',
+                    'eta_minutes',
+                    'updated_at',
+                ]
+            )
+            return Response(OrderSerializer(order, context={'request': request}).data)
+
+        if order.status == OrderStatus.ARRIVED and new_status == OrderStatus.IN_PROGRESS:
+            if order.latitude is None or order.longitude is None:
+                return Response(
+                    {'error': 'У заказа нет координат клиента — нельзя проверить дистанцию.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            mlat, mlon, coord_err = resolve_master_coordinates_for_start_job(master, request.data)
+            if coord_err == 'partial_coords':
+                return Response(
+                    {
+                        'error': 'Укажите оба поля latitude и longitude или не передавайте их '
+                        '(тогда берутся координаты из профиля мастера / пользователя).',
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if coord_err == 'invalid_coords':
+                return Response(
+                    {'error': 'Некорректные latitude или longitude в запросе.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if coord_err == 'no_master_coords' or mlat is None or mlon is None:
+                return Response(
+                    {
+                        'error': 'Нет координат мастера: задайте latitude/longitude в запросе '
+                        'или заполните широту/долготу в профиле мастера или аккаунта.',
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            dist_m = haversine_distance_m(
+                mlat,
+                mlon,
+                float(order.latitude),
+                float(order.longitude),
+            )
+            max_m = int(getattr(settings, 'ORDER_START_JOB_MAX_DISTANCE_M', 300))
+            if dist_m > max_m:
+                return Response(
+                    {
+                        'error': f'Слишком далеко от клиента ({round(dist_m, 1)} м). '
+                        f'Максимум {max_m} м после статуса «Прибыл».',
+                        'distance_meters': round(dist_m, 1),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            order.status = OrderStatus.IN_PROGRESS
+            order.work_started_at = now
+            order.estimated_arrival_at = None
+            order.eta_minutes = None
+            order.save(
+                update_fields=[
+                    'status',
+                    'work_started_at',
+                    'estimated_arrival_at',
+                    'eta_minutes',
+                    'updated_at',
+                ]
+            )
+            return Response(OrderSerializer(order, context={'request': request}).data)
+
+        return Response(
+            {'error': f'Недопустимый переход {order.status} → {new_status}.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+class CancelOrderView(APIView):
+    """
+    Явная отмена заказа (клиент или назначенный мастер).
+    Для клиента: правила и оценка штрафа — ``cancellation`` + ``penalty_amount_estimate`` (от ``pricing.total``).
+    """
+
+    permission_classes = [IsAuthenticated, IsOrderOwnerOrMaster]
+
+    @extend_schema(
+        summary='Отменить заказ',
+        description="""
+**Владелец (driver):** тело можно пустым. Проверяются правила из ``cancellation`` на заказе; при ``in_progress`` — 400.
+
+**Назначенный мастер:** передайте ``cancel_reason``: client_request, vehicle_unavailable, duplicate, emergency, other.
+Причина ``too_far`` (слишком далеко) **запрещена** — мастер сам задаёт зону и радиус.
+
+Первые **3** отмены принятого заказа в календарном месяце не ограничивают планирование расписания.
+С **4-й** отмены в месяц: расписание и слоты только до **10** календарных дней вперёд; с **5-й** — до **5** дней; с **6-й** — только **текущий** день (см. ``POST /api/master/schedule/``, слоты ``GET /api/order/available-slots/``).
+
+Ответ включает заказ (``OrderSerializer``) и поля оценки штрафа для клиента (для мастера штраф клиента не считается).
+        """,
+        tags=[STAG_ORDER_STATUS],
+        parameters=[
+            {'name': 'order_id', 'in': 'path', 'description': 'Order ID', 'type': 'integer', 'required': True},
+        ],
+        request=CancelOrderRequestSerializer,
+        responses={
+            200: OrderSerializer,
+            400: {'type': 'object', 'properties': {'error': {'type': 'string'}, 'cancellation': {'type': 'object'}}},
+            403: {'type': 'object', 'properties': {'detail': {'type': 'string'}, 'error': {'type': 'string'}}},
+            404: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
+        },
+    )
+    def post(self, request, order_id):
+        expire_stale_master_offers()
+        try:
+            order = Order.objects.get(id=order_id)
+            self.check_object_permissions(request, order)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        master = request.user.master_profiles.first()
+        is_assigned_master = bool(master and order.master_id == master.id)
+        is_owner = order.user_id == request.user.id
+
+        if is_owner:
+            snap = client_cancellation_snapshot(order)
+            if not snap['client_can_cancel']:
+                return Response(
+                    {'error': snap['summary'], 'cancellation': snap},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            order.status = OrderStatus.CANCELLED
+            order.client_penalty_free_cancel_unlocked = False
+            order.estimated_arrival_at = None
+            order.eta_minutes = None
+            order.save()
+            data = OrderSerializer(order, context={'request': request}).data
+            data['cancellation_penalty_applies'] = snap['penalty_applies']
+            data['cancellation_penalty_percent'] = snap['penalty_percent']
+            data['order_total'] = order_payable_total_str(order)
+            data['penalty_amount_estimate'] = estimate_cancellation_penalty_amount(
+                order, snap['penalty_percent'] if snap['penalty_applies'] else 0
+            )
+            return Response(data)
+
+        if is_assigned_master:
+            reason = request.data.get('cancel_reason')
+            ok, err_msg = validate_master_cancel(order, master, reason)
+            if not ok:
+                return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
+            MasterOrderCancellation.objects.create(master=master, order=order, reason=reason)
+            order.status = OrderStatus.CANCELLED
+            order.client_penalty_free_cancel_unlocked = False
+            order.estimated_arrival_at = None
+            order.eta_minutes = None
+            order.save()
+            return Response(
+                {
+                    'message': 'Order cancelled by master.',
+                    'order': OrderSerializer(order, context={'request': request}).data,
+                }
+            )
+
+        return Response({'error': 'Нет прав на отмену'}, status=status.HTTP_403_FORBIDDEN)
 
 
 class AcceptOrderView(APIView):
@@ -1320,22 +1954,7 @@ class AcceptOrderView(APIView):
     @extend_schema(
         summary="Принять заказ в работу",
         description="""
-Принимает заказ в работу с проверкой минимального баланса **мастера** (1000 ₽) и списанием 200 ₽ за каждый заказ.
-
-## Проверки баланса мастера:
-1. **Минимальный баланс**: У мастера на балансе должно быть минимум 1000 ₽
-2. **Списание за заказ**: С баланса мастера спишется 200 ₽ при принятии заказа
-
-## Response при ошибке баланса:
-```json
-{
-  "error": "Описание ошибки",
-  "current_balance": 500.00,
-  "required_balance": 1000
-}
-```
-
-**Важно:** Проверяется баланс **мастера**, который принимает заказ, а не клиента!
+Принимает заказ в работу (статус **accepted**). Списание с баланса мастера при accept **не выполняется**.
         """,
         tags=[STAG_ORDER_MASTER_AVAILABLE],
         parameters=[
@@ -1347,16 +1966,12 @@ class AcceptOrderView(APIView):
                 'properties': {
                     'message': {'type': 'string'},
                     'order': {'type': 'object'},
-                    'balance_after': {'type': 'number'}
                 }
             },
             400: {
                 'type': 'object',
                 'properties': {
                     'error': {'type': 'string'},
-                    'current_balance': {'type': 'number'},
-                    'required_balance': {'type': 'number'},
-                    'required_amount': {'type': 'number'}
                 }
             },
             404: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
@@ -1367,68 +1982,171 @@ class AcceptOrderView(APIView):
     def post(self, request, order_id):
         """Принять заказ в работу"""
         try:
-            order = Order.objects.get(id=order_id)
-            
-            # Проверяем, что заказ не назначен другому мастеру
-            master = request.user.master_profiles.first()
-            if order.master and order.master.id != master.id:
-                return Response(
-                    {'error': 'Заказ уже назначен другому мастеру'}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Проверяем, что заказ не истек
-            if order.is_expired():
-                order.mark_as_cancelled_if_expired()
-                return Response(
-                    {'error': 'Заказ истек и был отменен'}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Проверяем баланс мастера (кто принимает заказ)
-            user_balance = UserBalance.get_or_create_balance(request.user)
-            if not user_balance.has_minimum_balance(1000):
-                return Response({
-                    'error': 'На балансе должно быть минимум 1000 ₽, чтобы брать заказы в работу',
-                    'current_balance': float(user_balance.amount),
-                    'required_balance': 1000
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Проверяем, может ли пользователь позволить себе заказ (200 ₽)
-            if not user_balance.can_afford_order(200):
-                return Response({
-                    'error': 'Недостаточно средств для принятия заказа. Требуется 200 ₽',
-                    'current_balance': float(user_balance.amount),
-                    'required_amount': 200
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Списываем 200 ₽ с баланса
-            if user_balance.deduct_amount(200):
-                # Назначаем заказ текущему мастеру и меняем статус
+            oid = int(order_id)
+        except (TypeError, ValueError):
+            return Response({'error': 'Некорректный order_id'}, status=status.HTTP_400_BAD_REQUEST)
+        expire_stale_master_offers(skip_order_ids={oid})
+
+        master = request.user.master_profiles.first()
+        if not master:
+            return Response(
+                {'error': 'Только мастер может принять заказ'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        try:
+            with transaction.atomic():
+                order = Order.objects.select_for_update().get(id=oid)
+
+                if order.status != OrderStatus.PENDING:
+                    return Response(
+                        {
+                            'error': 'Принять можно только заказ в статусе pending (ожидает ответа мастера)',
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if order.order_type == OrderType.SOS and order.sos_offer_queue:
+                    if not master_eligible_for_pending_sos_offer(order, master.id):
+                        return Response(
+                            {
+                                'error': 'Вы не в списке SOS, уже отклонили, вне зоны приёма или заказ недоступен',
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                elif not order.master_id or order.master_id != master.id:
+                    return Response(
+                        {
+                            'error': 'Этот заказ назначен другому мастеру или мастер ещё не назначен',
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if order.master_response_deadline and timezone.now() > order.master_response_deadline:
+                    if order.order_type == OrderType.SOS:
+                        msg = (
+                            'Окно ответа на SOS истекло. Заказ отменён или уже принят другим мастером.'
+                        )
+                    else:
+                        msg = 'Время на ответ истекло. Заказ больше недоступен для принятия.'
+                    return Response({'error': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+                if order.is_expired():
+                    order.mark_as_cancelled_if_expired()
+                    return Response(
+                        {'error': 'Заказ истек и был отменен'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
                 order.master = master
-                order.status = OrderStatus.IN_PROGRESS
-                order.save()
-                
-                # Обновляем баланс после списания
-                user_balance.refresh_from_db()
-                
-                serializer = OrderSerializer(order)
-                return Response({
-                    'message': 'Заказ взят в работу. 200 ₽ были списаны с баланса.',
+                order.status = OrderStatus.ACCEPTED
+                order.accepted_at = timezone.now()
+                order.master_response_deadline = None
+                order.sos_offer_queue = []
+                order.sos_offer_index = 0
+                order.sos_declined_master_ids = []
+                order.save(
+                    update_fields=[
+                        'master',
+                        'status',
+                        'accepted_at',
+                        'master_response_deadline',
+                        'sos_offer_queue',
+                        'sos_offer_index',
+                        'sos_declined_master_ids',
+                        'updated_at',
+                    ]
+                )
+
+            order.refresh_from_db()
+            serializer = OrderSerializer(order, context={'request': request})
+            return Response(
+                {
+                    'message': 'Заказ принят. Далее: «В пути» → «Прибыл» → «Начать работу».',
                     'order': serializer.data,
-                    'balance_after': float(user_balance.amount)
-                })
-            else:
-                return Response({
-                    'error': 'Ошибка при списании средств с баланса',
-                    'current_balance': float(user_balance.amount)
-                }, status=status.HTTP_400_BAD_REQUEST)
-        
+                }
+            )
+
         except Order.DoesNotExist:
             return Response(
                 {'error': 'Order not found'}, 
                 status=status.HTTP_404_NOT_FOUND
             )
+
+
+class DeclineOrderView(APIView):
+    """
+    Мастер отклоняет назначенную заявку до принятия (не нарушение).
+    """
+
+    permission_classes = [IsAuthenticated, IsMaster]
+
+    @extend_schema(
+        summary='Отклонить заявку (до Accept)',
+        description="""
+Доступно только назначенному мастеру, пока заказ **`pending`**.
+После отклонения: `rejected`, мастер снимается; клиент может создать новый запрос / выбрать другого мастера.
+        """,
+        tags=[STAG_ORDER_MASTER_AVAILABLE],
+        responses={
+            200: OrderSerializer,
+            400: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
+            403: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
+            404: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
+        },
+    )
+    def post(self, request, order_id):
+        try:
+            oid = int(order_id)
+        except (TypeError, ValueError):
+            return Response({'error': 'Некорректный order_id'}, status=status.HTTP_400_BAD_REQUEST)
+        expire_stale_master_offers(skip_order_ids={oid})
+        try:
+            order = Order.objects.get(id=oid)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        master = request.user.master_profiles.first()
+        if not master:
+            return Response({'error': 'Только мастер'}, status=status.HTTP_403_FORBIDDEN)
+
+        if order.status != OrderStatus.PENDING:
+            return Response(
+                {'error': 'Отклонить можно только заказ в статусе pending'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if order.order_type == OrderType.SOS and order.sos_offer_queue:
+            if not master_in_sos_broadcast_queue(order, master.id):
+                return Response(
+                    {'error': 'Этот SOS не в вашей очереди предложений'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif order.master_id != master.id:
+            return Response(
+                {'error': 'Заказ назначен другому мастеру'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if order.order_type == OrderType.SOS and order.sos_offer_queue:
+            if not sos_broadcast_decline(order, master.id):
+                return Response(
+                    {'error': 'Не удалось зафиксировать отказ по SOS'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            order.refresh_from_db()
+            return Response(
+                OrderSerializer(order, context={'request': request}).data,
+                status=status.HTTP_200_OK,
+            )
+
+        order.status = OrderStatus.REJECTED
+        order.master = None
+        order.master_response_deadline = None
+        order.save(update_fields=['status', 'master', 'master_response_deadline', 'updated_at'])
+        return Response(
+            OrderSerializer(order, context={'request': request}).data,
+            status=status.HTTP_200_OK,
+        )
 
 
 class CompleteOrderView(APIView):
@@ -1504,10 +2222,35 @@ POST /api/order/5/complete/
     )
     def post(self, request, order_id):
         """Завершить заказ (установить статус COMPLETED)"""
+        expire_stale_master_offers()
         try:
             order = Order.objects.get(id=order_id)
+            master = request.user.master_profiles.first()
+            if order.user_id == request.user.id:
+                if order.status != OrderStatus.IN_PROGRESS:
+                    return Response(
+                        {'error': 'Завершить можно только заказ в статусе in_progress.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            elif master and order.master_id == master.id:
+                if order.status != OrderStatus.IN_PROGRESS:
+                    return Response(
+                        {
+                            'error': 'Завершить может мастер только после «Начать работу» (in_progress).',
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if not order.work_completion_images.exists():
+                    return Response(
+                        {
+                            'error': 'Загрузите минимум одно фото выполненной работы '
+                                     '(POST /api/order/{id}/work-completion-image/) перед завершением.',
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            else:
+                return Response({'error': 'Нет доступа'}, status=status.HTTP_403_FORBIDDEN)
             
-            # Устанавливаем статус COMPLETED
             order.status = OrderStatus.COMPLETED
             order.save()
             
@@ -1522,6 +2265,42 @@ POST /api/order/5/complete/
                 {'error': 'Order not found'}, 
                 status=status.HTTP_404_NOT_FOUND
             )
+
+
+class UploadOrderWorkCompletionImageView(APIView):
+    """Мастер загружает фото выполненной работы (нужно ≥1 перед POST /complete/)."""
+
+    permission_classes = [IsAuthenticated, IsMaster]
+    parser_classes = [MultiPartParser, FormParser]
+
+    @extend_schema(
+        summary='Загрузить фото выполненной работы',
+        tags=[STAG_ORDER_MASTER_COMPLETE],
+        request={'multipart/form-data': {'type': 'object', 'properties': {'image': {'type': 'string', 'format': 'binary'}}}},
+        responses={201: OrderSerializer, 400: {'type': 'object'}, 403: {'type': 'object'}},
+    )
+    def post(self, request, order_id):
+        expire_stale_master_offers()
+        master = request.user.master_profiles.first()
+        if not master:
+            return Response({'error': 'Только мастер'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            order = Order.objects.get(pk=order_id)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+        if order.master_id != master.id:
+            return Response({'error': 'Это не ваш заказ'}, status=status.HTTP_403_FORBIDDEN)
+        if order.status not in MASTER_ACTIVE_WORK_STATUSES:
+            return Response(
+                {'error': 'Фото можно добавлять после принятия заказа и до завершения.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        image = request.FILES.get('image')
+        if not image:
+            return Response({'error': 'Передайте файл image'}, status=status.HTTP_400_BAD_REQUEST)
+        OrderWorkCompletionImage.objects.create(order=order, image=image)
+        order.refresh_from_db()
+        return Response(OrderSerializer(order, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 
 class CreateReviewView(APIView):
@@ -1546,13 +2325,21 @@ class CreateReviewView(APIView):
 - `order_id`: ID завершенного заказа (обязательно)
 - `rating`: Рейтинг от 1 до 5 (обязательно)
 - `comment`: Текст отзыва (необязательно)
-- `tag`: Что понравилось в работе мастера - выберите ОДНО (обязательно):
+- `tag`: Один тег, лучше всего описывающий опыт (обязательно). Для низкого рейтинга используйте блок «проблемы».
+  **Положительное:**
   - `fast_work` - Оперативная работа
   - `no_overpay` - Без переплат
   - `deadline` - Соблюдение сроков
   - `always_available` - Всегда на связи
   - `individual_approach` - Индивидуальный подход
   - `polite` - Вежливость
+  **Проблемы / негатив:**
+  - `late_or_delayed` - Опоздания / задержки
+  - `poor_quality` - Низкое качество работы
+  - `overpriced` - Завышенная цена
+  - `unprofessional` - Непрофессиональное поведение
+  - `hard_to_reach` - Плохая связь / трудно дозвониться
+  - `other_issue` - Другое (уточните в `comment`)
 
 ## Пример запроса:
 ```json
@@ -1746,7 +2533,7 @@ class AvailableOrdersForMasterView(APIView):
 - **master_id** - ID мастера (координаты берутся из профиля мастера)
 
 ## Необязательные параметры
-- **radius** - Радиус поиска в километрах (по умолчанию 10 км, можно увеличить до 50+ км)
+- **radius** - Радиус поиска в **милях**, если у мастера нет `service_area_radius_miles` (по умолчанию 10 mi)
 
 ## Фильтры (все необязательные)
 
@@ -1771,12 +2558,10 @@ class AvailableOrdersForMasterView(APIView):
 - Пример: `priority=high`
 
 ## Логика работы
-1. Берутся координаты мастера из его профиля (Master.latitude, Master.longitude)
-2. Фильтруются заказы где master не назначен (FK пустой)
-3. Применяются дополнительные фильтры (category, location, car_category, priority)
-4. Вычисляется расстояние от мастера до каждого заказа (Haversine formula)
-5. Фильтруются заказы в пределах указанного радиуса
-6. Сортировка по расстоянию (ближайшие сначала)
+1. Базовая точка: координаты мастера на карте (`latitude` / `longitude`).
+2. Радиус: если задан **service_area_radius_miles** (15/45/100), используется он (перевод в км); иначе query-параметр **radius** (**мили**, по умолчанию 10).
+3. Заказы без назначенного master (FK пустой), с координатами.
+4. Доп. фильтры: category, location, car_category, priority; расстояние Haversine; сортировка по расстоянию.
 
 ## Pagination
 - По умолчанию 10 заказов на страницу
@@ -1816,14 +2601,14 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
                 name='master_id',
                 type=OpenApiTypes.INT,
                 location=OpenApiParameter.QUERY,
-                description='ID мастера (обязательно). Координаты берутся из профиля мастера.',
+                description='ID мастера (обязательно). Точка отсчёта: рабочая зона, иначе профиль.',
                 required=True
             ),
             OpenApiParameter(
                 name='radius',
                 type=OpenApiTypes.FLOAT,
                 location=OpenApiParameter.QUERY,
-                description='Радиус поиска в километрах. По умолчанию 10 км. Можно указать от 1 до 100 км.',
+                description='Радиус в милях, если у мастера нет service_area_radius_miles; иначе игнорируется.',
                 required=False
             ),
             OpenApiParameter(
@@ -1963,9 +2748,10 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
     )
     def get(self, request):
         """Получить доступные заказы для мастера"""
+        expire_stale_master_offers()
         # Получаем параметры
         master_id = request.query_params.get('master_id')
-        radius = request.query_params.get('radius', 10)  # По умолчанию 10 км
+        radius = request.query_params.get('radius', 10)  # мили, если нет service_area на мастере
         
         # Валидация обязательных параметров
         if not master_id:
@@ -1992,15 +2778,19 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Получаем координаты мастера
-        if not master.latitude or not master.longitude:
+        master_lat, master_long = master.get_work_location_for_distance()
+        if master_lat is None:
             return Response(
-                {'error': 'У мастера не указаны координаты'},
+                {
+                    'error': 'У мастера не заданы координаты на карте (latitude и longitude)'
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        master_lat = float(master.latitude)
-        master_long = float(master.longitude)
+
+        if master.service_area_radius_miles:
+            radius = master.max_order_distance_km()
+        else:
+            radius = float(radius) * MILES_TO_KM
         
         # Заказы без назначенного master (FK), с координатами
         orders = Order.objects.filter(
@@ -2281,7 +3071,7 @@ GET /api/order/services-list/?master_id=5
         
         # Получаем все MasterServiceItems для этого мастера
         from apps.master.models import MasterServiceItems, MasterService
-        from apps.master.serializers import MasterServiceItemsSerializer
+        from apps.master.api.serializers import MasterServiceItemsSerializer
         
         # Находим все MasterService для этого мастера
         master_services = MasterService.objects.filter(master=master)
@@ -2299,7 +3089,7 @@ GET /api/order/services-list/?master_id=5
 class AddMasterToOrderView(APIView):
     """
     Driver: assign primary master on order (`order.master` FK).
-    Body: order_id, master_id (Master profile id, same as /scheduled/).
+    Body: order_id, master_id (Master profile id, same as POST /standard/).
     """
 
     permission_classes = [IsAuthenticated]
@@ -2322,6 +3112,7 @@ class AddMasterToOrderView(APIView):
         },
     )
     def post(self, request):
+        expire_stale_master_offers()
         ser = AddMasterToOrderSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -2359,6 +3150,8 @@ class AddMasterToOrderView(APIView):
 
         order.master = master
         order.save(update_fields=['master', 'updated_at'])
+        if order.status == OrderStatus.PENDING:
+            activate_pending_master_offer(order, request=request)
         return Response(
             OrderSerializer(order, context={'request': request}).data,
             status=status.HTTP_200_OK,

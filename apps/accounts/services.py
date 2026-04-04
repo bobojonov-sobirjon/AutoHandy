@@ -6,7 +6,7 @@ import re
 import requests
 import random
 import logging
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from django.conf import settings
 from django.core.cache import cache
 from django.contrib.auth import get_user_model
@@ -29,6 +29,39 @@ def _phone_cache_id(identifier_type: str, identifier: str, phone_e164: Optional[
     if identifier_type == 'phone' and phone_e164:
         return phone_e164
     return identifier
+
+
+def _cross_app_role_violation(requested_role: str, user_group_names: List[str]) -> Optional[Dict[str, Any]]:
+    """
+    Block logging into the other app line: Master account cannot use Driver flow and vice versa.
+    If the user already has both Driver and Master, no block (either role may be used).
+    """
+    if requested_role not in ('Driver', 'Master'):
+        return None
+    names = set(user_group_names or [])
+    has_master = 'Master' in names
+    has_driver = 'Driver' in names
+    if has_master and has_driver:
+        return None
+    if has_master and requested_role == 'Driver':
+        return {
+            'success': False,
+            'error': (
+                'This phone number or email is already registered as a Master. '
+                'You cannot sign in to the Driver app with this account.'
+            ),
+            'status_code': status.HTTP_400_BAD_REQUEST,
+        }
+    if has_driver and requested_role == 'Master':
+        return {
+            'success': False,
+            'error': (
+                'This phone number or email is already registered as a Driver. '
+                'You cannot sign in to the Master app with this account.'
+            ),
+            'status_code': status.HTTP_400_BAD_REQUEST,
+        }
+    return None
 
 
 class SMSService:
@@ -228,7 +261,10 @@ class SMSService:
                     user = User.objects.prefetch_related('groups').get(phone_number=phone_number)
                     user_exists = True
                     if role:
-                        user_groups = user.groups.values_list('name', flat=True)
+                        user_groups = list(user.groups.values_list('name', flat=True))
+                        cross = _cross_app_role_violation(role, user_groups)
+                        if cross:
+                            return cross
                         if user_groups and role not in user_groups:
                             return {
                                 'success': False,
@@ -242,7 +278,10 @@ class SMSService:
                     user = User.objects.prefetch_related('groups').get(email=identifier)
                     user_exists = True
                     if role:
-                        user_groups = user.groups.values_list('name', flat=True)
+                        user_groups = list(user.groups.values_list('name', flat=True))
+                        cross = _cross_app_role_violation(role, user_groups)
+                        if cross:
+                            return cross
                         if user_groups and role not in user_groups:
                             return {'success': False, 'error': 'Invalid user role', 'status_code': status.HTTP_400_BAD_REQUEST}
                     phone_number = user.phone_number or identifier
@@ -439,7 +478,10 @@ class SMSService:
                     created = False
                     
                     if role:
-                        user_groups = user.groups.values_list('name', flat=True)
+                        user_groups = list(user.groups.values_list('name', flat=True))
+                        cross = _cross_app_role_violation(role, user_groups)
+                        if cross:
+                            return cross
                         if user_groups and role not in user_groups:
                             return {'success': False, 'error': 'Invalid user role', 'status_code': status.HTTP_400_BAD_REQUEST}
                         if not user_groups:

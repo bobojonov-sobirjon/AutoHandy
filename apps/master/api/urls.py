@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import (
+from apps.master.api.views import (
     MasterProfileView, MasterDetailsView, MasterListView,
     MasterFilterChoicesView, MastersByUserView,
     AddServiceItemsView, UpdateServiceItemView, DeleteServiceItemView,
@@ -7,6 +7,7 @@ from .views import (
     MasterScheduleListBulkView, MasterScheduleDayDetailView,
     MasterBusySlotListCreateView, MasterBusySlotDetailView,
     MasterServiceCardsView,
+    MasterServiceCategorySuggestionsView,
 )
 
 urlpatterns = [
@@ -14,6 +15,11 @@ urlpatterns = [
     path('masters/list/', MasterListView.as_view(), name='master-list'),
     # path('masters/by-user/', MastersByUserView.as_view(), name='masters-by-user'),
     # path('masters/filter-choices/', MasterFilterChoicesView.as_view(), name='master-filter-choices'),
+    path(
+        'masters/<int:master_id>/service-category-suggestions/',
+        MasterServiceCategorySuggestionsView.as_view(),
+        name='master-service-category-suggestions',
+    ),
     path('masters/<int:master_id>/', MasterDetailsView.as_view(), name='master-details'),
     path('service-items/', AddServiceItemsView.as_view(), name='add-service-items'),
     path('service-items/<int:item_id>/', UpdateServiceItemView.as_view(), name='update-service-item'),

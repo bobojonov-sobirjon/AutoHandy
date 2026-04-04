@@ -1,36 +1,94 @@
 from django.contrib import admin
-# from django.utils.html import format_html
-# from django.urls import reverse
-# from django.utils.safestring import mark_safe
-# from .models import Order, OrderStatus, OrderPriority, OrderType, ScheduledOrder, SOSOrder, OrderService, Review, UserRating
+from django.utils.html import format_html
+from django.urls import reverse
 
-"""
+from .models import (
+    MasterOrderCancellation,
+    Order,
+    OrderImage,
+    OrderService,
+    OrderStatus,
+    OrderType,
+    OrderWorkCompletionImage,
+    OrderPriority,
+    Rating,
+    Review,
+    StandardOrder,
+    SOSOrder,
+    UserRating,
+)
+
+
+class OrderImageInline(admin.TabularInline):
+    model = OrderImage
+    extra = 0
+    readonly_fields = ['created_at']
+
+
+class OrderWorkCompletionImageInline(admin.TabularInline):
+    model = OrderWorkCompletionImage
+    extra = 0
+    readonly_fields = ['created_at']
+
+
+class OrderServiceInline(admin.TabularInline):
+    model = OrderService
+    extra = 0
+    raw_id_fields = ['master_service_item']
+    readonly_fields = ['created_at']
+
+
 class BaseOrderAdmin(admin.ModelAdmin):
     list_per_page = 25
-    list_max_show_all = 100
-    readonly_fields = ['id', 'created_at', 'updated_at', 'user_link', 'master_link', 'order_type']
-    filter_horizontal = ['masters', 'car', 'category']
+    list_max_show_all = 200
+    save_on_top = True
+    filter_horizontal = ('car', 'category')
     search_fields = [
-        'id', 'text', 'location', 'user__first_name', 'user__last_name',
-        'user__email', 'master__user__first_name', 'master__user__last_name'
+        'id',
+        'text',
+        'location',
+        'user__first_name',
+        'user__last_name',
+        'user__email',
+        'user__phone_number',
+        'master__user__first_name',
+        'master__user__last_name',
+        'master__user__email',
     ]
+    readonly_fields = [
+        'id',
+        'created_at',
+        'updated_at',
+        'user_link',
+        'master_link',
+    ]
+    inlines = [OrderImageInline, OrderWorkCompletionImageInline, OrderServiceInline]
+
     def user_link(self, obj):
-        if obj.user:
-            url = reverse('admin:accounts_customuser_change', args=[obj.user.id])
-            return format_html('<a href="{}">{}</a>', url, obj.user.get_full_name() or obj.user.email)
-        return '-'
+        if not obj.user_id:
+            return '—'
+        url = reverse('admin:accounts_customuser_change', args=[obj.user_id])
+        label = obj.user.get_full_name() or obj.user.email or obj.user.phone_number or obj.user_id
+        return format_html('<a href="{}">{}</a>', url, label)
+
     user_link.short_description = 'User'
     user_link.admin_order_field = 'user__first_name'
+
     def master_link(self, obj):
-        if obj.master:
-            url = reverse('admin:master_master_change', args=[obj.master.id])
-            return format_html('<a href="{}">{}</a>', url, obj.master.full_name)
-        return '-'
+        if not obj.master_id:
+            return '—'
+        url = reverse('admin:master_master_change', args=[obj.master_id])
+        return format_html('<a href="{}">{}</a>', url, obj.master)
+
     master_link.short_description = 'Master'
     master_link.admin_order_field = 'master__user__first_name'
+
     def status_badge(self, obj):
         colors = {
             OrderStatus.PENDING: '#ffc107',
+            OrderStatus.ACCEPTED: '#0d6efd',
+            OrderStatus.ON_THE_WAY: '#6610f2',
+            OrderStatus.ARRIVED: '#6f42c1',
             OrderStatus.IN_PROGRESS: '#17a2b8',
             OrderStatus.COMPLETED: '#28a745',
             OrderStatus.CANCELLED: '#6c757d',
@@ -38,12 +96,14 @@ class BaseOrderAdmin(admin.ModelAdmin):
         }
         color = colors.get(obj.status, '#6c757d')
         return format_html(
-            '<span style="background-color: {}; color: white; padding: 3px 8px; '
-            'border-radius: 3px; font-size: 11px;">{}</span>',
-            color, obj.get_status_display()
+            '<span style="background-color:{};color:#fff;padding:3px 8px;border-radius:3px;font-size:11px;">{}</span>',
+            color,
+            obj.get_status_display(),
         )
+
     status_badge.short_description = 'Status'
     status_badge.admin_order_field = 'status'
+
     def priority_badge(self, obj):
         colors = {
             OrderPriority.LOW: '#28a745',
@@ -51,240 +111,443 @@ class BaseOrderAdmin(admin.ModelAdmin):
         }
         color = colors.get(obj.priority, '#6c757d')
         return format_html(
-            '<span style="background-color: {}; color: white; padding: 3px 8px; '
-            'border-radius: 3px; font-size: 11px;">{}</span>',
-            color, obj.get_priority_display()
+            '<span style="background-color:{};color:#fff;padding:3px 8px;border-radius:3px;font-size:11px;">{}</span>',
+            color,
+            obj.get_priority_display(),
         )
+
     priority_badge.short_description = 'Priority'
     priority_badge.admin_order_field = 'priority'
+
     def location_short(self, obj):
-        if obj.location:
-            return obj.location[:50] + '...' if len(obj.location) > 50 else obj.location
-        return '-'
+        if not obj.location:
+            return '—'
+        t = (obj.location or '').strip()
+        return (t[:60] + '…') if len(t) > 60 else t
+
     location_short.short_description = 'Location'
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related(
-            'user', 'master', 'master__user'
+
+    def coords_link(self, obj):
+        if obj.latitude is None or obj.longitude is None:
+            return '—'
+        lat, lon = float(obj.latitude), float(obj.longitude)
+        return format_html(
+            '<a href="https://www.google.com/maps?q={},{}" target="_blank" rel="noopener">{}, {}</a>',
+            lat,
+            lon,
+            round(lat, 5),
+            round(lon, 5),
         )
+
+    coords_link.short_description = 'Map'
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('user', 'master', 'master__user')
+
     def has_add_permission(self, request):
         return request.user.is_superuser
-    def has_change_permission(self, request, obj=None):
-        return True
+
     def has_delete_permission(self, request, obj=None):
         return request.user.is_superuser
-    def get_readonly_fields(self, request, obj=None):
-        readonly_fields = list(self.readonly_fields)
-        if not request.user.is_superuser:
-            readonly_fields.extend(['user', 'master'])
-        return readonly_fields
 
-@admin.register(ScheduledOrder)
-class ScheduledOrderAdmin(BaseOrderAdmin):
+    def get_readonly_fields(self, request, obj=None):
+        ro = list(self.readonly_fields)
+        if not request.user.is_superuser:
+            ro.extend(['user', 'master'])
+        return ro
+
+
+@admin.register(Order)
+class OrderAdmin(BaseOrderAdmin):
+    date_hierarchy = 'created_at'
     list_display = [
-        'id', 'user_link', 'master_link', 'scheduled_date', 'time_slot',
-        'status_badge', 'priority_badge', 'created_at'
+        'order_type',
+        'user_link',
+        'master_link',
+        'status_badge',
+        'priority_badge',
+        'location_short',
+        'coords_link',
+        'created_at',
     ]
     list_filter = [
-        'status', 'priority', 'scheduled_date', 'created_at',
-        'master__city', 'master'
+        'status',
+        'priority',
+        'order_type',
+        'location_source',
+        'parts_purchase_required',
+        ('created_at', admin.DateFieldListFilter),
     ]
     fieldsets = (
-        ('Main information', {
-            'fields': ('id', 'order_type', 'user_link', 'text', 'status', 'priority')
-        }),
-        ('Visit date and time', {
-            'fields': ('scheduled_date', 'scheduled_time_start', 'scheduled_time_end'),
-            'classes': ('wide',)
-        }),
-        ('Master and services', {
-            'fields': ('master_link', 'category', 'car')
-        }),
-        ('Master location', {
-            'fields': ('location', 'latitude', 'longitude'),
-            'classes': ('collapse',)
-        }),
-        ('Timestamps', {
-            'fields': ('created_at', 'updated_at'),
-            'classes': ('collapse',)
-        }),
+        (
+            'Main',
+            {
+                'fields': (
+                    'id',
+                    'order_type',
+                    'user',
+                    'master',
+                    'text',
+                    'status',
+                    'priority',
+                    'discount',
+                )
+            },
+        ),
+        (
+            'Location',
+            {
+                'fields': (
+                    'location',
+                    'location_source',
+                    'latitude',
+                    'longitude',
+                    'preferred_time',
+                )
+            },
+        ),
+        (
+            'SOS queue',
+            {
+                'fields': (
+                    'sos_offer_queue',
+                    'sos_offer_index',
+                    'master_response_deadline',
+                ),
+                'classes': ('collapse',),
+            },
+        ),
+        (
+            'Workflow & deadlines',
+            {
+                'fields': (
+                    'accepted_at',
+                    'on_the_way_at',
+                    'estimated_arrival_at',
+                    'eta_minutes',
+                    'arrived_at',
+                    'work_started_at',
+                    'expiration_time',
+                    'client_penalty_free_cancel_unlocked',
+                ),
+                'classes': ('collapse',),
+            },
+        ),
+        (
+            'Other',
+            {
+                'fields': ('parts_purchase_required', 'car', 'category'),
+            },
+        ),
+        (
+            'Timestamps',
+            {
+                'fields': ('created_at', 'updated_at'),
+                'classes': ('collapse',),
+            },
+        ),
     )
-    def time_slot(self, obj):
-        if obj.scheduled_time_start and obj.scheduled_time_end:
-            return f"{obj.scheduled_time_start.strftime('%H:%M')}-{obj.scheduled_time_end.strftime('%H:%M')}"
-        return '-'
-    time_slot.short_description = 'Visit time'
-    time_slot.admin_order_field = 'scheduled_time_start'
+
+
+@admin.register(StandardOrder)
+class StandardOrderAdmin(BaseOrderAdmin):
+    list_display = [
+        'id',
+        'user_link',
+        'master_link',
+        'location_short',
+        'status_badge',
+        'priority_badge',
+        'created_at',
+    ]
+    list_filter = [
+        'status',
+        'priority',
+        ('created_at', admin.DateFieldListFilter),
+    ]
+    date_hierarchy = 'created_at'
+
+    fieldsets = (
+        (
+            'Main',
+            {
+                'fields': (
+                    'id',
+                    'order_type',
+                    'user',
+                    'master',
+                    'text',
+                    'status',
+                    'priority',
+                    'discount',
+                )
+            },
+        ),
+        (
+            'Location',
+            {
+                'fields': (
+                    'location',
+                    'location_source',
+                    'latitude',
+                    'longitude',
+                    'preferred_time',
+                ),
+                'classes': ('collapse',),
+            },
+        ),
+        (
+            'Workflow',
+            {
+                'fields': (
+                    'accepted_at',
+                    'master_response_deadline',
+                    'on_the_way_at',
+                    'estimated_arrival_at',
+                    'eta_minutes',
+                    'arrived_at',
+                    'work_started_at',
+                    'expiration_time',
+                ),
+                'classes': ('collapse',),
+            },
+        ),
+        (
+            'Other',
+            {'fields': ('parts_purchase_required', 'car', 'category')},
+        ),
+        (
+            'Timestamps',
+            {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)},
+        ),
+    )
+
 
 @admin.register(SOSOrder)
 class SOSOrderAdmin(BaseOrderAdmin):
     list_display = [
-        'id', 'user_link', 'master_link', 'location_short',
-        'status_badge', 'created_at', 'coordinates'
+        'id',
+        'user_link',
+        'master_link',
+        'location_short',
+        'coords_link',
+        'status_badge',
+        'sos_ring',
+        'master_response_deadline',
+        'created_at',
     ]
     list_filter = [
-        'status', 'created_at', 'master__city', 'master'
+        'status',
+        ('created_at', admin.DateFieldListFilter),
     ]
+    date_hierarchy = 'created_at'
+
     fieldsets = (
-        ('Main information', {
-            'fields': ('id', 'order_type', 'user_link', 'text', 'status'),
-            'classes': ('wide',)
-        }),
-        ('Client location (GPS)', {
-            'fields': ('location', 'latitude', 'longitude'),
-            'classes': ('wide',)
-        }),
-        ('Master and services', {
-            'fields': ('master_link', 'category', 'car')
-        }),
-        ('Timestamps', {
-            'fields': ('created_at', 'updated_at'),
-            'classes': ('collapse',)
-        }),
+        (
+            'SOS',
+            {
+                'fields': (
+                    'id',
+                    'order_type',
+                    'user',
+                    'master',
+                    'text',
+                    'status',
+                    'priority',
+                    'sos_offer_queue',
+                    'sos_offer_index',
+                    'master_response_deadline',
+                )
+            },
+        ),
+        (
+            'GPS',
+            {
+                'fields': (
+                    'location',
+                    'location_source',
+                    'latitude',
+                    'longitude',
+                )
+            },
+        ),
+        (
+            'Workflow',
+            {
+                'fields': (
+                    'accepted_at',
+                    'on_the_way_at',
+                    'estimated_arrival_at',
+                    'eta_minutes',
+                    'arrived_at',
+                    'work_started_at',
+                    'expiration_time',
+                ),
+                'classes': ('collapse',),
+            },
+        ),
+        (
+            'Other',
+            {'fields': ('parts_purchase_required', 'discount', 'car', 'category')},
+        ),
+        (
+            'Timestamps',
+            {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)},
+        ),
     )
-    def coordinates(self, obj):
-        if obj.latitude and obj.longitude:
-            lat_str = f"{obj.latitude:.4f}"
-            lon_str = f"{obj.longitude:.4f}"
-            return format_html(
-                '<a href="https://www.google.com/maps?q={},{}" target="_blank">{}, {}</a>',
-                obj.latitude, obj.longitude, lat_str, lon_str
-            )
-        return '-'
-    coordinates.short_description = 'GPS coordinates'
-    def get_readonly_fields(self, request, obj=None):
-        readonly_fields = list(super().get_readonly_fields(request, obj))
-        return readonly_fields
 
-class OrderStatusFilter(admin.SimpleListFilter):
-    title = 'Order status'
-    parameter_name = 'status'
-    def lookups(self, request, model_admin):
-        return OrderStatus.choices
-    def queryset(self, request, queryset):
-        if self.value():
-            return queryset.filter(status=self.value())
-        return queryset
+    def sos_ring(self, obj):
+        q = obj.sos_offer_queue or []
+        i = obj.sos_offer_index or 0
+        if not q:
+            return '—'
+        return format_html(
+            '<span title="queue">{} / {}</span> (idx {})',
+            len(q),
+            ', '.join(str(x) for x in q[:8]) + ('…' if len(q) > 8 else ''),
+            i,
+        )
 
-class OrderPriorityFilter(admin.SimpleListFilter):
-    title = 'Order priority'
-    parameter_name = 'priority'
-    def lookups(self, request, model_admin):
-        return OrderPriority.choices
-    def queryset(self, request, queryset):
-        if self.value():
-            return queryset.filter(priority=self.value())
-        return queryset
+    sos_ring.short_description = 'SOS queue'
+
 
 @admin.register(OrderService)
 class OrderServiceAdmin(admin.ModelAdmin):
     list_display = ['id', 'order_link', 'service_name', 'service_price', 'created_at']
-    list_filter = ['created_at', 'order__status']
+    list_filter = ['created_at', 'order__status', 'order__order_type']
     search_fields = [
-        'order__id', 'master_service_item__category__name',
-        'order__user__first_name', 'order__user__last_name',
+        'order__id',
+        'master_service_item__category__name',
+        'order__user__email',
+        'order__user__phone_number',
     ]
+    raw_id_fields = ['order', 'master_service_item']
     readonly_fields = ['id', 'created_at']
-    list_per_page = 25
+    list_per_page = 50
+
     def order_link(self, obj):
-        if obj.order:
-            url = reverse('admin:order_order_change', args=[obj.order.id])
-            return format_html('<a href="{}">Order #{}</a>', url, obj.order.id)
-        return '-'
+        if obj.order_id:
+            url = reverse('admin:order_order_change', args=[obj.order_id])
+            return format_html('<a href="{}">#{}</a>', url, obj.order_id)
+        return '—'
+
     order_link.short_description = 'Order'
     order_link.admin_order_field = 'order__id'
+
     def service_name(self, obj):
-        if obj.master_service_item and obj.master_service_item.category_id:
-            return obj.master_service_item.category.name
-        return '-'
+        msi = obj.master_service_item
+        if msi and msi.category_id:
+            return msi.category.name
+        return '—'
+
     service_name.short_description = 'Service'
+
     def service_price(self, obj):
-        if obj.master_service_item:
+        if obj.master_service_item_id:
             return str(obj.master_service_item.price)
-        return '-'
+        return '—'
+
     service_price.short_description = 'Price'
+
     def get_queryset(self, request):
-        return super().get_queryset(request).select_related(
-            'order', 'order__user', 'master_service_item',
-            'master_service_item__master_service', 'master_service_item__category',
+        return (
+            super()
+            .get_queryset(request)
+            .select_related(
+                'order',
+                'order__user',
+                'master_service_item',
+                'master_service_item__category',
+            )
         )
+
 
 @admin.register(Review)
 class ReviewAdmin(admin.ModelAdmin):
     list_display = ['id', 'order_link', 'reviewer_link', 'rating_stars', 'tag_badge', 'created_at']
-    list_filter = ['rating', 'tag', 'created_at']
-    search_fields = ['order__id', 'reviewer__email', 'reviewer__first_name', 'reviewer__last_name', 'comment']
+    list_filter = ['rating', 'tag', ('created_at', admin.DateFieldListFilter)]
+    search_fields = ['order__id', 'reviewer__email', 'reviewer__phone_number', 'comment']
     readonly_fields = ['id', 'created_at', 'updated_at']
+    raw_id_fields = ['order', 'reviewer']
     list_per_page = 25
+    date_hierarchy = 'created_at'
+
     fieldsets = (
-        ('Main information', {
-            'fields': ('id', 'order', 'reviewer', 'rating', 'tag')
-        }),
-        ('Comment', {
-            'fields': ('comment',)
-        }),
-        ('Timestamps', {
-            'fields': ('created_at', 'updated_at'),
-            'classes': ('collapse',)
-        }),
+        ('Main', {'fields': ('id', 'order', 'reviewer', 'rating', 'tag')}),
+        ('Comment', {'fields': ('comment',)}),
+        ('Timestamps', {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
     )
+
     def order_link(self, obj):
-        if obj.order:
-            url = reverse('admin:order_order_change', args=[obj.order.id])
-            return format_html('<a href="{}">Order #{}</a>', url, obj.order.id)
-        return '-'
+        oid = obj.order_id
+        url = reverse('admin:order_order_change', args=[oid])
+        return format_html('<a href="{}">#{}</a>', url, oid)
+
     order_link.short_description = 'Order'
+
     def reviewer_link(self, obj):
-        if obj.reviewer:
-            url = reverse('admin:accounts_customuser_change', args=[obj.reviewer.id])
-            return format_html('<a href="{}">{}</a>', url, obj.reviewer.get_full_name() or obj.reviewer.email)
-        return '-'
-    reviewer_link.short_description = 'Review author'
+        if obj.reviewer_id:
+            url = reverse('admin:accounts_customuser_change', args=[obj.reviewer_id])
+            label = obj.reviewer.get_full_name() or obj.reviewer.email
+            return format_html('<a href="{}">{}</a>', url, label)
+        return '—'
+
+    reviewer_link.short_description = 'Author'
+
     def rating_stars(self, obj):
-        stars = '⭐' * obj.rating
-        return format_html('<span style="font-size: 16px;">{}</span>', stars)
+        return format_html('<span style="font-size:14px;">{}</span>', '⭐' * int(obj.rating))
+
     rating_stars.short_description = 'Rating'
+
     def tag_badge(self, obj):
-        colors = {
-            'fast_work': '#17a2b8',
-            'no_overpay': '#28a745',
-            'deadline': '#ffc107',
-            'always_available': '#007bff',
-            'individual_approach': '#6f42c1',
-            'polite': '#fd7e14',
-        }
-        color = colors.get(obj.tag, '#6c757d')
         return format_html(
-            '<span style="background-color: {}; color: white; padding: 3px 8px; '
-            'border-radius: 3px; font-size: 11px;">{}</span>',
-            color, obj.get_tag_display()
+            '<span style="background:#6c757d;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;">{}</span>',
+            obj.get_tag_display(),
         )
+
     tag_badge.short_description = 'Tag'
+
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('order', 'reviewer')
 
+
 @admin.register(UserRating)
 class UserRatingAdmin(admin.ModelAdmin):
-    list_display = ['id', 'user_link', 'rating_stars', 'average_rating', 'updated_at']
-    list_filter = ['updated_at']
-    search_fields = ['user__email', 'user__first_name', 'user__last_name']
+    list_display = ['id', 'user_link', 'average_rating', 'updated_at']
+    list_filter = [('updated_at', admin.DateFieldListFilter)]
+    search_fields = ['user__email', 'user__phone_number', 'user__first_name', 'user__last_name']
     readonly_fields = ['id', 'user', 'average_rating', 'updated_at']
-    list_per_page = 25
+    raw_id_fields = ['user']
     ordering = ['-average_rating']
+
     def user_link(self, obj):
-        if obj.user:
-            url = reverse('admin:accounts_customuser_change', args=[obj.user.id])
-            return format_html('<a href="{}">{}</a>', url, obj.user.get_full_name() or obj.user.email)
-        return '-'
+        if obj.user_id:
+            url = reverse('admin:accounts_customuser_change', args=[obj.user_id])
+            label = obj.user.get_full_name() or obj.user.email
+            return format_html('<a href="{}">{}</a>', url, label)
+        return '—'
+
     user_link.short_description = 'User'
-    def rating_stars(self, obj):
-        full_stars = int(obj.average_rating)
-        stars = '⭐' * full_stars
-        return format_html('<span style="font-size: 16px;">{} ({})</span>', stars, obj.average_rating)
-    rating_stars.short_description = 'Rating'
+
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('user')
 
-admin.site.site_header = "AutoHandy - Administration"
-admin.site.site_title = "AutoHandy Admin"
-admin.site.index_title = "Order management"
-"""
+
+@admin.register(Rating)
+class RatingAdmin(admin.ModelAdmin):
+    list_display = ['id', 'order_id', 'user', 'master', 'rating', 'created_at']
+    list_filter = ['rating', ('created_at', admin.DateFieldListFilter)]
+    search_fields = ['order__id', 'user__email', 'comment']
+    raw_id_fields = ['order', 'user', 'master']
+    readonly_fields = ['created_at', 'updated_at']
+    date_hierarchy = 'created_at'
+
+
+@admin.register(MasterOrderCancellation)
+class MasterOrderCancellationAdmin(admin.ModelAdmin):
+    list_display = ['id', 'order_id', 'master_id', 'reason', 'created_at']
+    list_filter = ['reason', ('created_at', admin.DateFieldListFilter)]
+    raw_id_fields = ['master', 'order']
+    readonly_fields = ['created_at']
+    search_fields = ['order__id', 'master__user__email']
+    date_hierarchy = 'created_at'

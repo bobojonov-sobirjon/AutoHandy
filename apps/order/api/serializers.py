@@ -1,0 +1,802 @@
+from decimal import Decimal, ROUND_HALF_UP
+
+from rest_framework import serializers
+from django.contrib.auth import get_user_model
+from apps.order.models import (
+    Order,
+    OrderStatus,
+    OrderPriority,
+    OrderType,
+    Rating,
+    OrderService,
+    Review,
+    ReviewTag,
+    UserRating,
+)
+from apps.car.models import Car
+from apps.categories.models import Category
+from apps.master.models import Master
+from apps.master.services.geo import haversine_distance_km
+from apps.accounts.serializers import UserSerializer
+from apps.master.api.serializers import MasterSerializer
+from apps.order.privacy import approximate_lat_lon, should_redact_exact_client_location
+from apps.order.services.master_offer import activate_pending_master_offer
+from apps.order.services.sos_master_queue import build_sos_master_id_queue
+from apps.order.services.status_workflow import client_cancellation_snapshot, order_master_distance_km
+from apps.order.services.order_pricing import get_cached_order_pricing
+
+User = get_user_model()
+
+
+def _money_fmt(v) -> str:
+    return format(
+        Decimal(str(v if v is not None else 0)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP),
+        'f',
+    )
+
+
+class OrderPricingNestedSerializer(serializers.ModelSerializer):
+    """
+    Line subtotal from order services; discount split across lines (proportional for amount mode).
+    See ``ORDER_DISCOUNT_IS_PERCENT`` in settings for percent vs fixed amount.
+    """
+
+    discount_mode = serializers.SerializerMethodField()
+    subtotal = serializers.SerializerMethodField()
+    discount_applied = serializers.SerializerMethodField()
+    total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = (
+            'discount',
+            'discount_mode',
+            'subtotal',
+            'discount_applied',
+            'total',
+        )
+
+    def get_discount_mode(self, obj):
+        return get_cached_order_pricing(obj, self.context)['discount_mode']
+
+    def get_subtotal(self, obj):
+        return format(get_cached_order_pricing(obj, self.context)['subtotal'], 'f')
+
+    def get_discount_applied(self, obj):
+        return format(get_cached_order_pricing(obj, self.context)['discount_applied'], 'f')
+
+    def get_total(self, obj):
+        return format(get_cached_order_pricing(obj, self.context)['total'], 'f')
+
+
+class OrderWorkflowNestedSerializer(serializers.ModelSerializer):
+    """Status oqimi: qabul, muddatlar, yo‘lda / yetib keldi / ish boshlandi, klient bekor huquqi."""
+
+    class Meta:
+        model = Order
+        fields = (
+            'accepted_at',
+            'on_the_way_at',
+            'arrived_at',
+            'work_started_at',
+            'client_penalty_free_cancel_unlocked',
+        )
+
+
+class OrderEtaNestedSerializer(serializers.ModelSerializer):
+    """Taxminiy yetib kelish: vaqt, daqiqa, masofa (km)."""
+
+    eta_distance_km = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = ('estimated_arrival_at', 'eta_minutes', 'eta_distance_km')
+
+    def get_eta_distance_km(self, obj):
+        return order_master_distance_km(obj)
+
+
+class OrderTimestampsNestedSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Order
+        fields = ('created_at', 'updated_at')
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    """Order serializer (pricing/workflow/eta guruhlari; SOS navbati API da yashirin)."""
+    user = serializers.SerializerMethodField()
+    master = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    priority_display = serializers.CharField(source='get_priority_display', read_only=True)
+    order_type_display = serializers.CharField(source='get_order_type_display', read_only=True)
+    car_data = serializers.SerializerMethodField()
+    category_data = serializers.SerializerMethodField()
+    services = serializers.SerializerMethodField()
+    reviews = serializers.SerializerMethodField()
+    average_rating = serializers.SerializerMethodField()
+    location_precision = serializers.SerializerMethodField()
+    order_images = serializers.SerializerMethodField()
+    work_completion_images = serializers.SerializerMethodField()
+    cancellation = serializers.SerializerMethodField()
+
+    pricing = OrderPricingNestedSerializer(source='*', read_only=True)
+    workflow = OrderWorkflowNestedSerializer(source='*', read_only=True)
+    eta = OrderEtaNestedSerializer(source='*', read_only=True)
+    timestamps = OrderTimestampsNestedSerializer(source='*', read_only=True)
+
+    class Meta:
+        model = Order
+        fields = [
+            'id', 'user', 'order_type', 'order_type_display',
+            'car_data', 'category_data',
+            'text', 'status', 'status_display', 'priority', 'priority_display',
+            'location', 'latitude', 'longitude', 'location_precision',
+            'parts_purchase_required', 'master',
+            'pricing', 'services', 'reviews', 'average_rating',
+            'workflow', 'eta',
+            'order_images', 'work_completion_images',
+            'timestamps', 'cancellation',
+        ]
+        read_only_fields = [
+            'id',
+            'workflow', 'eta', 'timestamps', 'pricing',
+        ]
+    
+    def get_user(self, obj):
+        return UserSerializer(obj.user, context=self.context).data
+    
+    def get_master(self, obj):
+        if not obj.master_id:
+            return None
+        request = self.context.get('request')
+        hide = True
+        if request and request.user.is_authenticated and obj.master.user_id == request.user.id:
+            hide = False
+        master = obj.master
+        dist_km = order_master_distance_km(obj)
+        if dist_km is not None:
+            master.distance = float(dist_km)
+        ctx = {
+            **self.context,
+            'hide_master_exact_location': hide,
+            'embed_order_min_price': True,
+        }
+        first_cat = obj.category.first()
+        if first_cat is not None:
+            ctx['filter_service_category_id'] = first_cat.id
+        return MasterSerializer(master, context=ctx).data
+    
+    def get_car_data(self, obj):
+        """Get car data"""
+        cars = obj.car.all()
+        return [
+            {
+                'id': car.id,
+                'brand': car.brand,
+                'model': car.model,
+                'year': car.year,
+                'category': car.category.name if car.category else None
+            }
+            for car in cars
+        ]
+    
+    def get_category_data(self, obj):
+        """
+        Order M2M categories grouped by parent — same shape as `services`:
+        `[{ parent: { id, name, icon } | null, items: [...] }, ...]`.
+        """
+        from apps.master.api.serializers import _absolute_media_url
+
+        request = self.context.get('request')
+        categories = (
+            obj.category.all()
+            .select_related('parent')
+            .order_by('parent_id', 'name')
+        )
+        groups = {}
+        for cat in categories:
+            parent = cat.parent
+            gid = parent.id if parent is not None else 0
+            if gid not in groups:
+                groups[gid] = {
+                    'parent': (
+                        {
+                            'id': parent.id,
+                            'name': parent.name,
+                            'icon': _absolute_media_url(request, parent.icon),
+                        }
+                        if parent
+                        else None
+                    ),
+                    'items': [],
+                }
+            groups[gid]['items'].append(
+                {
+                    'id': cat.id,
+                    'name': cat.name,
+                    'type_category': cat.type_category,
+                    'icon': _absolute_media_url(request, cat.icon),
+                }
+            )
+        return list(groups.values())
+
+    def get_services(self, obj):
+        """
+        Order lines grouped by parent category — same structure as
+        `master.services[].master_service_items`: `[{ parent, items }, ...]`.
+        Each item line matches `master_service_item_line_dict` plus `order_service_id`, `added_at`.
+        """
+        from apps.master.api.serializers import master_service_item_line_dict, _absolute_media_url
+
+        request = self.context.get('request')
+        order_services = (
+            obj.order_services.all()
+            .select_related(
+                'master_service_item',
+                'master_service_item__category',
+                'master_service_item__category__parent',
+            )
+            .order_by(
+                'master_service_item__category__parent_id',
+                'master_service_item__category__name',
+            )
+        )
+        groups = {}
+        br = get_cached_order_pricing(obj, self.context)
+        for os_row in order_services:
+            item = os_row.master_service_item
+            if not item:
+                continue
+            parent = item.category.parent if item.category_id else None
+            gid = parent.id if parent else 0
+            if gid not in groups:
+                groups[gid] = {
+                    'parent': (
+                        {
+                            'id': parent.id,
+                            'name': parent.name,
+                            'icon': _absolute_media_url(request, parent.icon),
+                        }
+                        if parent
+                        else None
+                    ),
+                    'items': [],
+                }
+            line = master_service_item_line_dict(item, request)
+            line['order_service_id'] = os_row.id
+            line['added_at'] = os_row.created_at
+            meta = br['lines_by_order_service_id'].get(os_row.id)
+            if meta:
+                line['discount_allocated'] = format(meta['discount_allocated'], 'f')
+                line['line_total'] = format(meta['line_total'], 'f')
+            else:
+                line['discount_allocated'] = '0.00'
+                line['line_total'] = _money_fmt(line.get('price'))
+            groups[gid]['items'].append(line)
+        return list(groups.values())
+    
+    def get_reviews(self, obj):
+        """Get order reviews"""
+        from apps.order.models import Review
+        
+        reviews = Review.objects.filter(order=obj).select_related('reviewer')
+        if not reviews.exists():
+            return []
+        
+        return [
+            {
+                'id': review.id,
+                'rating': review.rating,
+                'comment': review.comment,
+                'tag': review.tag,
+                'tag_display': review.get_tag_display(),
+                'reviewer': {
+                    'id': review.reviewer.id,
+                    'full_name': review.reviewer.get_full_name(),
+                    'avatar': self.context['request'].build_absolute_uri(review.reviewer.avatar.url) if review.reviewer.avatar and self.context.get('request') else None
+                } if review.reviewer else None,
+                'created_at': review.created_at
+            }
+            for review in reviews
+        ]
+    
+    def get_average_rating(self, obj):
+        """Get order average rating"""
+        from django.db.models import Avg
+        from apps.order.models import Review
+        
+        avg = Review.objects.filter(order=obj).aggregate(avg_rating=Avg('rating'))
+        return round(avg['avg_rating'], 2) if avg['avg_rating'] else None
+
+    def get_location_precision(self, obj):
+        request = self.context.get('request')
+        user = request.user if request and getattr(request.user, 'is_authenticated', False) else None
+        return 'approximate' if should_redact_exact_client_location(obj, user) else 'exact'
+
+    def get_order_images(self, obj):
+        request = self.context.get('request')
+        out = []
+        for im in obj.images.all():
+            url = None
+            if im.image:
+                url = (
+                    request.build_absolute_uri(im.image.url)
+                    if request
+                    else im.image.url
+                )
+            out.append({'id': im.id, 'image': url, 'created_at': im.created_at})
+        return out
+
+    def get_work_completion_images(self, obj):
+        request = self.context.get('request')
+        out = []
+        for im in obj.work_completion_images.all():
+            url = None
+            if im.image:
+                url = (
+                    request.build_absolute_uri(im.image.url)
+                    if request
+                    else im.image.url
+                )
+            out.append({'id': im.id, 'image': url, 'created_at': im.created_at})
+        return out
+
+    def get_cancellation(self, obj):
+        """Client cancellation policy for this order (see status_workflow.client_cancellation_snapshot)."""
+        return client_cancellation_snapshot(obj)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = request.user if request and getattr(request.user, 'is_authenticated', False) else None
+        if should_redact_exact_client_location(instance, user):
+            data['location'] = 'Approximate service area'
+            if instance.latitude is not None and instance.longitude is not None:
+                alat, alon = approximate_lat_lon(
+                    float(instance.latitude), float(instance.longitude), instance.id
+                )
+                data['latitude'] = str(alat)
+                data['longitude'] = str(alon)
+            data['location_precision'] = 'approximate'
+        else:
+            data['location_precision'] = 'exact'
+        return data
+
+    def validate_latitude(self, value):
+        """Validate latitude"""
+        if value is not None and (value < -90 or value > 90):
+            raise serializers.ValidationError('Latitude must be between -90 and 90')
+        return value
+
+    def validate_longitude(self, value):
+        """Validate longitude"""
+        if value is not None and (value < -180 or value > 180):
+            raise serializers.ValidationError('Longitude must be between -180 and 180')
+        return value
+
+
+class OrderCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating order.
+
+    Supports two order types:
+    1. STANDARD: client selects master (no fixed visit date/time on the order — use ``preferred_time`` text if needed).
+    2. SOS: client makes urgent order with current geolocation
+
+    Required for both: order_type, text, location, latitude, longitude, car_list, category_list.
+    For STANDARD also: master_id.
+    For SOS: priority optional (defaults high). master_id optional — nearest masters with selected
+    by_order service are queued; WebSocket + 30s offer each.
+
+    Optional: ``parts_purchase_required`` (boolean).
+    Use **multipart/form-data** to upload ``images`` (field name ``images``, multiple files);
+    send ``car_list`` / ``category_list`` as JSON strings (e.g. ``[1,2]``).
+    """
+    order_type = serializers.CharField(
+        required=True,
+        help_text="Order type: 'standard' or 'sos' (legacy body value 'scheduled' is accepted as standard).",
+    )
+    master_id = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text="Master ID (required for standard orders; optional for SOS — auto nearby queue)"
+    )
+    car_list = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=True,
+        allow_empty=False,
+        write_only=True,
+        help_text="List of car IDs [1, 2, 3, ...] (required)"
+    )
+    category_list = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=True,
+        allow_empty=False,
+        write_only=True,
+        help_text="List of category IDs [1, 2, 3, ...] (required)"
+    )
+    parts_purchase_required = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text='If true, master may need to buy parts; client pays outside the app',
+    )
+
+    class Meta:
+        model = Order
+        fields = [
+            'order_type', 'text', 'priority', 'location', 'latitude', 'longitude',
+            'master_id',
+            'car_list', 'category_list',
+            'parts_purchase_required',
+        ]
+        extra_kwargs = {
+            'text': {'required': True},
+            'location': {'required': True},
+            'latitude': {'required': True},
+            'longitude': {'required': True},
+            'priority': {'required': False},  # For SOS set automatically
+        }
+
+    def validate_order_type(self, value):
+        v = (value or '').strip().lower()
+        if v == 'scheduled':
+            return OrderType.STANDARD
+        if v == OrderType.STANDARD:
+            return OrderType.STANDARD
+        if v == OrderType.SOS:
+            return OrderType.SOS
+        raise serializers.ValidationError("order_type must be 'standard' or 'sos'.")
+
+    def validate_master_id(self, value):
+        """Validate master"""
+        if value is not None:
+            try:
+                Master.objects.get(id=value)
+            except Master.DoesNotExist:
+                raise serializers.ValidationError(f"Master with ID {value} not found")
+        return value
+
+    def validate_car_list(self, value):
+        """Validate car list"""
+        if not isinstance(value, list):
+            raise serializers.ValidationError("car_list must be a list of IDs")
+
+        for car_id in value:
+            try:
+                Car.objects.get(id=car_id)
+            except Car.DoesNotExist:
+                raise serializers.ValidationError(f"Car with ID {car_id} not found")
+
+        return value
+
+    def validate_category_list(self, value):
+        """Validate category list"""
+        if not isinstance(value, list):
+            raise serializers.ValidationError("category_list must be a list of IDs")
+
+        for category_id in value:
+            try:
+                Category.objects.get(id=category_id)
+            except Category.DoesNotExist:
+                raise serializers.ValidationError(f"Category with ID {category_id} not found")
+
+        return value
+
+    def validate_latitude(self, value):
+        """Validate latitude"""
+        if value is not None and (value < -90 or value > 90):
+            raise serializers.ValidationError('Latitude must be between -90 and 90')
+        return value
+
+    def validate_longitude(self, value):
+        """Validate longitude"""
+        if value is not None and (value < -180 or value > 180):
+            raise serializers.ValidationError('Longitude must be between -180 and 180')
+        return value
+
+    def validate(self, attrs):
+        """Validate order data based on order type"""
+        order_type = attrs.get('order_type')
+        master_id = attrs.get('master_id')
+        order_lat = attrs.get('latitude')
+        order_lon = attrs.get('longitude')
+
+        if order_type == OrderType.STANDARD:
+            if not master_id:
+                raise serializers.ValidationError({
+                    'master_id': 'Master is required for standard order'
+                })
+
+        elif order_type == OrderType.SOS:
+            if not attrs.get('priority'):
+                attrs['priority'] = OrderPriority.HIGH
+
+            cats = attrs.get('category_list') or []
+            if not master_id:
+                by_order_ok = Category.objects.filter(
+                    id__in=cats,
+                    type_category=Category.TypeCategory.BY_ORDER,
+                ).exists()
+                if not by_order_ok:
+                    raise serializers.ValidationError({
+                        'category_list': 'Select at least one by_order service category for SOS.',
+                    })
+                queue = build_sos_master_id_queue(
+                    float(order_lat),
+                    float(order_lon),
+                    [int(c) for c in cats],
+                )
+                if not queue:
+                    raise serializers.ValidationError({
+                        'category_list': (
+                            'No masters with this service are available within their acceptance zones '
+                            'for this location.'
+                        ),
+                    })
+                attrs['_sos_queue'] = queue
+
+        if master_id and order_lat and order_lon:
+            try:
+                master = Master.objects.get(id=master_id)
+                wlat, wlon = master.get_work_location_for_distance()
+                if wlat is None:
+                    raise serializers.ValidationError({
+                        'master_id': 'Selected master has no work location or profile coordinates. '
+                                      'Please choose another master.'
+                    })
+                lat1 = float(order_lat)
+                lon1 = float(order_lon)
+                distance = haversine_distance_km(lat1, lon1, wlat, wlon)
+                max_km = master.max_order_distance_km()
+                if distance > max_km:
+                    if order_type == OrderType.STANDARD:
+                        msg = (
+                            f'This master cannot take this booking: the order location is outside their '
+                            f'acceptance zone ({distance:.1f} km from their map pin; maximum allowed '
+                            f'{max_km:.1f} km). Choose another master or change the visit coordinates.'
+                        )
+                    else:
+                        msg = (
+                            f'The SOS location is outside this master’s acceptance zone '
+                            f'({distance:.1f} km; limit {max_km:.1f} km). Choose another master.'
+                        )
+                    raise serializers.ValidationError({'master_id': msg})
+
+            except Master.DoesNotExist:
+                pass
+
+        return attrs
+
+    def create(self, validated_data):
+        """Create order with cars and categories"""
+        master_id = validated_data.pop('master_id', None)
+        sos_queue = validated_data.pop('_sos_queue', None)
+        car_list = validated_data.pop('car_list', [])
+        category_list = validated_data.pop('category_list', [])
+
+        if master_id and validated_data.get('order_type') == OrderType.STANDARD:
+            validated_data['master'] = Master.objects.get(id=master_id)
+
+        order = super().create(validated_data)
+        if car_list:
+            order.car.set(car_list)
+        if category_list:
+            order.category.set(category_list)
+
+        if order.order_type == OrderType.SOS:
+            if sos_queue is not None:
+                order.sos_offer_queue = sos_queue
+                order.sos_offer_index = 0
+                order.save(update_fields=['sos_offer_queue', 'sos_offer_index'])
+            elif master_id:
+                order.sos_offer_queue = [master_id]
+                order.sos_offer_index = 0
+                order.save(update_fields=['sos_offer_queue', 'sos_offer_index'])
+
+        if order.status == OrderStatus.PENDING:
+            activate_pending_master_offer(order, request=self.context.get('request'))
+
+        return order
+
+
+class OrderUpdateSerializer(serializers.ModelSerializer):
+    """Order update serializer"""
+    
+    class Meta:
+        model = Order
+        fields = [
+            'text', 'status', 'priority', 'location', 'latitude', 'longitude', 'master',
+        ]
+
+    def validate_latitude(self, value):
+        """Validate latitude"""
+        if value is not None and (value < -90 or value > 90):
+            raise serializers.ValidationError('Latitude must be between -90 and 90')
+        return value
+
+    def validate_longitude(self, value):
+        """Validate longitude"""
+        if value is not None and (value < -180 or value > 180):
+            raise serializers.ValidationError('Longitude must be between -180 and 180')
+        return value
+
+
+class OrderStatusUpdateSerializer(serializers.Serializer):
+    """Order status update serializer"""
+    status = serializers.ChoiceField(choices=OrderStatus.choices)
+
+    def validate_status(self, value):
+        """Validate status"""
+        if value not in [choice[0] for choice in OrderStatus.choices]:
+            raise serializers.ValidationError('Invalid order status')
+        return value
+
+
+class OrderServiceSerializer(serializers.ModelSerializer):
+    """Order service serializer"""
+    service_details = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OrderService
+        fields = ['id', 'order', 'master_service_item', 'service_details', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+    def get_service_details(self, obj):
+        """Get service details"""
+        if obj.master_service_item:
+            from apps.master.api.serializers import MasterServiceItemsSerializer
+            return MasterServiceItemsSerializer(obj.master_service_item).data
+        return None
+
+
+class AddServicesToOrderSerializer(serializers.Serializer):
+    """Serializer for adding services to order"""
+    order_id = serializers.IntegerField()
+    services_list = serializers.ListField(
+        child=serializers.IntegerField(),
+        allow_empty=False,
+        help_text='List of master service item IDs (MasterServiceItems)'
+    )
+    discount = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        required=False,
+        default=0.00,
+        help_text='Order discount'
+    )
+
+    def validate_order_id(self, value):
+        """Check order exists"""
+        try:
+            Order.objects.get(id=value)
+        except Order.DoesNotExist:
+            raise serializers.ValidationError(f'Order with ID {value} not found')
+        return value
+
+    def validate_services_list(self, value):
+        """Check services exist"""
+        from apps.master.models import MasterServiceItems
+
+        if not value:
+            raise serializers.ValidationError('Services list cannot be empty')
+
+        existing_services = MasterServiceItems.objects.filter(id__in=value)
+        existing_ids = set(existing_services.values_list('id', flat=True))
+        invalid_ids = set(value) - existing_ids
+        if invalid_ids:
+            raise serializers.ValidationError(
+                f'Services with ID {list(invalid_ids)} not found'
+            )
+        return value
+
+
+class AddMasterToOrderSerializer(serializers.Serializer):
+    """Set primary master (FK) on order: `master_id` = Master profile id."""
+
+    order_id = serializers.IntegerField()
+    master_id = serializers.IntegerField()
+
+    def validate_order_id(self, value):
+        try:
+            Order.objects.get(id=value)
+        except Order.DoesNotExist:
+            raise serializers.ValidationError(f'Order with ID {value} not found')
+        return value
+
+    def validate_master_id(self, value):
+        try:
+            Master.objects.get(id=value)
+        except Master.DoesNotExist:
+            raise serializers.ValidationError(f'Master with ID {value} not found')
+        return value
+
+
+class ReviewSerializer(serializers.ModelSerializer):
+    """Review serializer"""
+    reviewer_info = serializers.SerializerMethodField()
+    tag_display = serializers.CharField(source='get_tag_display', read_only=True)
+    order_info = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Review
+        fields = [
+            'id', 'order', 'order_info', 'reviewer', 'reviewer_info',
+            'rating', 'comment', 'tag', 'tag_display', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'reviewer', 'created_at', 'updated_at']
+
+    def get_reviewer_info(self, obj):
+        """Review author info"""
+        if obj.reviewer:
+            return {
+                'id': obj.reviewer.id,
+                'full_name': obj.reviewer.get_full_name(),
+                'email': obj.reviewer.email,
+                'avatar': obj.reviewer.avatar.url if obj.reviewer.avatar else None
+            }
+        return None
+    
+    def get_order_info(self, obj):
+        """Short order info"""
+        if obj.order:
+            return {
+                'id': obj.order.id,
+                'text': obj.order.text,
+                'status': obj.order.status,
+                'created_at': obj.order.created_at
+            }
+        return None
+
+
+class ReviewCreateSerializer(serializers.Serializer):
+    """Serializer for creating review"""
+    order_id = serializers.IntegerField(
+        help_text='Order ID'
+    )
+    rating = serializers.IntegerField(
+        min_value=1,
+        max_value=5,
+        help_text='Rating from 1 to 5'
+    )
+    comment = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text='Review comment'
+    )
+    tag = serializers.ChoiceField(
+        choices=ReviewTag.choices,
+        help_text='What best describes your experience: one positive or one negative tag'
+    )
+
+    def validate_order_id(self, value):
+        """Check order exists and can be reviewed"""
+        try:
+            order = Order.objects.get(id=value)
+
+            if order.status != OrderStatus.COMPLETED:
+                raise serializers.ValidationError(
+                    'Review can only be left for a completed order'
+                )
+
+            if Review.objects.filter(order=order).exists():
+                raise serializers.ValidationError(
+                    'A review for this order has already been submitted'
+                )
+
+        except Order.DoesNotExist:
+            raise serializers.ValidationError(f'Order with ID {value} not found')
+        return value
+
+
+class CancelOrderRequestSerializer(serializers.Serializer):
+    """Body for ``POST /api/order/{order_id}/cancel/`` (master must send ``cancel_reason``)."""
+
+    cancel_reason = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text=(
+            'Assigned master only: one of client_request, vehicle_unavailable, duplicate, '
+            'emergency, other. Omit for client (driver) cancel.'
+        ),
+    )

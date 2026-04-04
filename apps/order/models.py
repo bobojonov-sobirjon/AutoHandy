@@ -12,70 +12,85 @@ User = get_user_model()
 
 
 class OrderStatus(models.TextChoices):
-    """Order statuses"""
+    """Order statuses (workflow for master accept → work → complete)."""
+
     PENDING = 'pending', 'Pending'
+    ACCEPTED = 'accepted', 'Accepted'
+    ON_THE_WAY = 'on_the_way', 'On the way'
+    ARRIVED = 'arrived', 'Arrived'
     IN_PROGRESS = 'in_progress', 'In progress'
     COMPLETED = 'completed', 'Completed'
     CANCELLED = 'cancelled', 'Cancelled'
     REJECTED = 'rejected', 'Rejected'
 
 
+class LocationSource(models.TextChoices):
+    MANUAL = 'manual', 'Address text (coordinates optional)'
+    GPS_PROFILE = 'gps_profile', 'GPS from user profile (CustomUser lat/long)'
+    GPS_CUSTOM = 'gps_custom', 'GPS coordinates sent by client'
+
+
 class OrderPriority(models.TextChoices):
     """Order priorities"""
+
     LOW = 'low', 'Low'
     HIGH = 'high', 'High'
 
 
 class OrderType(models.TextChoices):
-    """Order types"""
-    SCHEDULED = 'scheduled', 'Scheduled (by date)'
+    """Order types: standard (normal booking with a master) vs SOS (emergency)."""
+
+    STANDARD = 'standard', 'Standard'
     SOS = 'sos', 'SOS / Emergency'
 
 
 class Order(models.Model):
     """Order model"""
+
     user = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
         related_name='orders',
-        verbose_name='User'
+        verbose_name='User',
     )
     car = models.ManyToManyField(
         Car,
         related_name='orders',
-        verbose_name='Car'
+        verbose_name='Car',
     )
     category = models.ManyToManyField(
         Category,
         related_name='orders',
-        verbose_name='Category'
+        verbose_name='Category',
     )
     text = models.TextField(
         verbose_name='Order description',
-        help_text='Detailed description of the problem or service'
+        help_text='Detailed description of the problem or service',
     )
     status = models.CharField(
         max_length=20,
         choices=OrderStatus.choices,
         default=OrderStatus.PENDING,
-        verbose_name='Order status'
+        verbose_name='Order status',
     )
     priority = models.CharField(
         max_length=20,
         choices=OrderPriority.choices,
         default=OrderPriority.LOW,
-        verbose_name='Order priority'
+        verbose_name='Order priority',
     )
     order_type = models.CharField(
         max_length=20,
         choices=OrderType.choices,
-        default=OrderType.SCHEDULED,
+        default=OrderType.STANDARD,
         verbose_name='Order type',
-        help_text='Scheduled - order by date, SOS - emergency assistance'
+        help_text='Standard — order with a chosen master; SOS — emergency assistance',
     )
     location = models.TextField(
+        blank=True,
+        default='',
         verbose_name='Location',
-        help_text='Address or place description'
+        help_text='Service address text; optional if GPS coordinates are provided',
     )
     latitude = models.DecimalField(
         max_digits=10,
@@ -83,7 +98,7 @@ class Order(models.Model):
         null=True,
         blank=True,
         verbose_name='Latitude',
-        help_text='Location latitude'
+        help_text='Location latitude',
     )
     longitude = models.DecimalField(
         max_digits=10,
@@ -91,7 +106,7 @@ class Order(models.Model):
         null=True,
         blank=True,
         verbose_name='Longitude',
-        help_text='Location longitude'
+        help_text='Location longitude',
     )
     master = models.ForeignKey(
         'master.Master',
@@ -99,48 +114,109 @@ class Order(models.Model):
         null=True,
         blank=True,
         related_name='orders',
-        verbose_name='Master'
+        verbose_name='Master',
     )
 
-    # Fields for scheduled orders (order_type=scheduled)
-    scheduled_date = models.DateField(
-        null=True,
-        blank=True,
-        verbose_name='Scheduled date',
-        help_text='Visit date to master (for scheduled orders only)'
-    )
-    scheduled_time_start = models.TimeField(
-        null=True,
-        blank=True,
-        verbose_name='Visit start time',
-        help_text='Visit start time (e.g. 10:00)'
-    )
-    scheduled_time_end = models.TimeField(
-        null=True,
-        blank=True,
-        verbose_name='Visit end time',
-        help_text='Visit end time (e.g. 11:00)'
-    )
     discount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
         default=0.00,
         verbose_name='Discount',
-        help_text='Order discount (percentage or amount)'
+        help_text='Order discount (percentage or amount)',
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
-        verbose_name='Created at'
+        verbose_name='Created at',
     )
     updated_at = models.DateTimeField(
         auto_now=True,
-        verbose_name='Updated at'
+        verbose_name='Updated at',
     )
     expiration_time = models.DateTimeField(
         null=True,
         blank=True,
         verbose_name='Expiration time',
-        help_text='Order expiration time (1 day from creation)'
+        help_text='Order expiration time (1 day from creation)',
+    )
+    accepted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Accepted at',
+        help_text='When the assigned master accepted the order (exact address visible after this)',
+    )
+    master_response_deadline = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Master offer deadline',
+        help_text='Master must accept or decline before this time (e.g. 15 minutes from offer)',
+    )
+    on_the_way_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='On the way at',
+        help_text='When master marked status "on the way".',
+    )
+    estimated_arrival_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Estimated arrival',
+        help_text='Expected arrival time (set on on_the_way from eta_minutes or explicit datetime).',
+    )
+    eta_minutes = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        verbose_name='ETA minutes',
+        help_text='Minutes until arrival committed when marking on the way.',
+    )
+    arrived_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Arrived at',
+    )
+    work_started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Work started at',
+        help_text='When master started job (in_progress) after arrival.',
+    )
+    client_penalty_free_cancel_unlocked = models.BooleanField(
+        default=False,
+        verbose_name='Client penalty-free cancel (2h on the way)',
+        help_text='Set automatically after configured hours on the way; client cancel without penalty.',
+    )
+    sos_offer_queue = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name='SOS offer queue (master IDs)',
+        help_text='SOS: nearest master IDs (broadcast to all in zone); first accept wins.',
+    )
+    sos_offer_index = models.PositiveSmallIntegerField(
+        default=0,
+        verbose_name='SOS offer index',
+        help_text='Legacy ring index; unused for broadcast SOS.',
+    )
+    sos_declined_master_ids = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name='SOS declined master IDs',
+        help_text='SOS broadcast: master IDs who declined while order still pending.',
+    )
+    location_source = models.CharField(
+        max_length=20,
+        choices=LocationSource.choices,
+        default=LocationSource.MANUAL,
+        verbose_name='Location source',
+    )
+    parts_purchase_required = models.BooleanField(
+        default=False,
+        verbose_name='Parts purchase required',
+        help_text='If true, master buys parts; client pays parts outside the app.',
+    )
+    preferred_time = models.TextField(
+        blank=True,
+        default='',
+        verbose_name='Preferred time',
+        help_text='Client preferred service time (free text)',
     )
 
     class Meta:
@@ -186,14 +262,104 @@ class Order(models.Model):
         return False
 
 
+class OrderImage(models.Model):
+    """Photos attached to an order by the client (visible to master before accept)."""
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='images',
+        verbose_name='Order',
+    )
+    image = models.ImageField(upload_to='order_images/', verbose_name='Image')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
+
+    class Meta:
+        verbose_name = 'Order image'
+        verbose_name_plural = 'Order images'
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f'Order {self.order_id} image {self.pk}'
+
+
+class OrderWorkCompletionImage(models.Model):
+    """Photos of completed work uploaded by the assigned master (required before complete)."""
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='work_completion_images',
+        verbose_name='Order',
+    )
+    image = models.ImageField(upload_to='order_work_completion/', verbose_name='Image')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
+
+    class Meta:
+        verbose_name = 'Order work completion image'
+        verbose_name_plural = 'Order work completion images'
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f'Order {self.order_id} work photo {self.pk}'
+
+
+class MasterCancelReason(models.TextChoices):
+    """Allowed reasons when a master cancels after accept (too_far is not allowed)."""
+
+    CLIENT_REQUEST = 'client_request', 'Client request'
+    VEHICLE_UNAVAILABLE = 'vehicle_unavailable', 'Vehicle unavailable'
+    DUPLICATE = 'duplicate', 'Duplicate order'
+    EMERGENCY = 'emergency', 'Emergency'
+    OTHER = 'other', 'Other'
+
+
+class MasterOrderCancellation(models.Model):
+    """Audit trail for master-initiated cancellations (monthly free limit + schedule rules)."""
+
+    master = models.ForeignKey(
+        'master.Master',
+        on_delete=models.CASCADE,
+        related_name='order_cancellations',
+        verbose_name='Master',
+    )
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='master_cancellations',
+        verbose_name='Order',
+    )
+    reason = models.CharField(
+        max_length=32,
+        choices=MasterCancelReason.choices,
+        verbose_name='Reason',
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
+
+    class Meta:
+        verbose_name = 'Master order cancellation'
+        verbose_name_plural = 'Master order cancellations'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'Master {self.master_id} cancelled order {self.order_id}'
+
+
 class ReviewTag(models.TextChoices):
-    """Tags for master work reviews"""
+    """Aspect of the experience (positive or negative); pick one."""
+
     FAST_WORK = 'fast_work', 'Fast work'
     NO_OVERPAY = 'no_overpay', 'No overpayment'
     DEADLINE = 'deadline', 'On time'
     ALWAYS_AVAILABLE = 'always_available', 'Always available'
     INDIVIDUAL_APPROACH = 'individual_approach', 'Individual approach'
     POLITE = 'polite', 'Polite'
+    LATE_OR_DELAYED = 'late_or_delayed', 'Late / delays'
+    POOR_QUALITY = 'poor_quality', 'Poor quality of work'
+    OVERPRICED = 'overpriced', 'Overpriced'
+    UNPROFESSIONAL = 'unprofessional', 'Unprofessional behavior'
+    HARD_TO_REACH = 'hard_to_reach', 'Hard to reach / poor communication'
+    OTHER_ISSUE = 'other_issue', 'Other issue'
 
 
 class Rating(models.Model):
@@ -293,7 +459,7 @@ class Review(models.Model):
         max_length=50,
         choices=ReviewTag.choices,
         verbose_name='Review tag',
-        help_text='What you liked about the master work'
+        help_text='What best describes your experience (one tag)'
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
@@ -381,21 +547,22 @@ class OrderService(models.Model):
     Order–master service link model
     Stores selected services for a specific order
     """
+
     order = models.ForeignKey(
         Order,
         on_delete=models.CASCADE,
         related_name='order_services',
-        verbose_name='Order'
+        verbose_name='Order',
     )
     master_service_item = models.ForeignKey(
         'master.MasterServiceItems',
         on_delete=models.CASCADE,
         related_name='order_services',
-        verbose_name='Master service'
+        verbose_name='Master service',
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
-        verbose_name='Added at'
+        verbose_name='Added at',
     )
 
     class Meta:
@@ -410,28 +577,27 @@ class OrderService(models.Model):
         return f"Order #{self.order.id} - service #{self.master_service_item_id}"
 
 
-class ScheduledOrderManager(models.Manager):
-    """Manager for scheduled orders"""
+class StandardOrderManager(models.Manager):
+    """Manager for standard (non-SOS) orders."""
+
     def get_queryset(self):
-        return super().get_queryset().filter(order_type=OrderType.SCHEDULED)
+        return super().get_queryset().filter(order_type=OrderType.STANDARD)
 
 
-class ScheduledOrder(Order):
-    """
-    Proxy model for scheduled orders (Order by Date)
-    Orders that client makes in advance with master, date and time selection
-    """
-    objects = ScheduledOrderManager()
+class StandardOrder(Order):
+    """Proxy for standard orders (client picked a master; not emergency)."""
+
+    objects = StandardOrderManager()
 
     class Meta:
         proxy = True
-        verbose_name = 'Scheduled order'
-        verbose_name_plural = 'Scheduled orders (by date)'
-        ordering = ['scheduled_date', 'scheduled_time_start']
+        verbose_name = 'Standard order'
+        verbose_name_plural = 'Standard orders'
+        ordering = ['-created_at']
 
     def save(self, *args, **kwargs):
         if not self.order_type:
-            self.order_type = OrderType.SCHEDULED
+            self.order_type = OrderType.STANDARD
         super().save(*args, **kwargs)
 
 
