@@ -197,18 +197,7 @@ class FAQAdmin(admin.ModelAdmin):
 
 admin.site.unregister(Site)
 
-@admin.register(AppVersion)
-class AppVersionAdmin(admin.ModelAdmin):
-    list_display = ('version', 'created_at')
-    list_filter = ('created_at')
-    search_fields = ('version')
-    ordering = ('-created_at')
-    readonly_fields = ('created_at')
-    list_editable = ('version')
-    fieldsets = (
-        (None, {'fields': ('version', 'created_at')}),
-    )
-    readonly_fields = ('created_at')
+admin.site.register(AppVersion)
 
 admin.site.site_header = 'AutoHandy'
 admin.site.site_title = 'AutoHandy'
