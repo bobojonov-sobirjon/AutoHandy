@@ -1858,6 +1858,13 @@ class MasterScheduleListBulkView(APIView):
 
     @extend_schema(
         summary='Расписание: массовое сохранение дней',
+        description=(
+            'Тело: `days` — **ровно** столько объектов, сколько задано в '
+            '`MASTER_SCHEDULE_MIN_COVERAGE_DAYS_DEFAULT` (по умолчанию 14). '
+            'Даты **любые** в рамках политики (не в прошлом, не дальше max при штрафе); '
+            'не обязаны идти подряд с сегодня (можно пропускать выходные). '
+            'Дубликаты дат в одном запросе запрещены.'
+        ),
         parameters=[
             OpenApiParameter(
                 name='master_id',
@@ -1878,11 +1885,7 @@ class MasterScheduleListBulkView(APIView):
         ser = MasterScheduleBulkSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        from apps.order.services.status_workflow import (
-            master_schedule_coverage_span_days,
-            master_schedule_missing_coverage_dates,
-            validate_master_schedule_day_date,
-        )
+        from apps.order.services.status_workflow import validate_master_schedule_day_date
 
         for day in ser.validated_data['days']:
             ok, err_msg = validate_master_schedule_day_date(master, day['date'])
@@ -1892,20 +1895,6 @@ class MasterScheduleListBulkView(APIView):
                 master=master,
                 date=day['date'],
                 defaults={'start_time': day['start_time'], 'end_time': day['end_time']},
-            )
-        missing = master_schedule_missing_coverage_dates(master)
-        if missing:
-            span = master_schedule_coverage_span_days(master)
-            return Response(
-                {
-                    'error': (
-                        f'Расписание должно покрывать {span} календарных дней подряд от сегодня '
-                        f'(рабочие часы на каждый день).'
-                    ),
-                    'missing_dates': [d.isoformat() for d in missing],
-                    'coverage_days_required': span,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
             )
         out = MasterScheduleDay.objects.filter(master=master).order_by('date')
         return Response(MasterScheduleDaySerializer(out, many=True).data, status=status.HTTP_201_CREATED)

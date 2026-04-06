@@ -948,6 +948,19 @@ class MasterScheduleDayWriteSerializer(serializers.Serializer):
 class MasterScheduleBulkSerializer(serializers.Serializer):
     days = MasterScheduleDayWriteSerializer(many=True)
 
+    def validate_days(self, value):
+        from django.conf import settings
+
+        required = int(getattr(settings, 'MASTER_SCHEDULE_MIN_COVERAGE_DAYS_DEFAULT', 14))
+        if len(value) != required:
+            raise serializers.ValidationError(
+                f'Exactly {required} day entries are required (received {len(value)}).'
+            )
+        dates = [item['date'] for item in value]
+        if len(dates) != len(set(dates)):
+            raise serializers.ValidationError('Each date must appear at most once.')
+        return value
+
 
 class MasterBusySlotSerializer(serializers.ModelSerializer):
     """
