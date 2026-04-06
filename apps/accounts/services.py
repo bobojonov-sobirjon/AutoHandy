@@ -221,7 +221,7 @@ class SMSService:
             logger.error(f"Failed to send email to {email}: {str(e)}")
             return {
                 'success': False,
-                'error': f'Ошибка отправки email: {str(e)}'
+                'error': f'Failed to send email: {str(e)}'
             }
     
     @staticmethod
@@ -600,3 +600,16 @@ class SMSService:
             
         except Exception as e:
             return {'success': False, 'error': str(e), 'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR}
+
+
+def upsert_user_device_for_login(user, device_token: str, device_type: str) -> None:
+    """
+    Create or update a device row for check-sms-code.
+    ``device_token`` is unique: the same token is reassigned to the current user on each login.
+    """
+    from .models import UserDevice
+
+    UserDevice.objects.update_or_create(
+        device_token=device_token,
+        defaults={'user': user, 'device_type': device_type},
+    )

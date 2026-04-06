@@ -212,11 +212,23 @@ class Order(models.Model):
         verbose_name='Parts purchase required',
         help_text='If true, master buys parts; client pays parts outside the app.',
     )
-    preferred_time = models.TextField(
+    preferred_date = models.DateField(
+        null=True,
         blank=True,
-        default='',
-        verbose_name='Preferred time',
-        help_text='Client preferred service time (free text)',
+        verbose_name='Preferred service date',
+        help_text='Standard orders: visit day chosen by client (with preferred_time_start).',
+    )
+    preferred_time_start = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name='Preferred time start',
+        help_text='Standard: client-chosen slot start (POST). End is set by master after accept (PATCH).',
+    )
+    preferred_time_end = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name='Preferred time end',
+        help_text='Set by assigned master via PATCH when status is accepted.',
     )
 
     class Meta:
@@ -235,6 +247,12 @@ class Order(models.Model):
 
         if self.longitude is not None and (self.longitude < -180 or self.longitude > 180):
             raise ValidationError({'longitude': 'Longitude must be between -180 and 180'})
+
+        if self.preferred_time_start and self.preferred_time_end:
+            if self.preferred_time_end <= self.preferred_time_start:
+                raise ValidationError(
+                    {'preferred_time_end': 'Must be after preferred_time_start.'}
+                )
 
     def save(self, *args, **kwargs):
         # Set expiration time automatically on create

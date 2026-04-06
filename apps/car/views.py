@@ -80,7 +80,7 @@ class CarDetailView(APIView):
     def get(self, request, pk):
         car = self.get_object(pk)
         if not car:
-            return Response({'error': 'Машина не найдена'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Car not found'}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = CarSerializer(car, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -103,7 +103,7 @@ class CarDetailView(APIView):
     def put(self, request, pk):
         car = self.get_object(pk)
         if not car:
-            return Response({'error': 'Машина не найдена'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Car not found'}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = CarWriteSerializer(car, data=request.data, context={'request': request})
         if serializer.is_valid():
@@ -127,7 +127,7 @@ class CarDetailView(APIView):
     def patch(self, request, pk):
         car = self.get_object(pk)
         if not car:
-            return Response({'error': 'Машина не найдена'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Car not found'}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = CarWriteSerializer(car, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
@@ -149,7 +149,7 @@ class CarDetailView(APIView):
     def delete(self, request, pk):
         car = self.get_object(pk)
         if not car:
-            return Response({'error': 'Машина не найдена'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Car not found'}, status=status.HTTP_404_NOT_FOUND)
 
         car.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

@@ -225,6 +225,21 @@ class MasterBusySlot(models.Model):
     date = models.DateField(verbose_name='Date', db_index=True)
     start_time = models.TimeField(verbose_name='Start time')
     end_time = models.TimeField(verbose_name='End time')
+    start_time_rest = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name='Rest start',
+        help_text='If set with time_range_rest, marks a daily break; start/end are derived. '
+        'Only for manual slots (no order).',
+    )
+    time_range_rest = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name='Rest duration (hours)',
+        help_text='Break length from start_time_rest (e.g. 1.00). Used for available-slots break_data.',
+    )
     order = models.OneToOneField(
         'order.Order',
         on_delete=models.CASCADE,
@@ -248,6 +263,26 @@ class MasterBusySlot(models.Model):
     def clean(self):
         if self.start_time and self.end_time and self.end_time <= self.start_time:
             raise ValidationError('end_time must be after start_time.')
+
+        if self.order_id:
+            if self.start_time_rest is not None or (
+                self.time_range_rest is not None and self.time_range_rest > 0
+            ):
+                raise ValidationError('Rest fields are not allowed on order-linked busy slots.')
+
+        if self.start_time_rest is not None:
+            if self.time_range_rest is None or self.time_range_rest <= 0:
+                raise ValidationError(
+                    {'time_range_rest': 'Set a positive duration when start_time_rest is set.'}
+                )
+        elif self.time_range_rest is not None and self.time_range_rest > 0:
+            raise ValidationError(
+                {'start_time_rest': 'Set start_time_rest when time_range_rest is set.'}
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f'{self.master_id} {self.date} {self.start_time}-{self.end_time}'

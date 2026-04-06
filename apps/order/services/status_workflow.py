@@ -237,13 +237,13 @@ def validate_master_schedule_day_date(master: Master, d: date_type) -> tuple[boo
     """Reject past dates and dates beyond cancellation-policy horizon (schedule / slots / busy)."""
     today = timezone.localdate()
     if d < today:
-        return False, 'Дата не может быть в прошлом.'
+        return False, 'Date cannot be in the past.'
     max_d = master_schedule_max_date(master)
     if max_d is not None and d > max_d:
         n = master_cancellations_this_month(master)
         return (
             False,
-            f'Из-за отмен заказов в этом месяце ({n}) даты допустимы не дальше {max_d.isoformat()}.',
+            f'Due to order cancellations this month ({n}), dates may not be later than {max_d.isoformat()}.',
         )
     return True, ''
 
@@ -254,12 +254,12 @@ def validate_master_cancel(order: Order, master: Master, reason: str | None) -> 
     Monthly cancellation count does not block cancel — it tightens schedule limits elsewhere.
     """
     if not reason:
-        return False, 'Укажите cancel_reason (причину отмены).'
+        return False, 'Provide cancel_reason (cancellation reason).'
     if reason == 'too_far':
-        return False, 'Причина «слишком далеко» недопустима.'
+        return False, 'The "too_far" cancellation reason is not allowed.'
     valid = {c[0] for c in MasterCancelReason.choices}
     if reason not in valid:
-        return False, f'Недопустимая причина. Допустимо: {", ".join(sorted(valid))}.'
+        return False, f'Invalid reason. Allowed: {", ".join(sorted(valid))}.'
     return True, ''
 
 

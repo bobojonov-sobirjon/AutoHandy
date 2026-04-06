@@ -23,6 +23,11 @@ urlpatterns = [
     path('<int:order_id>/cancel/', views.CancelOrderView.as_view(), name='cancel-order'),
     path('<int:order_id>/status/', views.UpdateOrderStatusView.as_view(), name='update-status'),
     path('<int:order_id>/accept/', views.AcceptOrderView.as_view(), name='accept-order'),
+    path(
+        '<int:order_id>/preferred-time/',
+        views.OrderMasterPreferredTimePatchView.as_view(),
+        name='order-master-preferred-time',
+    ),
     path('<int:order_id>/decline/', views.DeclineOrderView.as_view(), name='decline-order'),
     path('<int:order_id>/complete/', views.CompleteOrderView.as_view(), name='complete-order'),
     path(

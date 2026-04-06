@@ -139,8 +139,8 @@ class MasterProfileView(APIView):
         ],
         responses={
             201: MasterSerializer,
-            400: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': 'Ошибка валидации данных'}}},
-            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Нет доступа: нужна группа 'Master'"}}}
+            400: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': 'Validation error'}}},
+            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Access denied: 'Master' group required"}}}
         },
         tags=['Masters']
     )
@@ -266,20 +266,20 @@ class MasterListView(APIView):
                 else:
                     return Response(
                         {
-                            'error': 'Параметр category принимает только ID категории типа by_order '
-                            '(фильтр по навыкам мастера).'
+                            'error': 'The category parameter only accepts a by_order category ID '
+                            '(master skills filter).'
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
             except Category.DoesNotExist:
                 return Response(
-                    {'error': 'Категория не найдена'}, 
+                    {'error': 'Category not found'},
                     status=status.HTTP_404_NOT_FOUND
                 )
             except (ValueError, TypeError):
                 return Response(
-                    {'error': 'Неверный формат category ID'}, 
+                    {'error': 'Invalid category ID format'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
@@ -312,12 +312,12 @@ class MasterListView(APIView):
                 # Валидация координат
                 if not (-90 <= user_lat <= 90):
                     return Response(
-                        {'error': 'Широта должна быть между -90 и 90'}, 
+                        {'error': 'Latitude must be between -90 and 90'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 if not (-180 <= user_long <= 180):
                     return Response(
-                        {'error': 'Долгота должна быть между -180 и 180'}, 
+                        {'error': 'Longitude must be between -180 and 180'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
@@ -348,7 +348,7 @@ class MasterListView(APIView):
                 
             except (ValueError, TypeError):
                 return Response(
-                    {'error': 'Неверный формат координат или радиуса'}, 
+                    {'error': 'Invalid coordinate or radius format'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
@@ -422,7 +422,7 @@ class MasterDetailsView(APIView):
         """Только владелец мастерской может менять/удалять этот профиль."""
         if master.user_id != request.user.id:
             return Response(
-                {'detail': 'Вы можете изменять только свою мастерскую.'},
+                {'detail': 'You can only modify your own master profile.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
         return None
@@ -439,7 +439,7 @@ class MasterDetailsView(APIView):
         description="Получить подробную информацию о мастерской по ID. Доступно для всех пользователей (публичный доступ).",
         responses={
             200: MasterSerializer,
-            404: {'type': 'object', 'properties': {'error': {'type': 'string', 'example': 'Мастер не найден'}}}
+            404: {'type': 'object', 'properties': {'error': {'type': 'string', 'example': 'Master not found'}}}
         },
         tags=['Masters']
     )
@@ -448,7 +448,7 @@ class MasterDetailsView(APIView):
         master = self.get_object(master_id)
         if not master:
             return Response(
-                {'error': 'Мастер не найден'}, 
+                {'error': 'Master not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -491,7 +491,7 @@ class MasterDetailsView(APIView):
             200: MasterSerializer,
             400: {'type': 'object', 'properties': {'detail': {'type': 'string'}}},
             404: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
-            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Нет доступа: группа Master и только своя мастерская"}}}
+            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Access denied: Master group and own profile only"}}}
         },
         tags=['Masters']
     )
@@ -500,7 +500,7 @@ class MasterDetailsView(APIView):
         master = self.get_object(master_id)
         if not master:
             return Response(
-                {'error': 'Мастер не найден'}, 
+                {'error': 'Master not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         denied = self._master_write_forbidden(request, master)
@@ -538,9 +538,9 @@ class MasterDetailsView(APIView):
         request=MasterUpdateSerializer,
         responses={
             200: MasterSerializer,
-            400: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': 'Ошибка валидации данных'}}},
-            404: {'type': 'object', 'properties': {'error': {'type': 'string', 'example': 'Мастер не найден'}}},
-            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Нет доступа: группа Master и только своя мастерская"}}}
+            400: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': 'Validation error'}}},
+            404: {'type': 'object', 'properties': {'error': {'type': 'string', 'example': 'Master not found'}}},
+            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Access denied: Master group and own profile only"}}}
         },
         tags=['Masters']
     )
@@ -549,7 +549,7 @@ class MasterDetailsView(APIView):
         master = self.get_object(master_id)
         if not master:
             return Response(
-                {'error': 'Мастер не найден'}, 
+                {'error': 'Master not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         denied = self._master_write_forbidden(request, master)
@@ -572,9 +572,9 @@ class MasterDetailsView(APIView):
         **ВНИМАНИЕ**: Это действие удалит мастерскую и все связанные с ней данные (услуги, изображения и т.д.)
         """,
         responses={
-            204: {'description': 'Мастер успешно удален'},
-            404: {'type': 'object', 'properties': {'error': {'type': 'string', 'example': 'Мастер не найден'}}},
-            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Нет доступа: группа Master и только своя мастерская"}}}
+            204: {'description': 'Master deleted successfully'},
+            404: {'type': 'object', 'properties': {'error': {'type': 'string', 'example': 'Master not found'}}},
+            403: {'type': 'object', 'properties': {'detail': {'type': 'string', 'example': "Access denied: Master group and own profile only"}}}
         },
         tags=['Masters']
     )
@@ -583,7 +583,7 @@ class MasterDetailsView(APIView):
         master = self.get_object(master_id)
         if not master:
             return Response(
-                {'error': 'Мастер не найден'}, 
+                {'error': 'Master not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         denied = self._master_write_forbidden(request, master)
@@ -666,7 +666,7 @@ JWT, группа **Master**; доступ только к **своей** мас
                     }
                 },
             },
-            404: {'description': 'Мастер не найден или не ваш'},
+            404: {'description': 'Master not found or not yours'},
         },
         tags=['Masters'],
     )
@@ -818,7 +818,7 @@ class MasterServiceView(APIView):
         master = self.get_master()
         if not master:
             return Response(
-                {'error': 'Профиль мастера не найден'}, 
+                {'error': 'Master profile not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -863,7 +863,7 @@ class MasterServiceDetailView(APIView):
         service = self.get_object(service_id)
         if not service:
             return Response(
-                {'error': 'Услуга не найдена'}, 
+                {'error': 'Service not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -886,7 +886,7 @@ class MasterServiceDetailView(APIView):
         service = self.get_object(service_id)
         if not service:
             return Response(
-                {'error': 'Услуга не найдена'}, 
+                {'error': 'Service not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -910,7 +910,7 @@ class MasterServiceDetailView(APIView):
         service = self.get_object(service_id)
         if not service:
             return Response(
-                {'error': 'Услуга не найдена'}, 
+                {'error': 'Service not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -978,7 +978,7 @@ class MasterServiceItemsDetailView(APIView):
         item = self.get_object(item_id)
         if not item:
             return Response(
-                {'error': 'Элемент не найден'}, 
+                {'error': 'Item not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -1001,7 +1001,7 @@ class MasterServiceItemsDetailView(APIView):
         item = self.get_object(item_id)
         if not item:
             return Response(
-                {'error': 'Элемент не найден'}, 
+                {'error': 'Item not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -1025,7 +1025,7 @@ class MasterServiceItemsDetailView(APIView):
         item = self.get_object(item_id)
         if not item:
             return Response(
-                {'error': 'Элемент не найден'}, 
+                {'error': 'Item not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -1057,7 +1057,7 @@ class MasterServicesByMasterView(APIView):
             return Response(serializer.data, status=status.HTTP_200_OK)
         except Master.DoesNotExist:
             return Response(
-                {'error': 'Мастер не найден'}, 
+                {'error': 'Master not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
@@ -1397,7 +1397,7 @@ class AddServiceItemsView(APIView):
             master = Master.objects.get(id=master_id)
         except Master.DoesNotExist:
             return Response(
-                {'error': 'Мастер не найден'},
+                {'error': 'Master not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -1456,7 +1456,7 @@ class UpdateServiceItemView(APIView):
         item = self.get_object(item_id)
         if not item:
             return Response(
-                {'error': 'Услуга не найдена'},
+                {'error': 'Service not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -1495,7 +1495,7 @@ class DeleteServiceItemView(APIView):
         item = self.get_object(item_id)
         if not item:
             return Response(
-                {'error': 'Услуга не найдена'},
+                {'error': 'Service not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -1599,12 +1599,12 @@ class AddMasterImagesView(APIView):
                 data['images'] = images
             else:
                 return Response(
-                    {'error': 'Не загружены изображения'},
+                    {'error': 'No images uploaded'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         else:
             return Response(
-                {'error': 'Не загружены изображения'},
+                {'error': 'No images uploaded'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -1620,7 +1620,7 @@ class AddMasterImagesView(APIView):
             master = Master.objects.get(id=master_id)
         except Master.DoesNotExist:
             return Response(
-                {'error': 'Мастер не найден'},
+                {'error': 'Master not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -1713,7 +1713,7 @@ class UpdateMasterImageView(APIView):
         image_obj = self.get_object(image_id)
         if not image_obj:
             return Response(
-                {'error': 'Изображение не найдено'},
+                {'error': 'Image not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -1765,7 +1765,7 @@ class DeleteMasterImageView(APIView):
         """,
         responses={
             204: {'description': 'Изображение успешно удалено'},
-            404: {'type': 'object', 'properties': {'error': {'type': 'string', 'example': 'Изображение не найдено'}}}
+            404: {'type': 'object', 'properties': {'error': {'type': 'string', 'example': 'Image not found'}}}
         },
         tags=['Master Images']
     )
@@ -1774,7 +1774,7 @@ class DeleteMasterImageView(APIView):
         image = self.get_object(image_id)
         if not image:
             return Response(
-                {'error': 'Изображение не найдено'},
+                {'error': 'Image not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -1799,13 +1799,13 @@ def _resolve_schedule_master(request):
     if mid in (None, ''):
         if not qs.exists():
             return None, Response(
-                {'error': 'Профиль мастера не найден'},
+                {'error': 'Master profile not found'},
                 status=status.HTTP_404_NOT_FOUND,
             )
         if qs.count() > 1:
             return None, Response(
                 {
-                    'error': 'Укажите master_id в query (несколько мастерских).',
+                    'error': 'Provide master_id in the query (multiple master profiles).',
                     'master_ids': list(qs.values_list('id', flat=True)),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -1815,7 +1815,7 @@ def _resolve_schedule_master(request):
         return qs.get(pk=int(mid)), None
     except (ValueError, TypeError, Master.DoesNotExist):
         return None, Response(
-            {'error': 'Мастер не найден или не ваш'},
+            {'error': 'Master not found or not yours'},
             status=status.HTTP_404_NOT_FOUND,
         )
 
@@ -1927,7 +1927,7 @@ class MasterScheduleDayDetailView(APIView):
     def delete(self, request, pk):
         row = self.get_object(pk, request.user)
         if not row:
-            return Response({'error': 'Не найдено'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
         row.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1940,7 +1940,7 @@ class MasterScheduleDayDetailView(APIView):
     def patch(self, request, pk):
         row = self.get_object(pk, request.user)
         if not row:
-            return Response({'error': 'Не найдено'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
         ser = MasterScheduleDaySerializer(row, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -1956,13 +1956,28 @@ class MasterScheduleDayDetailView(APIView):
 
 
 class MasterBusySlotListCreateView(APIView):
-    """Ручная занятость (без заказа) или просмотр своих слотов с заказами."""
+    """Manual busy blocks (no order) or list own slots including order-linked rows."""
 
     permission_classes = [IsMasterGroup]
 
     @extend_schema(
-        summary='Список занятых интервалов',
+        summary='Busy intervals or one-day calendar',
+        description=(
+            '**date=YYYY-MM-DD** — same shape as `GET /api/order/available-slots/`: '
+            '`working_hours`, `break_data`, `slots`. '
+            'If a manual busy row on that day has `start_time_rest` + `time_range_rest`, '
+            '`working_hours` and slot bounds use that row’s `start_time`–`end_time` and '
+            '`schedule_source` is `master_busy_slot`; otherwise schedule / `working_time`. '
+            'Without **date** — flat list of BusySlot rows (filters date_from/date_to/manual_only).'
+        ),
         parameters=[
+            OpenApiParameter(
+                name='date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='If set — one day: slots + break_data (like available-slots).',
+            ),
             OpenApiParameter(name='date_from', type=OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False),
             OpenApiParameter(name='date_to', type=OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False),
             OpenApiParameter(name='manual_only', type=OpenApiTypes.BOOL, location=OpenApiParameter.QUERY, required=False),
@@ -1971,7 +1986,7 @@ class MasterBusySlotListCreateView(APIView):
                 type=int,
                 location=OpenApiParameter.QUERY,
                 required=False,
-                description='Несколько мастерских — ID мастерской',
+                description='Multiple workshops — master profile ID',
             ),
         ],
         responses={200: MasterBusySlotSerializer(many=True)},
@@ -1981,6 +1996,25 @@ class MasterBusySlotListCreateView(APIView):
         master, err = _resolve_schedule_master(request)
         if err:
             return err
+
+        date_str = request.query_params.get('date')
+        if date_str:
+            from datetime import datetime
+
+            from apps.master.services.slots import build_master_day_slots_payload
+
+            try:
+                check_date = datetime.strptime(date_str.strip(), '%Y-%m-%d').date()
+            except ValueError:
+                return Response(
+                    {'error': 'Invalid date format. Use YYYY-MM-DD (e.g. 2026-04-06)'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            payload, err_msg = build_master_day_slots_payload(master, check_date)
+            if err_msg:
+                return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(payload)
+
         qs = MasterBusySlot.objects.filter(master=master).order_by('date', 'start_time')
         df = request.query_params.get('date_from')
         dt = request.query_params.get('date_to')
@@ -1994,14 +2028,14 @@ class MasterBusySlotListCreateView(APIView):
         return Response(data)
 
     @extend_schema(
-        summary='Добавить ручной занятый интервал',
+        summary='Add manual busy interval (or break: start_time_rest + time_range_rest)',
         parameters=[
             OpenApiParameter(
                 name='master_id',
                 type=int,
                 location=OpenApiParameter.QUERY,
                 required=False,
-                description='Несколько мастерских — ID мастерской',
+                description='Multiple workshops — master profile ID',
             ),
         ],
         request=MasterBusySlotSerializer,
@@ -2012,7 +2046,7 @@ class MasterBusySlotListCreateView(APIView):
         master, err = _resolve_schedule_master(request)
         if err:
             return err
-        ser = MasterBusySlotSerializer(data=request.data)
+        ser = MasterBusySlotSerializer(data=request.data, context={'master': master})
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         from apps.order.services.status_workflow import validate_master_schedule_day_date
@@ -2020,14 +2054,7 @@ class MasterBusySlotListCreateView(APIView):
         ok, err_msg = validate_master_schedule_day_date(master, ser.validated_data['date'])
         if not ok:
             return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
-        slot = MasterBusySlot.objects.create(
-            master=master,
-            date=ser.validated_data['date'],
-            start_time=ser.validated_data['start_time'],
-            end_time=ser.validated_data['end_time'],
-            reason=ser.validated_data.get('reason', ''),
-            order=None,
-        )
+        slot = ser.save()
         return Response(MasterBusySlotSerializer(slot).data, status=status.HTTP_201_CREATED)
 
 
@@ -2044,7 +2071,13 @@ class MasterBusySlotDetailView(APIView):
         return slot
 
     @extend_schema(
-        summary='Изменить ручной слот (заказы нельзя менять здесь)',
+        summary='Update manual busy slot (order-linked slots cannot be edited here)',
+        description=(
+            '**Partial update:** only JSON fields you send are changed. '
+            'Updating **start_time** / **end_time** does not modify **start_time_rest** / **time_range_rest**, '
+            'and the opposite also holds. '
+            'Day **working_hours** still come from schedule / `working_time`.'
+        ),
         request=MasterBusySlotSerializer,
         responses={200: MasterBusySlotSerializer},
         tags=['Master Schedule'],
@@ -2052,13 +2085,13 @@ class MasterBusySlotDetailView(APIView):
     def patch(self, request, pk):
         slot = self.get_object(pk, request.user)
         if not slot:
-            return Response({'error': 'Не найдено'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
         if slot.order_id:
             return Response(
-                {'error': 'Слот привязан к заказу; измените заказ или отмените его.'},
+                {'error': 'This slot is linked to an order; update or cancel the order first.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        ser = MasterBusySlotSerializer(slot, data=request.data, partial=True)
+        ser = MasterBusySlotSerializer(slot, data=request.data, partial=True, context={'master': slot.master})
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         from apps.order.services.status_workflow import validate_master_schedule_day_date
@@ -2069,15 +2102,16 @@ class MasterBusySlotDetailView(APIView):
         if not ok:
             return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
         ser.save()
+        slot.refresh_from_db()
         return Response(MasterBusySlotSerializer(slot).data)
 
-    @extend_schema(summary='Удалить ручной слот', responses={204: None}, tags=['Master Schedule'])
+    @extend_schema(summary='Delete manual busy slot', responses={204: None}, tags=['Master Schedule'])
     def delete(self, request, pk):
         slot = self.get_object(pk, request.user)
         if not slot:
-            return Response({'error': 'Не найдено'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
         if slot.order_id:
-            return Response({'error': 'Нельзя удалить слот заказа'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Cannot delete an order-linked busy slot'}, status=status.HTTP_400_BAD_REQUEST)
         slot.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 

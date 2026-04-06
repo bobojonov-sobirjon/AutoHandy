@@ -167,7 +167,11 @@ class CheckSMSCodeView(APIView):
     
     @extend_schema(
         summary="Проверка SMS кода",
-        description="Проверка SMS кода и получение JWT токена. Параметр 'role' (Driver, Master или Owner) обязателен.",
+        description=(
+            "Проверка SMS кода и получение JWT токена. Параметр 'role' (Driver, Master или Owner) обязателен. "
+            "Опционально: **device_token** и **device_type** (например ios/android/web) — только в этом endpoint; "
+            "создают или обновляют запись устройства для пользователя."
+        ),
         request=SMSVerificationSerializer,
         responses={
             200: TokenResponseSerializer,
@@ -209,6 +213,13 @@ class CheckSMSCodeView(APIView):
         result = SMSService.verify_sms_code(identifier, sms_code, identifier_type, role)
         
         if result['success']:
+            device_token = serializer.validated_data.get('device_token')
+            device_type = serializer.validated_data.get('device_type')
+            if device_token and device_type:
+                from apps.accounts.services import upsert_user_device_for_login
+
+                upsert_user_device_for_login(result['user'], device_token, device_type)
+
             # Сериализация данных пользователя
             user_serializer = UserSerializer(result['user'], context={'request': request})
             
@@ -661,7 +672,7 @@ class AppVersionDetailView(APIView):
             row = AppVersion.objects.get(pk=app_version_id)
         except AppVersion.DoesNotExist:
             return Response(
-                {"success": False, "error": "Версия не найдена"},
+                {"success": False, "error": "Version not found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
         return Response(
@@ -734,7 +745,7 @@ GET /api/auth/user/10/
         except CustomUser.DoesNotExist:
             return Response({
                 'success': False,
-                'error': 'Пользователь не найден'
+                'error': 'User not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
         serializer = UserDetailsSerializer(user, context={'request': request})

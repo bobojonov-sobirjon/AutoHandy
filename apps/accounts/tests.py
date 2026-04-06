@@ -47,14 +47,14 @@ class LoginViewTestCase(APITestCase):
             'status_code': status.HTTP_200_OK
         }
         
-        data = {'identifier': '998901234567'}
+        data = {'identifier': '998901234567', 'role': 'Driver'}
         response = self.client.post(self.login_url, data, format='json')
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['success'])
         self.assertEqual(response.data['identifier_type'], 'phone')
         self.assertTrue(response.data['user_exists'])
-        mock_send_sms.assert_called_once_with('998901234567', 'phone')
+        mock_send_sms.assert_called_once_with('998901234567', 'phone', 'Driver')
     
     @patch('apps.accounts.services.SMSService.send_sms_code')
     def test_login_with_email(self, mock_send_sms):
@@ -69,14 +69,14 @@ class LoginViewTestCase(APITestCase):
             'status_code': status.HTTP_200_OK
         }
         
-        data = {'identifier': 'test@example.com'}
+        data = {'identifier': 'test@example.com', 'role': 'Driver'}
         response = self.client.post(self.login_url, data, format='json')
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['success'])
         self.assertEqual(response.data['identifier_type'], 'email')
         self.assertTrue(response.data['user_exists'])
-        mock_send_sms.assert_called_once_with('test@example.com', 'email')
+        mock_send_sms.assert_called_once_with('test@example.com', 'email', 'Driver')
     
     def test_login_with_invalid_identifier(self):
         """Тест с неверным идентификатором"""
@@ -129,13 +129,14 @@ class CheckSMSCodeViewTestCase(APITestCase):
         
         data = {
             'identifier': '998901234567',
-            'sms_code': '1234'
+            'sms_code': '1234',
+            'role': 'Driver',
         }
         response = self.client.post(self.check_sms_url, data, format='json')
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['success'])
-        mock_verify_sms.assert_called_once_with('998901234567', '1234', 'phone')
+        mock_verify_sms.assert_called_once_with('998901234567', '1234', 'phone', 'Driver')
     
     @patch('apps.accounts.services.SMSService.verify_sms_code')
     def test_verify_sms_code_with_email(self, mock_verify_sms):
@@ -154,13 +155,14 @@ class CheckSMSCodeViewTestCase(APITestCase):
         
         data = {
             'identifier': 'test@example.com',
-            'sms_code': '1234'
+            'sms_code': '1234',
+            'role': 'Driver',
         }
         response = self.client.post(self.check_sms_url, data, format='json')
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['success'])
-        mock_verify_sms.assert_called_once_with('test@example.com', '1234', 'email')
+        mock_verify_sms.assert_called_once_with('test@example.com', '1234', 'email', 'Driver')
     
     def test_verify_sms_code_with_invalid_data(self):
         """Тест с неверными данными"""
@@ -182,14 +184,14 @@ class IdentifierSerializerTestCase(TestCase):
         from .serializers import IdentifierSerializer
         
         # Тест с +998
-        data = {'identifier': '+998901234567'}
+        data = {'identifier': '+998901234567', 'role': 'Driver'}
         serializer = IdentifierSerializer(data=data)
         self.assertTrue(serializer.is_valid())
         self.assertEqual(serializer.validated_data['identifier']['type'], 'phone')
         self.assertEqual(serializer.validated_data['identifier']['value'], '998901234567')
         
         # Тест без +
-        data = {'identifier': '998901234567'}
+        data = {'identifier': '998901234567', 'role': 'Driver'}
         serializer = IdentifierSerializer(data=data)
         self.assertTrue(serializer.is_valid())
         self.assertEqual(serializer.validated_data['identifier']['type'], 'phone')
@@ -200,14 +202,14 @@ class IdentifierSerializerTestCase(TestCase):
         from .serializers import IdentifierSerializer
         
         # Тест с +7
-        data = {'identifier': '+79123456789'}
+        data = {'identifier': '+79123456789', 'role': 'Driver'}
         serializer = IdentifierSerializer(data=data)
         self.assertTrue(serializer.is_valid())
         self.assertEqual(serializer.validated_data['identifier']['type'], 'phone')
         self.assertEqual(serializer.validated_data['identifier']['value'], '79123456789')
         
         # Тест с 8
-        data = {'identifier': '89123456789'}
+        data = {'identifier': '89123456789', 'role': 'Driver'}
         serializer = IdentifierSerializer(data=data)
         self.assertTrue(serializer.is_valid())
         self.assertEqual(serializer.validated_data['identifier']['type'], 'phone')
@@ -217,7 +219,7 @@ class IdentifierSerializerTestCase(TestCase):
         """Тест валидации email"""
         from .serializers import IdentifierSerializer
         
-        data = {'identifier': 'test@example.com'}
+        data = {'identifier': 'test@example.com', 'role': 'Driver'}
         serializer = IdentifierSerializer(data=data)
         self.assertTrue(serializer.is_valid())
         self.assertEqual(serializer.validated_data['identifier']['type'], 'email')

@@ -51,6 +51,7 @@ from apps.order.api.payload import attach_order_images_from_request, normalize_o
 from apps.order.api.serializers import (
     OrderSerializer,
     OrderCreateSerializer,
+    OrderMasterPreferredTimePatchSerializer,
     OrderUpdateSerializer,
     AddServicesToOrderSerializer,
     AddMasterToOrderSerializer,
@@ -354,8 +355,8 @@ JWT обязателен.
                 return Response(
                     {
                         'error': (
-                            'Укажите lat и long в query (или latitude / longitude) '
-                            'либо задайте latitude и longitude в профиле пользователя.'
+                            'Provide lat and long in the query (or latitude / longitude), '
+                            'or set latitude and longitude on the user profile.'
                         ),
                         'code': 'location_required',
                     },
@@ -439,7 +440,7 @@ This endpoint creates a **standard** (non-emergency) order when the client:
 - Selects **master/workshop** in advance
 - Sends **location** and **service** details (cars, categories)
 
-There is **no visit date or time slot** on the order (per product spec). Use free-text **preferred_time** on the user/profile side if the app needs to convey timing informally.
+**Preferred time (standard):** send **`preferred_date`** + **`preferred_time_start`** together (both or neither). Do **not** send **`preferred_time_end`** on create — the **assigned master** sets it after **accept** via `PATCH /api/order/<order_id>/preferred-time/`.
 
 ## Content types
 
@@ -460,11 +461,12 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
 ## Typical payload (validated server-side; missing fields → 400)
 
 - **master_id**, **text**, **location**, **latitude**, **longitude**, **car_list**, **category_list**
-- Optional: **parts_purchase_required**, **images** (multipart)
+- Optional: **preferred_date** + **preferred_time_start** (pair), **parts_purchase_required**, **images** (multipart)
 
 ## Validation
 
 - Order coordinates must fall within the selected master’s **acceptance zone** (map pin + radius).
+- If **preferred_date** + **preferred_time_start** are sent: that instant must not fall inside another **accepted** standard order’s `[preferred_time_start, preferred_time_end]` for the same master and date, nor inside a **MasterBusySlot** without `order` (rest or manual block) on that date.
         """,
         tags=[STAG_ORDER_DRIVER_CREATE],
         request={
@@ -484,6 +486,8 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
                     'longitude': {'type': 'number', 'description': 'Workshop longitude', 'example': 69.2797},
                     'car_list': {'type': 'array', 'items': {'type': 'integer'}, 'description': 'List of car IDs', 'example': [2]},
                     'category_list': {'type': 'array', 'items': {'type': 'integer'}, 'description': 'List of category IDs', 'example': [1]},
+                    'preferred_date': {'type': 'string', 'format': 'date', 'description': 'With preferred_time_start only'},
+                    'preferred_time_start': {'type': 'string', 'format': 'time', 'description': 'With preferred_date only'},
                     'parts_purchase_required': {'type': 'boolean', 'default': False},
                 },
             },
@@ -503,6 +507,8 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
                         'type': 'string',
                         'description': 'JSON array as string e.g. [5] or comma-separated (parsed server-side)',
                     },
+                    'preferred_date': {'type': 'string', 'format': 'date'},
+                    'preferred_time_start': {'type': 'string', 'format': 'time'},
                     'parts_purchase_required': {'type': 'boolean', 'default': False},
                     'images': {'type': 'array', 'items': {'type': 'string', 'format': 'binary'}},
                 },
@@ -684,7 +690,7 @@ Do NOT use for **planned work** (use `/api/order/standard/`).
                         'examples': {
                             'sos_category_by_order': {
                                 'summary': 'SOS without master: need by_order category',
-                                'value': {'category_list': ['Для авто-SOS выберите хотя бы одну услугу (категория by_order).']}
+                                'value': {'category_list': ['For car SOS, select at least one by_order service category.']}
                             },
                             'missing_location': {
                                 'summary': 'Location not specified',
@@ -727,7 +733,10 @@ class AvailableTimeSlotsView(APIView):
         description="""
 # Available time slots
 
-Returns a list of time slots (every 2 hours) for booking with a master on a given date.
+Returns time slots for booking with a master on a given date.
+**Unavailable** rows use **exact** busy start/end (accepted standard orders with preferred times,
+plus manual `MasterBusySlot`); overlapping busy is merged. **Available** rows fill the rest of the
+work day (excluding **rest** / `break_data`) using hour-aligned free intervals.
 
 ## Required parameters
 
@@ -736,7 +745,9 @@ Returns a list of time slots (every 2 hours) for booking with a master on a give
 
 ## Response format
 
-Each slot has: **start**, **end** (HH:MM), **available** (true/false), **order_id** (if occupied).
+Each row: **start**, **end** (HH:MM), **available** (boolean). **order_id** may appear on a single-hour
+unavailable row when only one order maps to it; merged busy spans omit it.
+**break_data** from a **busy-slot** row with ``start_time_rest`` + ``time_range_rest`` (one per day); null if none.
         """,
         tags=[STAG_ORDER_DRIVER_SLOTS],
         parameters=[
@@ -765,23 +776,15 @@ Each slot has: **start**, **end** (HH:MM), **available** (true/false), **order_i
                             'master_id': 5,
                             'master_name': 'Auto Service',
                             'working_hours': '09:00-18:00',
+                            'break_data': {
+                                'start_time_rest': '13:00',
+                                'end_time_rest': '14:00',
+                                'time_range_rest': '1.00',
+                            },
                             'slots': [
-                                {
-                                    'start': '09:00',
-                                    'end': '11:00',
-                                    'available': True
-                                },
-                                {
-                                    'start': '11:00',
-                                    'end': '13:00',
-                                    'available': False,
-                                    'order_id': 123
-                                },
-                                {
-                                    'start': '13:00',
-                                    'end': '15:00',
-                                    'available': True
-                                }
+                                {'start': '09:00', 'end': '10:00', 'available': True},
+                                {'start': '10:00', 'end': '12:00', 'available': False},
+                                {'start': '14:00', 'end': '15:00', 'available': True},
                             ]
                         }
                     }
@@ -816,7 +819,7 @@ Each slot has: **start**, **end** (HH:MM), **available** (true/false), **order_i
     )
     def get(self, request):
         """Get available time slots"""
-        from datetime import datetime, timedelta, time
+        from datetime import datetime
 
         # Get parameters
         master_id = request.query_params.get('master_id')
@@ -847,73 +850,12 @@ Each slot has: **start**, **end** (HH:MM), **available** (true/false), **order_i
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        from apps.order.services.status_workflow import validate_master_schedule_day_date
+        from apps.master.services.slots import build_master_day_slots_payload
 
-        ok, err_msg = validate_master_schedule_day_date(master, check_date)
-        if not ok:
+        payload, err_msg = build_master_day_slots_payload(master, check_date)
+        if err_msg:
             return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
-
-        from apps.master.models import MasterBusySlot, MasterScheduleDay
-
-        day_row = MasterScheduleDay.objects.filter(master=master, date=check_date).first()
-        schedule_source = 'master_schedule_day' if day_row else 'working_time_fallback'
-        if day_row:
-            start_hour, start_minute = day_row.start_time.hour, day_row.start_time.minute
-            end_hour, end_minute = day_row.end_time.hour, day_row.end_time.minute
-            working_hours_display = (
-                f'{day_row.start_time.strftime("%H:%M")}-{day_row.end_time.strftime("%H:%M")}'
-            )
-        else:
-            working_time = master.working_time or '09:00-18:00'
-            working_hours_display = working_time
-            try:
-                start_time_str, end_time_str = working_time.split('-')
-                start_hour, start_minute = map(int, start_time_str.strip().split(':'))
-                end_hour, end_minute = map(int, end_time_str.strip().split(':'))
-            except Exception:
-                start_hour, start_minute = 9, 0
-                end_hour, end_minute = 18, 0
-
-        slots = []
-        current_hour = start_hour
-        current_minute = start_minute
-        while current_hour < end_hour:
-            slot_start = time(current_hour, current_minute)
-            next_hour = current_hour + 2
-            next_minute = current_minute
-            if next_hour > end_hour or (next_hour == end_hour and next_minute > end_minute):
-                break
-            slot_end = time(next_hour, next_minute)
-            slots.append({
-                'start': slot_start.strftime('%H:%M'),
-                'end': slot_end.strftime('%H:%M'),
-            })
-            current_hour = next_hour
-            current_minute = next_minute
-
-        busy_qs = MasterBusySlot.objects.filter(master=master, date=check_date)
-        busy_list = list(busy_qs)
-
-        for slot in slots:
-            slot_start_time = datetime.strptime(slot['start'], '%H:%M').time()
-            slot_end_time = datetime.strptime(slot['end'], '%H:%M').time()
-            slot['available'] = True
-            slot.pop('order_id', None)
-            for block in busy_list:
-                if block.start_time < slot_end_time and block.end_time > slot_start_time:
-                    slot['available'] = False
-                    if block.order_id:
-                        slot['order_id'] = block.order_id
-                    break
-
-        return Response({
-            'date': date_str,
-            'master_id': master.id,
-            'master_name': master.user.get_full_name() or master.user.phone_number,
-            'working_hours': working_hours_display,
-            'schedule_source': schedule_source,
-            'slots': slots,
-        })
+        return Response(payload)
 
 
 class OrderListCreateView(APIView):
@@ -1500,12 +1442,12 @@ GET /api/order/by-master/?order_type=standard&status=pending
             master = request.user.master_profiles.first()
             if not master:
                 return Response(
-                    {'error': 'Пользователь не является мастером'}, 
+                    {'error': 'User is not a master'},
                     status=status.HTTP_403_FORBIDDEN
                 )
         except AttributeError:
             return Response(
-                {'error': 'Пользователь не является мастером'}, 
+                {'error': 'User is not a master'},
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -1681,9 +1623,9 @@ class UpdateOrderStatusView(APIView):
 
         new_status = request.data.get('status')
         if not new_status:
-            return Response({'error': 'Статус обязателен'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Status is required'}, status=status.HTTP_400_BAD_REQUEST)
         if new_status not in [c[0] for c in OrderStatus.choices]:
-            return Response({'error': 'Недопустимый статус'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
 
         master = request.user.master_profiles.first()
         is_assigned_master = bool(master and order.master_id == master.id)
@@ -1692,7 +1634,7 @@ class UpdateOrderStatusView(APIView):
 
         if new_status in (OrderStatus.COMPLETED, OrderStatus.REJECTED, OrderStatus.PENDING):
             return Response(
-                {'error': 'Используйте /accept/, /decline/ или /complete/ для этих статусов.'},
+                {'error': 'Use /accept/, /decline/, or /complete/ for these statuses.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -1734,11 +1676,11 @@ class UpdateOrderStatusView(APIView):
                 order.save()
                 return Response(OrderSerializer(order, context={'request': request}).data)
 
-            return Response({'error': 'Нет прав на отмену'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'error': 'Not allowed to cancel'}, status=status.HTTP_403_FORBIDDEN)
 
         if not is_assigned_master:
             return Response(
-                {'error': 'Менять рабочий статус может только назначенный мастер.'},
+                {'error': 'Only the assigned master can change workflow status.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -1746,10 +1688,10 @@ class UpdateOrderStatusView(APIView):
             est, em, eta_err = resolve_on_the_way_eta(request.data, now)
             if eta_err:
                 eta_messages = {
-                    'invalid_estimated_arrival_at': 'Некорректный estimated_arrival_at (ожидается ISO datetime).',
-                    'estimated_arrival_in_past': 'estimated_arrival_at не может быть раньше текущего момента.',
-                    'estimated_arrival_too_far': 'Слишком большой интервал до прибытия (см. ORDER_ETA_MAX_MINUTES).',
-                    'invalid_eta_minutes': 'eta_minutes: укажите целое число от 1 до ORDER_ETA_MAX_MINUTES.',
+                    'invalid_estimated_arrival_at': 'Invalid estimated_arrival_at (expected ISO datetime).',
+                    'estimated_arrival_in_past': 'estimated_arrival_at cannot be in the past.',
+                    'estimated_arrival_too_far': 'Arrival time is too far ahead (see ORDER_ETA_MAX_MINUTES).',
+                    'invalid_eta_minutes': 'eta_minutes: provide an integer from 1 to ORDER_ETA_MAX_MINUTES.',
                 }
                 return Response(
                     {'error': eta_messages.get(eta_err, eta_err)},
@@ -1796,28 +1738,28 @@ class UpdateOrderStatusView(APIView):
         if order.status == OrderStatus.ARRIVED and new_status == OrderStatus.IN_PROGRESS:
             if order.latitude is None or order.longitude is None:
                 return Response(
-                    {'error': 'У заказа нет координат клиента — нельзя проверить дистанцию.'},
+                    {'error': 'Order has no client coordinates; distance cannot be verified.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             mlat, mlon, coord_err = resolve_master_coordinates_for_start_job(master, request.data)
             if coord_err == 'partial_coords':
                 return Response(
                     {
-                        'error': 'Укажите оба поля latitude и longitude или не передавайте их '
-                        '(тогда берутся координаты из профиля мастера / пользователя).',
+                        'error': 'Send both latitude and longitude, or omit both '
+                        '(then master/user profile coordinates are used).',
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if coord_err == 'invalid_coords':
                 return Response(
-                    {'error': 'Некорректные latitude или longitude в запросе.'},
+                    {'error': 'Invalid latitude or longitude in the request.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if coord_err == 'no_master_coords' or mlat is None or mlon is None:
                 return Response(
                     {
-                        'error': 'Нет координат мастера: задайте latitude/longitude в запросе '
-                        'или заполните широту/долготу в профиле мастера или аккаунта.',
+                        'error': 'No master coordinates: pass latitude/longitude in the request '
+                        'or set them on the master or user profile.',
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
@@ -1831,8 +1773,8 @@ class UpdateOrderStatusView(APIView):
             if dist_m > max_m:
                 return Response(
                     {
-                        'error': f'Слишком далеко от клиента ({round(dist_m, 1)} м). '
-                        f'Максимум {max_m} м после статуса «Прибыл».',
+                        'error': f'Too far from the client ({round(dist_m, 1)} m). '
+                        f'Maximum {max_m} m after status arrived.',
                         'distance_meters': round(dist_m, 1),
                     },
                     status=status.HTTP_400_BAD_REQUEST,
@@ -1853,7 +1795,7 @@ class UpdateOrderStatusView(APIView):
             return Response(OrderSerializer(order, context={'request': request}).data)
 
         return Response(
-            {'error': f'Недопустимый переход {order.status} → {new_status}.'},
+            {'error': f'Invalid transition {order.status} → {new_status}.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -1942,7 +1884,7 @@ class CancelOrderView(APIView):
                 }
             )
 
-        return Response({'error': 'Нет прав на отмену'}, status=status.HTTP_403_FORBIDDEN)
+        return Response({'error': 'Not allowed to cancel'}, status=status.HTTP_403_FORBIDDEN)
 
 
 class AcceptOrderView(APIView):
@@ -1984,13 +1926,13 @@ class AcceptOrderView(APIView):
         try:
             oid = int(order_id)
         except (TypeError, ValueError):
-            return Response({'error': 'Некорректный order_id'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Invalid order_id'}, status=status.HTTP_400_BAD_REQUEST)
         expire_stale_master_offers(skip_order_ids={oid})
 
         master = request.user.master_profiles.first()
         if not master:
             return Response(
-                {'error': 'Только мастер может принять заказ'},
+                {'error': 'Only a master can accept the order'},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -2001,7 +1943,7 @@ class AcceptOrderView(APIView):
                 if order.status != OrderStatus.PENDING:
                     return Response(
                         {
-                            'error': 'Принять можно только заказ в статусе pending (ожидает ответа мастера)',
+                            'error': 'Only orders in pending status can be accepted (awaiting master response)',
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
@@ -2010,14 +1952,14 @@ class AcceptOrderView(APIView):
                     if not master_eligible_for_pending_sos_offer(order, master.id):
                         return Response(
                             {
-                                'error': 'Вы не в списке SOS, уже отклонили, вне зоны приёма или заказ недоступен',
+                                'error': 'You are not in the SOS queue, already declined, outside acceptance zone, or the order is unavailable',
                             },
                             status=status.HTTP_400_BAD_REQUEST,
                         )
                 elif not order.master_id or order.master_id != master.id:
                     return Response(
                         {
-                            'error': 'Этот заказ назначен другому мастеру или мастер ещё не назначен',
+                            'error': 'This order is assigned to another master or no master is assigned yet',
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
@@ -2025,16 +1967,16 @@ class AcceptOrderView(APIView):
                 if order.master_response_deadline and timezone.now() > order.master_response_deadline:
                     if order.order_type == OrderType.SOS:
                         msg = (
-                            'Окно ответа на SOS истекло. Заказ отменён или уже принят другим мастером.'
+                            'The SOS response window has expired. The order was cancelled or already accepted by another master.'
                         )
                     else:
-                        msg = 'Время на ответ истекло. Заказ больше недоступен для принятия.'
+                        msg = 'The response deadline has passed. This order is no longer available to accept.'
                     return Response({'error': msg}, status=status.HTTP_400_BAD_REQUEST)
 
                 if order.is_expired():
                     order.mark_as_cancelled_if_expired()
                     return Response(
-                        {'error': 'Заказ истек и был отменен'},
+                        {'error': 'Order expired and was cancelled'},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
@@ -2099,7 +2041,7 @@ class DeclineOrderView(APIView):
         try:
             oid = int(order_id)
         except (TypeError, ValueError):
-            return Response({'error': 'Некорректный order_id'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Invalid order_id'}, status=status.HTTP_400_BAD_REQUEST)
         expire_stale_master_offers(skip_order_ids={oid})
         try:
             order = Order.objects.get(id=oid)
@@ -2108,29 +2050,29 @@ class DeclineOrderView(APIView):
 
         master = request.user.master_profiles.first()
         if not master:
-            return Response({'error': 'Только мастер'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'error': 'Master account required'}, status=status.HTTP_403_FORBIDDEN)
 
         if order.status != OrderStatus.PENDING:
             return Response(
-                {'error': 'Отклонить можно только заказ в статусе pending'},
+                {'error': 'Only orders in pending status can be declined'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if order.order_type == OrderType.SOS and order.sos_offer_queue:
             if not master_in_sos_broadcast_queue(order, master.id):
                 return Response(
-                    {'error': 'Этот SOS не в вашей очереди предложений'},
+                    {'error': 'This SOS offer is not in your queue'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         elif order.master_id != master.id:
             return Response(
-                {'error': 'Заказ назначен другому мастеру'},
+                {'error': 'Order is assigned to another master'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         if order.order_type == OrderType.SOS and order.sos_offer_queue:
             if not sos_broadcast_decline(order, master.id):
                 return Response(
-                    {'error': 'Не удалось зафиксировать отказ по SOS'},
+                    {'error': 'Could not record SOS decline'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             order.refresh_from_db()
@@ -2147,6 +2089,62 @@ class DeclineOrderView(APIView):
             OrderSerializer(order, context={'request': request}).data,
             status=status.HTTP_200_OK,
         )
+
+
+class OrderMasterPreferredTimePatchView(APIView):
+    """Master only: set preferred_time_end after accept (preferred_time_start from client on create)."""
+
+    permission_classes = [IsAuthenticated, IsMaster]
+
+    @extend_schema(
+        summary='Предпочтительное время окончания (мастер, после accept)',
+        description=(
+            'Только **standard** заказ, статус **accepted**, назначенный мастер. '
+            'Клиент при создании передаёт `preferred_date` + `preferred_time_start`; '
+            'в теле запроса только **`preferred_time_end`**.'
+        ),
+        tags=[STAG_ORDER_MASTER_AVAILABLE],
+        parameters=[
+            {'name': 'order_id', 'in': 'path', 'required': True, 'schema': {'type': 'integer'}},
+        ],
+        request=OrderMasterPreferredTimePatchSerializer,
+        responses={200: OrderSerializer},
+    )
+    def patch(self, request, order_id):
+        master = request.user.master_profiles.first()
+        if not master:
+            return Response({'error': 'Master account required'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            order = Order.objects.get(id=order_id)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if order.order_type != OrderType.STANDARD:
+            return Response(
+                {'error': 'Only for standard orders'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if order.status != OrderStatus.ACCEPTED:
+            return Response(
+                {'error': 'Only available when order status is accepted'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if order.master_id != master.id:
+            return Response(
+                {'error': 'Order is assigned to another master'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        ser = OrderMasterPreferredTimePatchSerializer(
+            data=request.data,
+            context={'order': order},
+        )
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        order.preferred_time_end = ser.validated_data['preferred_time_end']
+        order.save(update_fields=['preferred_time_end', 'updated_at'])
+        return Response(OrderSerializer(order, context={'request': request}).data)
 
 
 class CompleteOrderView(APIView):
@@ -2212,7 +2210,7 @@ POST /api/order/5/complete/
             },
             404: {
                 'type': 'object',
-                'properties': {'error': {'type': 'string', 'example': 'Заказ не найден'}}
+                'properties': {'error': {'type': 'string', 'example': 'Order not found'}}
             },
             401: {
                 'type': 'object',
@@ -2229,34 +2227,34 @@ POST /api/order/5/complete/
             if order.user_id == request.user.id:
                 if order.status != OrderStatus.IN_PROGRESS:
                     return Response(
-                        {'error': 'Завершить можно только заказ в статусе in_progress.'},
+                        {'error': 'Only orders in in_progress status can be completed.'},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
             elif master and order.master_id == master.id:
                 if order.status != OrderStatus.IN_PROGRESS:
                     return Response(
                         {
-                            'error': 'Завершить может мастер только после «Начать работу» (in_progress).',
+                            'error': 'The master can complete only after work has started (in_progress).',
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 if not order.work_completion_images.exists():
                     return Response(
                         {
-                            'error': 'Загрузите минимум одно фото выполненной работы '
-                                     '(POST /api/order/{id}/work-completion-image/) перед завершением.',
+                            'error': 'Upload at least one work completion photo '
+                                     '(POST /api/order/{id}/work-completion-image/) before completing.',
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
             else:
-                return Response({'error': 'Нет доступа'}, status=status.HTTP_403_FORBIDDEN)
+                return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
             
             order.status = OrderStatus.COMPLETED
             order.save()
             
             serializer = OrderSerializer(order, context={'request': request})
             return Response({
-                'message': 'Заказ успешно завершен',
+                'message': 'Order completed successfully',
                 'order': serializer.data
             }, status=status.HTTP_200_OK)
         
@@ -2283,21 +2281,21 @@ class UploadOrderWorkCompletionImageView(APIView):
         expire_stale_master_offers()
         master = request.user.master_profiles.first()
         if not master:
-            return Response({'error': 'Только мастер'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'error': 'Master account required'}, status=status.HTTP_403_FORBIDDEN)
         try:
             order = Order.objects.get(pk=order_id)
         except Order.DoesNotExist:
             return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
         if order.master_id != master.id:
-            return Response({'error': 'Это не ваш заказ'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'error': 'This is not your order'}, status=status.HTTP_403_FORBIDDEN)
         if order.status not in MASTER_ACTIVE_WORK_STATUSES:
             return Response(
-                {'error': 'Фото можно добавлять после принятия заказа и до завершения.'},
+                {'error': 'Photos can be added after the order is accepted and until it is completed.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         image = request.FILES.get('image')
         if not image:
-            return Response({'error': 'Передайте файл image'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Pass an image file'}, status=status.HTTP_400_BAD_REQUEST)
         OrderWorkCompletionImage.objects.create(order=order, image=image)
         order.refresh_from_db()
         return Response(OrderSerializer(order, context={'request': request}).data, status=status.HTTP_201_CREATED)
@@ -2380,8 +2378,8 @@ class CreateReviewView(APIView):
                 'type': 'object',
                 'properties': {'error': {'type': 'string'}},
                 'examples': {
-                    'not_completed': {'value': {'error': 'Отзыв можно оставить только для завершенного заказа'}},
-                    'already_exists': {'value': {'error': 'Отзыв для этого заказа уже оставлен'}}
+                    'not_completed': {'value': {'error': 'Reviews are only allowed for completed orders'}},
+                    'already_exists': {'value': {'error': 'A review for this order already exists'}}
                 }
             },
             404: {
@@ -2423,7 +2421,7 @@ class CreateReviewView(APIView):
             
             result_serializer = ReviewSerializer(review)
             return Response({
-                'message': 'Отзыв успешно создан. Рейтинг применен к мастерам.',
+                'message': 'Review created successfully. Rating applied to masters.',
                 'review': result_serializer.data
             }, status=status.HTTP_201_CREATED)
         
@@ -2708,28 +2706,28 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
                 }
             },
             400: {
-                'description': 'Ошибка валидации параметров',
+                'description': 'Parameter validation error',
                 'content': {
                     'application/json': {
                         'examples': {
                             'missing_master_id': {
-                                'summary': 'Не указан master_id',
-                                'value': {'error': 'Параметр master_id обязателен'}
+                                'summary': 'master_id missing',
+                                'value': {'error': 'master_id query parameter is required'}
                             },
                             'invalid_format': {
-                                'summary': 'Неверный формат параметров',
-                                'value': {'error': 'Неверный формат параметров'}
+                                'summary': 'Invalid parameter format',
+                                'value': {'error': 'Invalid parameter format'}
                             },
                             'no_coordinates': {
-                                'summary': 'У мастера нет координат',
-                                'value': {'error': 'У мастера не указаны координаты'}
+                                'summary': 'Master has no coordinates',
+                                'value': {'error': 'Master has no coordinates set'}
                             }
                         }
                     }
                 }
             },
             401: {
-                'description': 'Не авторизован',
+                'description': 'Unauthorized',
                 'content': {
                     'application/json': {
                         'example': {'detail': 'Authentication credentials were not provided.'}
@@ -2737,7 +2735,7 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
                 }
             },
             404: {
-                'description': 'Мастер не найден',
+                'description': 'Master not found',
                 'content': {
                     'application/json': {
                         'example': {'error': 'Master not found'}
@@ -2756,7 +2754,7 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
         # Валидация обязательных параметров
         if not master_id:
             return Response(
-                {'error': 'Параметр master_id обязателен'},
+                {'error': 'master_id query parameter is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -2765,7 +2763,7 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
             radius = float(radius)
         except (ValueError, TypeError):
             return Response(
-                {'error': 'Неверный формат параметров'},
+                {'error': 'Invalid parameter format'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -2782,7 +2780,7 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
         if master_lat is None:
             return Response(
                 {
-                    'error': 'У мастера не заданы координаты на карте (latitude и longitude)'
+                    'error': 'Master has no map coordinates (latitude and longitude)'
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
@@ -2916,7 +2914,7 @@ class AddServicesToOrderView(APIView):
                 },
                 'examples': {
                     'application/json': {
-                        'example': {'error': 'Заказ с ID 999 не найден'}
+                        'example': {'error': 'Order with ID 999 not found'}
                     }
                 }
             },
@@ -2939,7 +2937,7 @@ class AddServicesToOrderView(APIView):
             order = Order.objects.get(id=order_id)
         except Order.DoesNotExist:
             return Response(
-                {'error': f'Заказ с ID {order_id} не найден'},
+                {'error': f'Order with ID {order_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
@@ -3032,7 +3030,7 @@ GET /api/order/services-list/?master_id=5
             400: {
                 'type': 'object',
                 'properties': {'error': {'type': 'string'}},
-                'example': {'error': 'Параметр master_id обязателен'}
+                'example': {'error': 'master_id query parameter is required'}
             },
             404: {
                 'type': 'object',
@@ -3048,7 +3046,7 @@ GET /api/order/services-list/?master_id=5
         
         if not master_id:
             return Response(
-                {'error': 'Параметр master_id обязателен'},
+                {'error': 'master_id query parameter is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -3056,7 +3054,7 @@ GET /api/order/services-list/?master_id=5
             master_id = int(master_id)
         except ValueError:
             return Response(
-                {'error': 'Неверный формат master_id'},
+                {'error': 'Invalid master_id format'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -3124,19 +3122,19 @@ class AddMasterToOrderView(APIView):
             order = Order.objects.get(id=order_id)
         except Order.DoesNotExist:
             return Response(
-                {'error': f'Заказ с ID {order_id} не найден'},
+                {'error': f'Order with ID {order_id} not found'},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
         if order.user_id != request.user.id:
             return Response(
-                {'detail': 'Только владелец заказа может назначить мастера'},
+                {'detail': 'Only the order owner can assign a master'},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
         if order.status != OrderStatus.PENDING:
             return Response(
-                {'error': 'Назначить мастера можно только для заказа в статусе pending'},
+                {'error': 'A master can only be assigned while the order is pending'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

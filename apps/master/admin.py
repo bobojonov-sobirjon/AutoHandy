@@ -49,7 +49,7 @@ class MasterBusySlotInline(NestedTabularInline):
     model = MasterBusySlot
     extra = 1
     ordering = ('date', 'start_time')
-    fields = ('date', 'start_time', 'end_time', 'reason', 'order')
+    fields = ('date', 'start_time', 'end_time', 'start_time_rest', 'time_range_rest', 'reason', 'order')
     readonly_fields = ('order',)
 
 

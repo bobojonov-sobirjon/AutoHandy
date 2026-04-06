@@ -157,7 +157,19 @@ def build_sos_order_websocket_payload(
         'order_type': order.order_type,
         'discount': str(order.discount) if order.discount is not None else None,
         'parts_purchase_required': order.parts_purchase_required,
-        'preferred_time': order.preferred_time or '',
+        'preferred_date': (
+            order.preferred_date.isoformat() if order.preferred_date else None
+        ),
+        'preferred_time_start': (
+            order.preferred_time_start.isoformat()
+            if order.preferred_time_start
+            else None
+        ),
+        'preferred_time_end': (
+            order.preferred_time_end.isoformat()
+            if order.preferred_time_end
+            else None
+        ),
         'created_at': order.created_at.isoformat() if order.created_at else None,
         'updated_at': order.updated_at.isoformat() if order.updated_at else None,
         'user': user_out,

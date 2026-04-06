@@ -1,7 +1,17 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from django.contrib.sites.models import Site
-from .models import CustomUser, MasterCustomUser, CarOwner, Owner, UserBalance, UserSMSCode, FAQ, EmailVerificationToken
+from .models import (
+    CustomUser,
+    MasterCustomUser,
+    CarOwner,
+    Owner,
+    UserBalance,
+    UserSMSCode,
+    UserDevice,
+    FAQ,
+    EmailVerificationToken,
+)
 from apps.car.models import Car
 from django.utils.html import mark_safe
 
@@ -147,6 +157,20 @@ class CarOwnerAdmin(UserAdmin):
 
     readonly_fields = ('private_id', 'created_at', 'updated_at', 'date_joined', 'last_login')
     
+
+@admin.register(UserDevice)
+class UserDeviceAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'device_type', 'device_token_short', 'updated_at', 'created_at')
+    list_filter = ('device_type', 'updated_at')
+    search_fields = ('device_token', 'user__email', 'user__phone_number', 'user__private_id')
+    readonly_fields = ('created_at', 'updated_at')
+    ordering = ('-updated_at',)
+
+    @admin.display(description='Token (short)')
+    def device_token_short(self, obj):
+        t = obj.device_token or ''
+        return f'{t[:24]}…' if len(t) > 24 else t
+
 
 @admin.register(FAQ)
 class FAQAdmin(admin.ModelAdmin):

@@ -94,6 +94,33 @@ class SMSVerificationSerializer(serializers.Serializer):
         required=True,
         help_text="User role: Driver, Master or Owner (required)."
     )
+    device_token = serializers.CharField(
+        max_length=512,
+        required=False,
+        allow_blank=False,
+        write_only=True,
+        help_text='Optional. Send together with device_type (e.g. FCM token). Only used on check-sms-code.',
+    )
+    device_type = serializers.CharField(
+        max_length=32,
+        required=False,
+        allow_blank=False,
+        write_only=True,
+        help_text='Optional. e.g. ios, android, web. Must be sent with device_token.',
+    )
+
+    def validate(self, attrs):
+        token = attrs.get('device_token')
+        dtype = attrs.get('device_type')
+        if (token and not dtype) or (dtype and not token):
+            raise serializers.ValidationError(
+                'device_token and device_type must both be sent together, or omit both.'
+            )
+        if token:
+            attrs['device_token'] = token.strip()
+        if dtype:
+            attrs['device_type'] = dtype.strip()
+        return attrs
 
     def validate_identifier(self, value):
         """Validate and determine identifier type"""

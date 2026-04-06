@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 
 from rest_framework import serializers
@@ -24,8 +25,32 @@ from apps.order.services.master_offer import activate_pending_master_offer
 from apps.order.services.sos_master_queue import build_sos_master_id_queue
 from apps.order.services.status_workflow import client_cancellation_snapshot, order_master_distance_km
 from apps.order.services.order_pricing import get_cached_order_pricing
+from apps.order.services.standard_booking_availability import preferred_slot_blocked_message
 
 User = get_user_model()
+
+
+class LenientTimeField(serializers.TimeField):
+    """
+    Accepts ISO-like time strings from mobile clients, e.g. ``04:05:41.902Z``
+    (trailing Z is ignored). Falls back to DRF ``TimeField`` parsing.
+    """
+
+    def to_internal_value(self, data):
+        if data is None and getattr(self, 'allow_null', False):
+            return None
+        if hasattr(data, 'hour'):
+            return data
+        if isinstance(data, str):
+            s = data.strip()
+            if s.endswith('Z') or s.endswith('z'):
+                s = s[:-1]
+            for fmt in ('%H:%M:%S.%f', '%H:%M:%S', '%H:%M'):
+                try:
+                    return datetime.strptime(s, fmt).time()
+                except ValueError:
+                    continue
+        return super().to_internal_value(data)
 
 
 def _money_fmt(v) -> str:
@@ -131,7 +156,9 @@ class OrderSerializer(serializers.ModelSerializer):
             'car_data', 'category_data',
             'text', 'status', 'status_display', 'priority', 'priority_display',
             'location', 'latitude', 'longitude', 'location_precision',
-            'parts_purchase_required', 'master',
+            'parts_purchase_required',
+            'preferred_date', 'preferred_time_start', 'preferred_time_end',
+            'master',
             'pricing', 'services', 'reviews', 'average_rating',
             'workflow', 'eta',
             'order_images', 'work_completion_images',
@@ -380,7 +407,7 @@ class OrderCreateSerializer(serializers.ModelSerializer):
     Serializer for creating order.
 
     Supports two order types:
-    1. STANDARD: client selects master (no fixed visit date/time on the order — use ``preferred_time`` text if needed).
+    1. STANDARD: client selects master; optional ``preferred_date`` + ``preferred_time_start``.
     2. SOS: client makes urgent order with current geolocation
 
     Required for both: order_type, text, location, latitude, longitude, car_list, category_list.
@@ -421,6 +448,16 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         default=False,
         help_text='If true, master may need to buy parts; client pays outside the app',
     )
+    preferred_date = serializers.DateField(
+        required=False,
+        allow_null=True,
+        help_text='Standard only: service day (use with preferred_time_start). preferred_time_end is not set here.',
+    )
+    preferred_time_start = LenientTimeField(
+        required=False,
+        allow_null=True,
+        help_text='Standard only: desired slot start time. Master sets preferred_time_end after accept (PATCH).',
+    )
 
     class Meta:
         model = Order
@@ -429,6 +466,7 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             'master_id',
             'car_list', 'category_list',
             'parts_purchase_required',
+            'preferred_date', 'preferred_time_start',
         ]
         extra_kwargs = {
             'text': {'required': True},
@@ -507,10 +545,26 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'master_id': 'Master is required for standard order'
                 })
+            pd = attrs.get('preferred_date')
+            ps = attrs.get('preferred_time_start')
+            if (pd is None) ^ (ps is None):
+                raise serializers.ValidationError(
+                    'preferred_date and preferred_time_start must both be sent together, or omit both.'
+                )
+            if pd is not None and ps is not None:
+                blocked = preferred_slot_blocked_message(
+                    master_id=master_id,
+                    preferred_date=pd,
+                    preferred_time_start=ps,
+                )
+                if blocked:
+                    raise serializers.ValidationError({'preferred_time_start': blocked})
 
         elif order_type == OrderType.SOS:
             if not attrs.get('priority'):
                 attrs['priority'] = OrderPriority.HIGH
+            attrs.pop('preferred_date', None)
+            attrs.pop('preferred_time_start', None)
 
             cats = attrs.get('category_list') or []
             if not master_id:
@@ -598,6 +652,30 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             activate_pending_master_offer(order, request=self.context.get('request'))
 
         return order
+
+
+class OrderMasterPreferredTimePatchSerializer(serializers.Serializer):
+    """Assigned master sets preferred_time_end after accept (start comes from client on create)."""
+
+    preferred_time_end = LenientTimeField()
+
+    def validate(self, attrs):
+        order = self.context['order']
+        start = order.preferred_time_start
+        end = attrs['preferred_time_end']
+        if start is None:
+            raise serializers.ValidationError(
+                {
+                    'preferred_time_end': (
+                        'Order has no preferred_time_start from the client; cannot set end time.'
+                    )
+                }
+            )
+        if end <= start:
+            raise serializers.ValidationError(
+                {'preferred_time_end': 'Must be after preferred_time_start.'}
+            )
+        return attrs
 
 
 class OrderUpdateSerializer(serializers.ModelSerializer):

@@ -859,7 +859,7 @@ class AddServiceItemsSerializer(serializers.Serializer):
     def validate(self, attrs):
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
-            raise serializers.ValidationError('Требуется авторизация.')
+            raise serializers.ValidationError('Authentication required.')
         user = request.user
         mid = attrs.get('master_id')
         if mid in (None, ''):
@@ -867,20 +867,20 @@ class AddServiceItemsSerializer(serializers.Serializer):
             n = qs.count()
             if n == 0:
                 raise serializers.ValidationError({
-                    'master_id': 'Мастерская не найдена. Сначала создайте профиль мастера.',
+                    'master_id': 'Master profile not found. Create a master profile first.',
                 })
             if n > 1:
                 raise serializers.ValidationError({
-                    'master_id': 'Укажите master_id: у вас несколько мастерских.',
+                    'master_id': 'Provide master_id: you have multiple master profiles.',
                 })
             attrs['master_id'] = qs.first().id
         else:
             try:
                 master = Master.objects.get(id=int(mid))
             except (ValueError, TypeError, Master.DoesNotExist):
-                raise serializers.ValidationError({'master_id': 'Мастер не найден'})
+                raise serializers.ValidationError({'master_id': 'Master not found'})
             if master.user_id != user.id:
-                raise serializers.ValidationError({'master_id': 'Нет доступа к этой мастерской'})
+                raise serializers.ValidationError({'master_id': 'No access to this master profile'})
         return attrs
 
 
@@ -950,17 +950,129 @@ class MasterScheduleBulkSerializer(serializers.Serializer):
 
 
 class MasterBusySlotSerializer(serializers.ModelSerializer):
+    """
+    Manual slot (no order).
+
+    **POST:** Either ``start_time`` + ``end_time`` (plain busy block), or ``start_time_rest`` +
+    ``time_range_rest`` (server fills ``start_time`` / ``end_time`` from the break duration).
+
+    **PATCH:** Only fields present in the JSON body are updated. Sending ``start_time`` / ``end_time``
+    does **not** change ``start_time_rest`` / ``time_range_rest``, and vice versa.
+    """
+
     class Meta:
         model = MasterBusySlot
-        fields = ['id', 'date', 'start_time', 'end_time', 'reason']
+        fields = [
+            'id',
+            'date',
+            'start_time',
+            'end_time',
+            'start_time_rest',
+            'time_range_rest',
+            'reason',
+        ]
         read_only_fields = ['id']
+        extra_kwargs = {
+            'start_time': {'required': False, 'allow_null': True},
+            'end_time': {'required': False, 'allow_null': True},
+        }
 
     def validate(self, attrs):
-        start = attrs.get('start_time')
-        end = attrs.get('end_time')
-        if start and end and end <= start:
-            raise serializers.ValidationError('end_time must be after start_time.')
+        from apps.master.services.slots import break_window_times
+
+        inst = self.instance
+        merged: dict = {}
+        if inst:
+            merged = {
+                'date': inst.date,
+                'start_time': inst.start_time,
+                'end_time': inst.end_time,
+                'start_time_rest': inst.start_time_rest,
+                'time_range_rest': inst.time_range_rest,
+            }
+        merged.update(attrs)
+
+        date = merged.get('date')
+        if date is None:
+            raise serializers.ValidationError({'date': 'This field is required.'})
+
+        rest_keys_in_request = {'start_time_rest', 'time_range_rest'} & attrs.keys()
+        time_keys_in_request = {'start_time', 'end_time'} & attrs.keys()
+
+        def _validate_rest_pair(rs, tr):
+            if rs is not None:
+                if tr is None or tr <= 0:
+                    raise serializers.ValidationError(
+                        {'time_range_rest': 'Set a positive duration when start_time_rest is set.'}
+                    )
+            elif tr is not None and tr > 0:
+                raise serializers.ValidationError(
+                    {'start_time_rest': 'Set start_time_rest when time_range_rest is set.'}
+                )
+
+        if self.partial:
+            if time_keys_in_request and not rest_keys_in_request:
+                st = merged.get('start_time')
+                et = merged.get('end_time')
+                if st is None or et is None:
+                    raise serializers.ValidationError(
+                        'start_time and end_time must both be set after merge '
+                        '(include the missing field in the request or keep it on the row).'
+                    )
+                if et <= st:
+                    raise serializers.ValidationError('end_time must be after start_time.')
+                return attrs
+
+            if rest_keys_in_request and not time_keys_in_request:
+                _validate_rest_pair(merged.get('start_time_rest'), merged.get('time_range_rest'))
+                return attrs
+
+            if rest_keys_in_request and time_keys_in_request:
+                st = merged.get('start_time')
+                et = merged.get('end_time')
+                if st is None or et is None:
+                    raise serializers.ValidationError(
+                        'start_time and end_time must both be set when updating times in the same request.'
+                    )
+                if et <= st:
+                    raise serializers.ValidationError('end_time must be after start_time.')
+                _validate_rest_pair(merged.get('start_time_rest'), merged.get('time_range_rest'))
+                return attrs
+
+        rs = merged.get('start_time_rest')
+        tr = merged.get('time_range_rest')
+        st = merged.get('start_time')
+        et = merged.get('end_time')
+
+        rest_mode = rs is not None and tr is not None and tr > 0
+
+        if rest_mode:
+            _, b1 = break_window_times(date, rs, tr)
+            exp_end = b1.time()
+            attrs['start_time'] = rs
+            attrs['end_time'] = exp_end
+            attrs['start_time_rest'] = rs
+            attrs['time_range_rest'] = tr
+        else:
+            _validate_rest_pair(rs, tr)
+            attrs['start_time_rest'] = None
+            attrs['time_range_rest'] = None
+            if st is None or et is None:
+                raise serializers.ValidationError(
+                    'Provide start_time and end_time, or start_time_rest with time_range_rest.'
+                )
+            if et <= st:
+                raise serializers.ValidationError('end_time must be after start_time.')
+            attrs['start_time'] = st
+            attrs['end_time'] = et
+
         return attrs
+
+    def create(self, validated_data):
+        master = self.context['master']
+        validated_data['master'] = master
+        validated_data['order'] = None
+        return MasterBusySlot.objects.create(**validated_data)
 
 
 class ServiceCardSerializer(serializers.Serializer):
