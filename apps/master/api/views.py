@@ -1820,8 +1820,6 @@ def _resolve_schedule_master(request):
         )
 
 
-
-
 class MasterScheduleListBulkView(APIView):
     """GET: list schedule days; POST: bulk upsert days (owner = current master's user)."""
 
@@ -1859,10 +1857,8 @@ class MasterScheduleListBulkView(APIView):
     @extend_schema(
         summary='Расписание: массовое сохранение дней',
         description=(
-            'Тело: `days` — **ровно** столько объектов, сколько задано в '
-            '`MASTER_SCHEDULE_MIN_COVERAGE_DAYS_DEFAULT` (по умолчанию 14). '
-            'Даты **любые** в рамках политики (не в прошлом, не дальше max при штрафе); '
-            'не обязаны идти подряд с сегодня (можно пропускать выходные). '
+            'Тело: `days` — произвольное число объектов `{date, start_time, end_time}`. '
+            'Даты в пределах политики (не в прошлом, не дальше max при штрафах). '
             'Дубликаты дат в одном запросе запрещены.'
         ),
         parameters=[
