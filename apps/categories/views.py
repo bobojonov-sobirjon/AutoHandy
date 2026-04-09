@@ -1,3 +1,4 @@
+from django.db.models import Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -10,6 +11,14 @@ from drf_spectacular.types import OpenApiTypes
 
 def _main_categories_queryset():
     return Category.objects.filter(parent__isnull=True)
+
+
+def _exclude_custom_request_catalog(qs, request):
+    """Masters must not see the client-only Custom Request category in public lists."""
+    user = getattr(request, 'user', None)
+    if user and user.is_authenticated and user.groups.filter(name='Master').exists():
+        return qs.filter(is_custom_request_entry=False)
+    return qs
 
 
 class CategoryListAPIView(APIView):
@@ -58,6 +67,7 @@ class CategoryListAPIView(APIView):
         else:
             categories = base
 
+        categories = _exclude_custom_request_catalog(categories, request)
         categories = categories.order_by('-created_at')
         serializer = CategorySerializer(categories, many=True, context={'request': request})
         return Response(serializer.data)
@@ -109,7 +119,18 @@ class SubCategoryListAPIView(APIView):
                 {'detail': 'Main category not found.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        user = getattr(request, 'user', None)
+        if user and user.is_authenticated and user.groups.filter(name='Master').exists():
+            if Category.objects.filter(pk=parent_pk, is_custom_request_entry=True).exists():
+                return Response(
+                    {'detail': 'Main category not found.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
-        subs = Category.objects.filter(parent_id=parent_pk).order_by('-created_at')
+        subs = Category.objects.filter(parent_id=parent_pk)
+        subs = _exclude_custom_request_catalog(subs, request)
+        subs = subs.filter(
+            ~Q(parent__is_custom_request_entry=True),
+        ).order_by('-created_at')
         serializer = CategorySerializer(subs, many=True, context={'request': request})
         return Response(serializer.data)

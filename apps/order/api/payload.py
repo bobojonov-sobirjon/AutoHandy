@@ -99,6 +99,17 @@ def normalize_order_create_request_data(request) -> dict:
     return data
 
 
+def normalize_custom_request_create_data(request) -> dict:
+    """Same list coercion as standard/SOS; no category_list (server assigns catalog row)."""
+    data = _flatten_request_data(request.data)
+    data.pop('images', None)
+    if 'car_list' in data:
+        data['car_list'] = _coerce_id_list(data.get('car_list'))
+    if 'parts_purchase_required' in data:
+        data['parts_purchase_required'] = _coerce_bool(data['parts_purchase_required'])
+    return data
+
+
 def attach_order_images_from_request(order, request, field_name: str = 'images') -> int:
     """Create ``OrderImage`` rows from ``request.FILES.getlist(field_name)``. Returns count added."""
     from apps.order.models import OrderImage

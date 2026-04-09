@@ -17,6 +17,8 @@ def activate_pending_master_offer(order: Order, request: 'HttpRequest | None' = 
     """Set master_response_deadline and trigger push (FCM hook)."""
     if order.status != OrderStatus.PENDING:
         return
+    if order.order_type == OrderType.CUSTOM_REQUEST:
+        return
     if order.order_type == OrderType.SOS:
         if order.sos_offer_queue:
             from apps.order.services.sos_rotation import broadcast_sos_offers

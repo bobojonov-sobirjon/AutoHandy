@@ -21,6 +21,14 @@ class Category(models.Model):
         help_text='Optional parent to group related categories (e.g. by_order service tree).',
     )
     icon = models.FileField(upload_to='categories/icons/', verbose_name='Category icon', null=True, blank=True)
+    is_custom_request_entry = models.BooleanField(
+        default=False,
+        verbose_name='Custom request entry',
+        help_text=(
+            'If True: drivers see this as the client-only “Custom Request” entry; masters never see it in '
+            'the public category catalog. Attach this main category to custom-request orders server-side.'
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
 

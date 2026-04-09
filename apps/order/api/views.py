@@ -8,6 +8,7 @@ from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
 from django.db.models import Q
+from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from django.conf import settings
@@ -37,6 +38,7 @@ from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExampl
 from drf_spectacular.types import OpenApiTypes
 
 from apps.order.models import (
+    CustomRequestOffer,
     MasterOrderCancellation,
     Order,
     OrderStatus,
@@ -47,10 +49,17 @@ from apps.order.models import (
     Review,
     ReviewTag,
 )
-from apps.order.api.payload import attach_order_images_from_request, normalize_order_create_request_data
+from apps.order.api.payload import (
+    attach_order_images_from_request,
+    normalize_custom_request_create_data,
+    normalize_order_create_request_data,
+)
 from apps.order.api.serializers import (
     OrderSerializer,
     OrderCreateSerializer,
+    CustomRequestCreateSerializer,
+    CustomRequestOfferCreateSerializer,
+    CustomRequestOfferSerializer,
     OrderMasterPreferredTimePatchSerializer,
     OrderUpdateSerializer,
     AddServicesToOrderSerializer,
@@ -724,6 +733,269 @@ Do NOT use for **planned work** (use `/api/order/standard/`).
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+class CustomRequestCreateView(APIView):
+    """
+    Client-only custom request: description, address + GPS, photos (see settings for min/max count).
+    Masters are notified on the existing SOS master WebSocket (`custom_request_job`); category is set server-side.
+    """
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    @extend_schema(
+        summary='Create custom request order',
+        description="""
+Creates `order_type=custom_request`. Service category is set **server-side** (main category with `is_custom_request_entry`).
+
+**Multipart:** field **`images`** — **2–10** files by default (`CUSTOM_REQUEST_MIN_IMAGES` / `CUSTOM_REQUEST_MAX_IMAGES`).
+
+**JSON** cannot carry files; use **multipart/form-data** when uploading photos.
+
+Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asynchronously (**Celery** after create).
+        """,
+        tags=[STAG_ORDER_DRIVER_CREATE],
+        request={
+            'application/json': {
+                'type': 'object',
+                'required': ['text', 'location', 'latitude', 'longitude'],
+                'properties': {
+                    'text': {
+                        'type': 'string',
+                        'description': 'Problem / request description (tafsilot).',
+                        'example': 'Need inspection: unusual noise after cold start',
+                    },
+                    'location': {
+                        'type': 'string',
+                        'description': 'Address or location text (manzil).',
+                        'example': 'Toshkent, Chilonzor 8-kvartal, 12-uy',
+                    },
+                    'latitude': {
+                        'type': 'number',
+                        'description': 'GPS latitude (WGS84).',
+                        'example': 41.3111,
+                    },
+                    'longitude': {
+                        'type': 'number',
+                        'description': 'GPS longitude (WGS84).',
+                        'example': 69.2797,
+                    },
+                    'car_list': {
+                        'type': 'array',
+                        'items': {'type': 'integer'},
+                        'description': 'Optional. Car IDs belonging to the current user.',
+                        'example': [1, 2],
+                    },
+                    'parts_purchase_required': {
+                        'type': 'boolean',
+                        'default': False,
+                        'description': 'Whether spare parts may need to be purchased.',
+                    },
+                },
+            },
+            'multipart/form-data': {
+                'type': 'object',
+                'required': ['text', 'location', 'latitude', 'longitude', 'images'],
+                'properties': {
+                    'text': {'type': 'string', 'description': 'Problem / request description'},
+                    'location': {'type': 'string', 'description': 'Address or location text'},
+                    'latitude': {
+                        'type': 'string',
+                        'description': 'Decimal as string (e.g. "41.3111")',
+                        'example': '41.3111',
+                    },
+                    'longitude': {
+                        'type': 'string',
+                        'description': 'Decimal as string (e.g. "69.2797")',
+                        'example': '69.2797',
+                    },
+                    'car_list': {
+                        'type': 'string',
+                        'description': 'JSON array string, e.g. `[1,2]`, or comma-separated `1,2`',
+                        'example': '[1]',
+                    },
+                    'parts_purchase_required': {
+                        'type': 'boolean',
+                        'default': False,
+                        'description': 'Multipart booleans often sent as string "true"/"false"',
+                    },
+                    'images': {
+                        'type': 'array',
+                        'description': '2–10 image files (default); field name repeated per file.',
+                        'items': {'type': 'string', 'format': 'binary'},
+                        'minItems': 2,
+                        'maxItems': 10,
+                    },
+                },
+            },
+        },
+        responses={
+            201: {
+                'description': 'Created',
+                'content': {
+                    'application/json': {
+                        'schema': {
+                            'type': 'object',
+                            'properties': {
+                                'message': {'type': 'string'},
+                                'order': {'type': 'object', 'description': 'OrderSerializer payload'},
+                            },
+                        },
+                        'example': {
+                            'message': 'Your custom request has been sent to nearby masters',
+                            'order': {
+                                'id': 1,
+                                'order_type': 'custom_request',
+                                'status': 'pending',
+                            },
+                        },
+                    }
+                },
+            },
+            400: {
+                'description': 'Validation error (e.g. image count, missing fields)',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'images': ['Attach between 2 and 10 images.'],
+                        }
+                    }
+                },
+            },
+            401: {'description': 'Not authenticated'},
+        },
+    )
+    def post(self, request):
+        data = normalize_custom_request_create_data(request)
+        serializer = CustomRequestCreateSerializer(data=data, context={'request': request})
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        n_images = len(request.FILES.getlist('images'))
+        lo = int(getattr(settings, 'CUSTOM_REQUEST_MIN_IMAGES', 2))
+        hi = int(getattr(settings, 'CUSTOM_REQUEST_MAX_IMAGES', 10))
+        if n_images < lo or n_images > hi:
+            return Response(
+                {'images': [f'Attach between {lo} and {hi} images.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        order = serializer.save()
+        attach_order_images_from_request(order, request)
+        from apps.order.tasks import schedule_broadcast_custom_request
+
+        schedule_broadcast_custom_request(order.pk)
+        order_serializer = OrderSerializer(order, context={'request': request})
+        return Response(
+            {
+                'message': 'Your custom request has been sent to nearby masters',
+                'order': order_serializer.data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class CustomRequestOfferListCreateView(APIView):
+    """GET: order owner lists offers. POST: master submits one price offer per order (no updates)."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='List price offers for a custom request (order owner)',
+        tags=[STAG_ORDER_DETAILS],
+        responses={200: CustomRequestOfferSerializer(many=True)},
+    )
+    def get(self, request, order_id):
+        order = get_object_or_404(Order, pk=order_id)
+        if order.user_id != request.user.id:
+            return Response(status=status.HTTP_403_FORBIDDEN)
+        if order.order_type != OrderType.CUSTOM_REQUEST:
+            return Response(
+                {'detail': 'Not a custom request order.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        offers = (
+            CustomRequestOffer.objects.filter(order=order)
+            .select_related('master', 'master__user')
+            .order_by('-created_at')
+        )
+        return Response(CustomRequestOfferSerializer(offers, many=True).data)
+
+    @extend_schema(
+        summary='Submit a price offer (master, once per order)',
+        tags=[STAG_ORDER_MASTER_AVAILABLE],
+        request=CustomRequestOfferCreateSerializer,
+        responses={
+            201: CustomRequestOfferSerializer(),
+            400: {'description': 'Duplicate offer or validation error'},
+        },
+    )
+    def post(self, request, order_id):
+        order = get_object_or_404(Order, pk=order_id)
+        if order.order_type != OrderType.CUSTOM_REQUEST:
+            return Response(
+                {'detail': 'Not a custom request order.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if order.status != OrderStatus.PENDING or order.master_id:
+            return Response(
+                {'detail': 'This order is not open for new offers.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        master = Master.objects.filter(user=request.user).first()
+        if not master:
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
+        from apps.order.services.custom_request_broadcast import master_within_custom_request_radius
+        from apps.order.services.notifications import push_custom_request_offer_to_rider_websocket
+
+        if order.latitude is None or order.longitude is None:
+            return Response(
+                {'detail': 'Order has no coordinates.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not master_within_custom_request_radius(
+            master, float(order.latitude), float(order.longitude)
+        ):
+            return Response(
+                {'detail': 'You are outside the service radius for this request.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        wr = CustomRequestOfferCreateSerializer(data=request.data)
+        if not wr.is_valid():
+            return Response(wr.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        if CustomRequestOffer.objects.filter(order=order, master=master).exists():
+            return Response(
+                {
+                    'detail': (
+                        'You have already submitted an offer for this order. '
+                        'You cannot send another offer for the same request.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        offer = CustomRequestOffer.objects.create(
+            order=order,
+            master=master,
+            price=wr.validated_data['price'],
+        )
+        push_custom_request_offer_to_rider_websocket(
+            order,
+            offer_id=offer.pk,
+            master_id=master.pk,
+            price=str(offer.price),
+            created_at_iso=offer.created_at.isoformat() if offer.created_at else None,
+            request=request,
+        )
+        return Response(
+            CustomRequestOfferSerializer(offer).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
 class AvailableTimeSlotsView(APIView):
     """Get available time slots for master on a given date"""
     permission_classes = [IsAuthenticated]
@@ -1223,7 +1495,7 @@ GET /api/order/by-user/?order_type=standard&status=pending
         # Фильтр по типу заказа (standard / sos; legacy scheduled → standard)
         order_type_filter = _normalize_order_type_query_param(request.query_params.get('order_type'))
         if order_type_filter:
-            if order_type_filter in (OrderType.STANDARD, OrderType.SOS):
+            if order_type_filter in (OrderType.STANDARD, OrderType.SOS, OrderType.CUSTOM_REQUEST):
                 orders = orders.filter(order_type=order_type_filter)
         
         # Smart фильтр по категории проблемы (Тип проблемы)
@@ -1487,7 +1759,7 @@ GET /api/order/by-master/?order_type=standard&status=pending
         # Фильтр по типу заказа (standard / sos; legacy scheduled → standard)
         order_type_filter = _normalize_order_type_query_param(request.query_params.get('order_type'))
         if order_type_filter:
-            if order_type_filter in (OrderType.STANDARD, OrderType.SOS):
+            if order_type_filter in (OrderType.STANDARD, OrderType.SOS, OrderType.CUSTOM_REQUEST):
                 orders = orders.filter(order_type=order_type_filter)
         
         # Smart фильтр по категории проблемы (Тип проблемы)
@@ -2790,12 +3062,12 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
         else:
             radius = float(radius) * MILES_TO_KM
         
-        # Заказы без назначенного master (FK), с координатами
+        # Заказы без назначенного master (FK), с координатами (custom_request — только push/WS, не каталог)
         orders = Order.objects.filter(
             master__isnull=True,
             latitude__isnull=False,
             longitude__isnull=False,
-        )
+        ).exclude(order_type=OrderType.CUSTOM_REQUEST)
         
         # Применяем дополнительные фильтры
         category_filter = request.query_params.get('category')

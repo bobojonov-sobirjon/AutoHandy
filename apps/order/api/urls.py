@@ -6,6 +6,12 @@ app_name = 'order'
 urlpatterns = [
     path('standard/', views.StandardOrderCreateView.as_view(), name='standard-order-create'),
     path('sos/', views.SOSOrderCreateView.as_view(), name='sos-order-create'),
+    path('custom-request/', views.CustomRequestCreateView.as_view(), name='custom-request-create'),
+    path(
+        'custom-request/<int:order_id>/offers/',
+        views.CustomRequestOfferListCreateView.as_view(),
+        name='custom-request-offers',
+    ),
     path(
         'nearby-masters/',
         views.NearbyMasterCandidatesView.as_view(),

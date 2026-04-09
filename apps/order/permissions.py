@@ -45,6 +45,13 @@ class IsOrderOwnerOrMaster(permissions.BasePermission):
                 and master_in_sos_broadcast_queue(obj, master.id)
             ):
                 return request.method in permissions.SAFE_METHODS
+
+            if (
+                getattr(obj, 'order_type', None) == OrderType.CUSTOM_REQUEST
+                and getattr(obj, 'status', None) == OrderStatus.PENDING
+                and obj.custom_request_offers.filter(master=master).exists()
+            ):
+                return request.method in permissions.SAFE_METHODS
         
         return False
 

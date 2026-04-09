@@ -48,7 +48,7 @@ class MainCategoryAdmin(admin.ModelAdmin):
         (
             'Main information',
             {
-                'fields': ('name', 'type_category', 'icon'),
+                'fields': ('name', 'type_category', 'icon', 'is_custom_request_entry'),
                 'description': 'Main categories have no parent. Create subcategories under Sub categories.',
             },
         ),
@@ -101,7 +101,7 @@ class SubCategoryAdmin(admin.ModelAdmin):
         (
             'Main information',
             {
-                'fields': ('parent', 'name', 'icon'),
+                'fields': ('parent', 'name', 'icon', 'is_custom_request_entry'),
                 'description': 'Category type is taken from the selected main category automatically.',
             },
         ),

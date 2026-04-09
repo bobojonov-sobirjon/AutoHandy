@@ -3,6 +3,7 @@ from django.utils.html import format_html
 from django.urls import reverse
 
 from .models import (
+    CustomRequestOffer,
     MasterOrderCancellation,
     Order,
     OrderImage,
@@ -555,3 +556,12 @@ class MasterOrderCancellationAdmin(admin.ModelAdmin):
     readonly_fields = ['created_at']
     search_fields = ['order__id', 'master__user__email']
     date_hierarchy = 'created_at'
+
+
+@admin.register(CustomRequestOffer)
+class CustomRequestOfferAdmin(admin.ModelAdmin):
+    list_display = ['id', 'order_id', 'master_id', 'price', 'created_at']
+    list_filter = [('created_at', admin.DateFieldListFilter)]
+    raw_id_fields = ['order', 'master']
+    readonly_fields = ['created_at', 'updated_at']
+    search_fields = ['order__id', 'master__user__email']

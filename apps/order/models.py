@@ -42,6 +42,7 @@ class OrderType(models.TextChoices):
 
     STANDARD = 'standard', 'Standard'
     SOS = 'sos', 'SOS / Emergency'
+    CUSTOM_REQUEST = 'custom_request', 'Custom request'
 
 
 class Order(models.Model):
@@ -93,16 +94,16 @@ class Order(models.Model):
         help_text='Service address text; optional if GPS coordinates are provided',
     )
     latitude = models.DecimalField(
-        max_digits=10,
-        decimal_places=7,
+        max_digits=20,
+        decimal_places=18,
         null=True,
         blank=True,
         verbose_name='Latitude',
         help_text='Location latitude',
     )
     longitude = models.DecimalField(
-        max_digits=10,
-        decimal_places=7,
+        max_digits=20,
+        decimal_places=18,
         null=True,
         blank=True,
         verbose_name='Longitude',
@@ -593,6 +594,37 @@ class OrderService(models.Model):
         if self.master_service_item_id and self.master_service_item.category_id:
             return f"Order #{self.order.id} - {self.master_service_item.category.name}"
         return f"Order #{self.order.id} - service #{self.master_service_item_id}"
+
+
+class CustomRequestOffer(models.Model):
+    """Price offer from a master on a pending custom-request order (client compares via WebSocket + API)."""
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='custom_request_offers',
+        verbose_name='Order',
+    )
+    master = models.ForeignKey(
+        'master.Master',
+        on_delete=models.CASCADE,
+        related_name='custom_request_offers',
+        verbose_name='Master',
+    )
+    price = models.DecimalField(max_digits=12, decimal_places=2, verbose_name='Offer price')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
+
+    class Meta:
+        verbose_name = 'Custom request offer'
+        verbose_name_plural = 'Custom request offers'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=('order', 'master'), name='uniq_custom_request_offer_order_master'),
+        ]
+
+    def __str__(self):
+        return f'Order {self.order_id} offer from master {self.master_id}'
 
 
 class StandardOrderManager(models.Manager):

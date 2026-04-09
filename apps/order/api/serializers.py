@@ -8,11 +8,13 @@ from apps.order.models import (
     OrderStatus,
     OrderPriority,
     OrderType,
+    CustomRequestOffer,
     Rating,
     OrderService,
     Review,
     ReviewTag,
     UserRating,
+    LocationSource,
 )
 from apps.car.models import Car
 from apps.categories.models import Category
@@ -28,6 +30,14 @@ from apps.order.services.order_pricing import get_cached_order_pricing
 from apps.order.services.standard_booking_availability import preferred_slot_blocked_message
 
 User = get_user_model()
+
+CUSTOM_REQUEST_CATEGORY_MASK_MASTER = 'Incoming request'
+
+
+def _request_user_is_master(request) -> bool:
+    if not request or not request.user.is_authenticated:
+        return False
+    return request.user.groups.filter(name='Master').exists()
 
 
 class LenientTimeField(serializers.TimeField):
@@ -221,26 +231,36 @@ class OrderSerializer(serializers.ModelSerializer):
             .order_by('parent_id', 'name')
         )
         groups = {}
+        mask_for_master = _request_user_is_master(request) and (
+            obj.order_type == OrderType.CUSTOM_REQUEST
+            or obj.category.filter(is_custom_request_entry=True).exists()
+        )
         for cat in categories:
             parent = cat.parent
             gid = parent.id if parent is not None else 0
             if gid not in groups:
-                groups[gid] = {
-                    'parent': (
-                        {
-                            'id': parent.id,
-                            'name': parent.name,
-                            'icon': _absolute_media_url(request, parent.icon),
-                        }
-                        if parent
-                        else None
-                    ),
-                    'items': [],
-                }
+                p_block = None
+                if parent:
+                    p_block = {
+                        'id': parent.id,
+                        'name': (
+                            CUSTOM_REQUEST_CATEGORY_MASK_MASTER
+                            if mask_for_master and parent.is_custom_request_entry
+                            else parent.name
+                        ),
+                        'icon': _absolute_media_url(request, parent.icon),
+                    }
+                groups[gid] = {'parent': p_block, 'items': []}
+            item_name = (
+                CUSTOM_REQUEST_CATEGORY_MASK_MASTER
+                if mask_for_master
+                and (cat.is_custom_request_entry or (cat.parent and cat.parent.is_custom_request_entry))
+                else cat.name
+            )
             groups[gid]['items'].append(
                 {
                     'id': cat.id,
-                    'name': cat.name,
+                    'name': item_name,
                     'type_category': cat.type_category,
                     'icon': _absolute_media_url(request, cat.icon),
                 }
@@ -484,6 +504,8 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             return OrderType.STANDARD
         if v == OrderType.SOS:
             return OrderType.SOS
+        if v == OrderType.CUSTOM_REQUEST:
+            raise serializers.ValidationError("Use POST /api/order/custom-request/ for custom requests.")
         raise serializers.ValidationError("order_type must be 'standard' or 'sos'.")
 
     def validate_master_id(self, value):
@@ -652,6 +674,88 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             activate_pending_master_offer(order, request=self.context.get('request'))
 
         return order
+
+
+class CustomRequestCreateSerializer(serializers.Serializer):
+    """Driver multipart/JSON create: text, location, GPS, optional cars; category is assigned server-side."""
+
+    text = serializers.CharField()
+    location = serializers.CharField()
+    latitude = serializers.DecimalField(max_digits=20, decimal_places=18)
+    longitude = serializers.DecimalField(max_digits=20, decimal_places=18)
+    car_list = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        default=list,
+    )
+    parts_purchase_required = serializers.BooleanField(required=False, default=False)
+
+    def validate_car_list(self, value):
+        user = self.context['request'].user
+        for car_id in value:
+            try:
+                car = Car.objects.get(id=car_id)
+            except Car.DoesNotExist:
+                raise serializers.ValidationError(f'Car with ID {car_id} not found')
+            if car.user_id and car.user_id != user.id:
+                raise serializers.ValidationError(f'Car {car_id} does not belong to you.')
+        return value
+
+    def validate_latitude(self, value):
+        if value is not None and (value < -90 or value > 90):
+            raise serializers.ValidationError('Latitude must be between -90 and 90')
+        return value
+
+    def validate_longitude(self, value):
+        if value is not None and (value < -180 or value > 180):
+            raise serializers.ValidationError('Longitude must be between -180 and 180')
+        return value
+
+    def validate(self, attrs):
+        from apps.order.services.custom_request_broadcast import get_custom_request_catalog_category
+
+        if not get_custom_request_catalog_category():
+            raise serializers.ValidationError(
+                'Custom request is not configured. Add a main by_order category with '
+                'is_custom_request_entry in the admin.'
+            )
+        return attrs
+
+    def create(self, validated_data):
+        from apps.order.services.custom_request_broadcast import get_custom_request_catalog_category
+
+        user = self.context['request'].user
+        car_list = validated_data.pop('car_list', [])
+        cat = get_custom_request_catalog_category()
+        order = Order.objects.create(
+            user=user,
+            text=validated_data['text'],
+            location=validated_data['location'],
+            latitude=validated_data['latitude'],
+            longitude=validated_data['longitude'],
+            order_type=OrderType.CUSTOM_REQUEST,
+            status=OrderStatus.PENDING,
+            priority=OrderPriority.LOW,
+            location_source=LocationSource.GPS_CUSTOM,
+            parts_purchase_required=validated_data.get('parts_purchase_required', False),
+        )
+        if car_list:
+            order.car.set(car_list)
+        order.category.set([cat.pk])
+        return order
+
+
+class CustomRequestOfferCreateSerializer(serializers.Serializer):
+    price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
+
+
+class CustomRequestOfferSerializer(serializers.ModelSerializer):
+    master_id = serializers.IntegerField(source='master.id', read_only=True)
+
+    class Meta:
+        model = CustomRequestOffer
+        fields = ('id', 'order', 'master_id', 'price', 'created_at', 'updated_at')
+        read_only_fields = fields
 
 
 class OrderMasterPreferredTimePatchSerializer(serializers.Serializer):

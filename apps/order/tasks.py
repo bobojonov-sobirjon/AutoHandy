@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
 
-from apps.order.models import Order, OrderStatus
+from apps.order.models import Order, OrderStatus, OrderType
+
+logger = logging.getLogger(__name__)
 from apps.order.services.offer_expiry import (
     expire_master_offer_for_order,
     expire_stale_master_offers,
@@ -20,6 +23,49 @@ def expire_stale_master_offers_task() -> int:
     Standard: status → rejected, master cleared. SOS with queue: broadcast window ended → reject.
     """
     return expire_stale_master_offers()
+
+
+def run_broadcast_custom_request(order_id: int) -> int:
+    """
+    Core logic for custom-request geo push (used by Celery task and inline fallback when Redis is down).
+    """
+    from apps.order.services.custom_request_broadcast import master_ids_within_custom_request_radius
+    from apps.order.services.notifications import push_custom_request_to_master_websocket
+
+    try:
+        order = Order.objects.get(pk=order_id)
+    except Order.DoesNotExist:
+        return 0
+    if order.order_type != OrderType.CUSTOM_REQUEST or order.status != OrderStatus.PENDING:
+        return 0
+    if order.latitude is None or order.longitude is None:
+        return 0
+    mids = master_ids_within_custom_request_radius(float(order.latitude), float(order.longitude))
+    for mid in mids:
+        push_custom_request_to_master_websocket(order, target_master_id=mid)
+    return len(mids)
+
+
+@shared_task(ignore_result=True)
+def broadcast_custom_request_task(order_id: int) -> int:
+    """After create: notify masters in radius via WebSocket (Celery queue)."""
+    return run_broadcast_custom_request(order_id)
+
+
+def schedule_broadcast_custom_request(order_id: int) -> None:
+    """
+    Enqueue ``broadcast_custom_request_task``; if broker is unreachable (e.g. Redis not running on
+    Windows dev), run the same work in-process so POST /custom-request/ still returns 201.
+    """
+    try:
+        broadcast_custom_request_task.delay(order_id)
+    except Exception as exc:  # noqa: BLE001 — broker/connection errors vary (kombu, redis, OSError)
+        logger.warning(
+            'Celery delay failed for broadcast_custom_request (order_id=%s): %s — running inline',
+            order_id,
+            exc,
+        )
+        run_broadcast_custom_request(order_id)
 
 
 @shared_task(ignore_result=True)
