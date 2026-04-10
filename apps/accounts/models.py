@@ -64,7 +64,7 @@ class CustomUser(AbstractUser):
         help_text="Optional. Enter your address."
     )
     longitude = models.DecimalField(
-        max_digits=20,
+        max_digits=22,
         decimal_places=18,
         blank=True,
         null=True,
@@ -72,7 +72,7 @@ class CustomUser(AbstractUser):
         help_text="Optional. Longitude of your location."
     )
     latitude = models.DecimalField(
-        max_digits=20,
+        max_digits=22,
         decimal_places=18,
         blank=True,
         null=True,

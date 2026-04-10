@@ -94,7 +94,7 @@ class Order(models.Model):
         help_text='Service address text; optional if GPS coordinates are provided',
     )
     latitude = models.DecimalField(
-        max_digits=20,
+        max_digits=22,
         decimal_places=18,
         null=True,
         blank=True,
@@ -102,7 +102,7 @@ class Order(models.Model):
         help_text='Location latitude',
     )
     longitude = models.DecimalField(
-        max_digits=20,
+        max_digits=22,
         decimal_places=18,
         null=True,
         blank=True,

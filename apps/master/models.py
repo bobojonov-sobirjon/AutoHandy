@@ -27,7 +27,7 @@ class Master(models.Model):
     city = models.CharField(max_length=100, blank=True, default='', verbose_name='City')
     address = models.TextField(blank=True, verbose_name='Address')
     latitude = models.DecimalField(
-        max_digits=20,
+        max_digits=22,
         decimal_places=18,
         null=True,
         blank=True,
@@ -35,7 +35,7 @@ class Master(models.Model):
         help_text='Workshop / service point on map; used with service area radius for distance and visibility.',
     )
     longitude = models.DecimalField(
-        max_digits=20,
+        max_digits=22,
         decimal_places=18,
         null=True,
         blank=True,

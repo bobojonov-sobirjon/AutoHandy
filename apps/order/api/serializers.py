@@ -681,8 +681,8 @@ class CustomRequestCreateSerializer(serializers.Serializer):
 
     text = serializers.CharField()
     location = serializers.CharField()
-    latitude = serializers.DecimalField(max_digits=20, decimal_places=18)
-    longitude = serializers.DecimalField(max_digits=20, decimal_places=18)
+    latitude = serializers.DecimalField(max_digits=22, decimal_places=18)
+    longitude = serializers.DecimalField(max_digits=22, decimal_places=18)
     car_list = serializers.ListField(
         child=serializers.IntegerField(),
         required=False,
