@@ -22,7 +22,6 @@ from apps.master.models import Master
 from apps.master.services.geo import haversine_distance_km
 from apps.accounts.serializers import UserSerializer
 from apps.master.api.serializers import MasterSerializer
-from apps.order.privacy import approximate_lat_lon, should_redact_exact_client_location
 from apps.order.services.master_offer import activate_pending_master_offer
 from apps.order.services.sos_master_queue import build_sos_master_id_queue
 from apps.order.services.status_workflow import client_cancellation_snapshot, order_master_distance_km
@@ -359,9 +358,7 @@ class OrderSerializer(serializers.ModelSerializer):
         return round(avg['avg_rating'], 2) if avg['avg_rating'] else None
 
     def get_location_precision(self, obj):
-        request = self.context.get('request')
-        user = request.user if request and getattr(request.user, 'is_authenticated', False) else None
-        return 'approximate' if should_redact_exact_client_location(obj, user) else 'exact'
+        return 'exact'
 
     def get_order_images(self, obj):
         request = self.context.get('request')
@@ -394,23 +391,6 @@ class OrderSerializer(serializers.ModelSerializer):
     def get_cancellation(self, obj):
         """Client cancellation policy for this order (see status_workflow.client_cancellation_snapshot)."""
         return client_cancellation_snapshot(obj)
-
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        request = self.context.get('request')
-        user = request.user if request and getattr(request.user, 'is_authenticated', False) else None
-        if should_redact_exact_client_location(instance, user):
-            data['location'] = 'Approximate service area'
-            if instance.latitude is not None and instance.longitude is not None:
-                alat, alon = approximate_lat_lon(
-                    float(instance.latitude), float(instance.longitude), instance.id
-                )
-                data['latitude'] = str(alat)
-                data['longitude'] = str(alon)
-            data['location_precision'] = 'approximate'
-        else:
-            data['location_precision'] = 'exact'
-        return data
 
     def validate_latitude(self, value):
         """Validate latitude"""
