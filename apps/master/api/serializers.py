@@ -22,6 +22,7 @@ from apps.order.services.status_workflow import (
 )
 from django.contrib.auth import get_user_model
 from apps.accounts.serializers import UserDetailsSerializer
+from config.wgs84 import WGS84_COORD_DECIMAL_KWARGS
 
 User = get_user_model()
 
@@ -69,6 +70,8 @@ class MasterImageSerializer(serializers.ModelSerializer):
 
 class MasterSerializer(serializers.ModelSerializer):
     """Master serializer"""
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
     user_info = serializers.SerializerMethodField()
     services = serializers.SerializerMethodField()
     images = serializers.SerializerMethodField()
@@ -264,12 +267,14 @@ class MasterSerializer(serializers.ModelSerializer):
 class MasterCreateSerializer(serializers.ModelSerializer):
     """Master create (no skills here — use POST /api/master/service-items/)."""
 
-    latitude = serializers.FloatField(
+    latitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
         required=False,
         allow_null=True,
         help_text='Latitude -90…90 — workshop map pin; set with longitude + service_area_radius_miles.',
     )
-    longitude = serializers.FloatField(
+    longitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
         required=False,
         allow_null=True,
         help_text='Longitude -180…180 — same point as workshop map pin; set with latitude + service_area_radius_miles.',
@@ -350,7 +355,7 @@ class MasterCreateSerializer(serializers.ModelSerializer):
         f = float(value)
         if not (-90 <= f <= 90):
             raise serializers.ValidationError('Latitude must be between -90 and 90')
-        return Decimal(str(f))
+        return value
 
     def validate_longitude(self, value):
         if value is None:
@@ -358,7 +363,7 @@ class MasterCreateSerializer(serializers.ModelSerializer):
         f = float(value)
         if not (-180 <= f <= 180):
             raise serializers.ValidationError('Longitude must be between -180 and 180')
-        return Decimal(str(f))
+        return value
 
     def validate_service_area_radius_miles(self, value):
         if value is None:
@@ -410,12 +415,14 @@ class MasterCreateSerializer(serializers.ModelSerializer):
 class MasterUpdateSerializer(serializers.ModelSerializer):
     """Master update serializer (partial update)"""
 
-    latitude = serializers.FloatField(
+    latitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
         required=False,
         allow_null=True,
         help_text='Latitude -90…90 — workshop map pin; set with longitude + service_area_radius_miles.',
     )
-    longitude = serializers.FloatField(
+    longitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
         required=False,
         allow_null=True,
         help_text='Longitude -180…180 — workshop map pin.',
@@ -488,7 +495,7 @@ class MasterUpdateSerializer(serializers.ModelSerializer):
         f = float(value)
         if not (-90 <= f <= 90):
             raise serializers.ValidationError('Latitude must be between -90 and 90')
-        return Decimal(str(f))
+        return value
 
     def validate_longitude(self, value):
         if value is None:
@@ -496,7 +503,7 @@ class MasterUpdateSerializer(serializers.ModelSerializer):
         f = float(value)
         if not (-180 <= f <= 180):
             raise serializers.ValidationError('Longitude must be between -180 and 180')
-        return Decimal(str(f))
+        return value
 
     def validate_service_area_radius_miles(self, value):
         if value is None:

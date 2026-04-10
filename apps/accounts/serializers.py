@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.core.exceptions import ValidationError
 import re
+from config.wgs84 import WGS84_COORD_DECIMAL_KWARGS
 from .models import AppVersion, CustomUser, FAQ
 
 
@@ -227,6 +228,8 @@ class SMSResponseSerializer(serializers.Serializer):
 
 class UserDetailsSerializer(serializers.ModelSerializer):
     """User details serializer (read-only)"""
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
     roles = serializers.SerializerMethodField()
     balance = serializers.SerializerMethodField()
     avatar = serializers.ImageField(use_url=True, read_only=True)
@@ -420,12 +423,13 @@ class UserLimitedProfileUpdateSerializer(serializers.ModelSerializer):
 class UserLocationUpdateSerializer(serializers.ModelSerializer):
     """JSON/FORM PUT: latitude, longitude and optional address."""
 
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=True, allow_null=True)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=True, allow_null=True)
+
     class Meta:
         model = CustomUser
         fields = ['latitude', 'longitude', 'address']
         extra_kwargs = {
-            'latitude': {'required': True, 'allow_null': True},
-            'longitude': {'required': True, 'allow_null': True},
             'address': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
 
@@ -452,6 +456,8 @@ class EmailVerificationConfirmSerializer(serializers.Serializer):
 
 class UserUpdateSerializer(serializers.ModelSerializer):
     """Serializer for updating user info"""
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
     avatar = serializers.ImageField(
         use_url=True,
         required=False,
@@ -477,8 +483,6 @@ class UserUpdateSerializer(serializers.ModelSerializer):
             'last_name': {'required': False},
             'date_of_birth': {'required': False},
             'address': {'required': False},
-            'longitude': {'required': False},
-            'latitude': {'required': False},
             'description': {'required': False},
         }
     

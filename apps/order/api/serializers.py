@@ -28,6 +28,7 @@ from apps.order.services.sos_master_queue import build_sos_master_id_queue
 from apps.order.services.status_workflow import client_cancellation_snapshot, order_master_distance_km
 from apps.order.services.order_pricing import get_cached_order_pricing
 from apps.order.services.standard_booking_availability import preferred_slot_blocked_message
+from config.wgs84 import WGS84_COORD_DECIMAL_KWARGS
 
 User = get_user_model()
 
@@ -153,6 +154,8 @@ class OrderSerializer(serializers.ModelSerializer):
     order_images = serializers.SerializerMethodField()
     work_completion_images = serializers.SerializerMethodField()
     cancellation = serializers.SerializerMethodField()
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
 
     pricing = OrderPricingNestedSerializer(source='*', read_only=True)
     workflow = OrderWorkflowNestedSerializer(source='*', read_only=True)
@@ -478,6 +481,8 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         allow_null=True,
         help_text='Standard only: desired slot start time. Master sets preferred_time_end after accept (PATCH).',
     )
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
 
     class Meta:
         model = Order
@@ -681,8 +686,8 @@ class CustomRequestCreateSerializer(serializers.Serializer):
 
     text = serializers.CharField()
     location = serializers.CharField()
-    latitude = serializers.DecimalField(max_digits=22, decimal_places=18)
-    longitude = serializers.DecimalField(max_digits=22, decimal_places=18)
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
     car_list = serializers.ListField(
         child=serializers.IntegerField(),
         required=False,
@@ -784,7 +789,10 @@ class OrderMasterPreferredTimePatchSerializer(serializers.Serializer):
 
 class OrderUpdateSerializer(serializers.ModelSerializer):
     """Order update serializer"""
-    
+
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
+
     class Meta:
         model = Order
         fields = [
