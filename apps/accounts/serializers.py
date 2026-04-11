@@ -232,7 +232,7 @@ class UserDetailsSerializer(serializers.ModelSerializer):
     longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
     roles = serializers.SerializerMethodField()
     balance = serializers.SerializerMethodField()
-    avatar = serializers.ImageField(use_url=True, read_only=True)
+    avatar = serializers.SerializerMethodField()
     reviews = serializers.SerializerMethodField()
     rating = serializers.SerializerMethodField()
     reviews_count = serializers.SerializerMethodField()
@@ -274,7 +274,12 @@ class UserDetailsSerializer(serializers.ModelSerializer):
                 logger = logging.getLogger(__name__)
                 logger.error(f"Error getting roles for user {obj.id}: {str(e)}")
         return []
-    
+
+    def get_avatar(self, obj):
+        from apps.order.services.notifications import _media_url
+
+        return _media_url(self.context.get('request'), getattr(obj, 'avatar', None))
+
     def get_balance(self, obj):
         """Get user balance"""
         try:

@@ -208,8 +208,15 @@ class OrderSerializer(serializers.ModelSerializer):
             return None
         request = self.context.get('request')
         hide = True
-        if request and request.user.is_authenticated and obj.master.user_id == request.user.id:
-            hide = False
+        if request and request.user.is_authenticated:
+            if obj.master.user_id == request.user.id:
+                hide = False
+            elif obj.user_id == request.user.id:
+                # Driver: show workshop coords once master is on the order (not custom-request still pending).
+                if obj.order_type == OrderType.CUSTOM_REQUEST and obj.status == OrderStatus.PENDING:
+                    hide = True
+                else:
+                    hide = False
         master = obj.master
         dist_km = order_master_distance_km(obj)
         if dist_km is not None:
