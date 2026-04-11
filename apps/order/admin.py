@@ -1,9 +1,11 @@
 from django.contrib import admin
+from django.db.models import Count
 from django.utils.html import format_html
 from django.urls import reverse
 
 from .models import (
     CustomRequestOffer,
+    CustomRequestOrder,
     MasterOrderCancellation,
     Order,
     OrderImage,
@@ -37,6 +39,16 @@ class OrderServiceInline(admin.TabularInline):
     extra = 0
     raw_id_fields = ['master_service_item']
     readonly_fields = ['created_at']
+
+
+class CustomRequestOfferInline(admin.TabularInline):
+    """Price offers from masters on a custom-request order (only on Custom request orders admin)."""
+
+    model = CustomRequestOffer
+    extra = 0
+    raw_id_fields = ['master']
+    fields = ['master', 'price', 'created_at', 'updated_at']
+    readonly_fields = ['created_at', 'updated_at']
 
 
 class BaseOrderAdmin(admin.ModelAdmin):
@@ -83,6 +95,27 @@ class BaseOrderAdmin(admin.ModelAdmin):
 
     master_link.short_description = 'Master'
     master_link.admin_order_field = 'master__user__first_name'
+
+    def assigned_master(self, obj):
+        """Who accepted / is assigned on this order (`order.master` FK)."""
+        if not obj.master_id:
+            return format_html(
+                '<span style="color:#888;" title="No master yet — pending / open">{}</span>',
+                '— pending',
+            )
+        m = obj.master
+        url = reverse('admin:master_master_change', args=[m.pk])
+        u = m.user
+        name = (u.get_full_name() or u.email or u.phone_number or str(u.pk)).strip()
+        return format_html(
+            '<a href="{}" title="Master ID {}">{}</a>',
+            url,
+            m.pk,
+            name,
+        )
+
+    assigned_master.short_description = 'Assigned master'
+    assigned_master.admin_order_field = 'master__user__first_name'
 
     def status_badge(self, obj):
         colors = {
@@ -164,7 +197,7 @@ class OrderAdmin(BaseOrderAdmin):
     list_display = [
         'order_type',
         'user_link',
-        'master_link',
+        'assigned_master',
         'status_badge',
         'priority_badge',
         'location_short',
@@ -257,7 +290,7 @@ class StandardOrderAdmin(BaseOrderAdmin):
     list_display = [
         'id',
         'user_link',
-        'master_link',
+        'assigned_master',
         'location_short',
         'status_badge',
         'priority_badge',
@@ -333,7 +366,7 @@ class SOSOrderAdmin(BaseOrderAdmin):
     list_display = [
         'id',
         'user_link',
-        'master_link',
+        'assigned_master',
         'location_short',
         'coords_link',
         'status_badge',
@@ -416,6 +449,97 @@ class SOSOrderAdmin(BaseOrderAdmin):
     sos_ring.short_description = 'SOS queue'
 
 
+@admin.register(CustomRequestOrder)
+class CustomRequestOrderAdmin(BaseOrderAdmin):
+    inlines = [CustomRequestOfferInline, OrderImageInline, OrderWorkCompletionImageInline, OrderServiceInline]
+
+    list_display = [
+        'id',
+        'user_link',
+        'assigned_master',
+        'offers_count',
+        'location_short',
+        'status_badge',
+        'priority_badge',
+        'created_at',
+    ]
+    list_filter = [
+        'status',
+        'priority',
+        ('created_at', admin.DateFieldListFilter),
+    ]
+    date_hierarchy = 'created_at'
+
+    fieldsets = (
+        (
+            'Custom request',
+            {
+                'fields': (
+                    'id',
+                    'order_type',
+                    'user',
+                    'master',
+                    'text',
+                    'status',
+                    'priority',
+                    'discount',
+                )
+            },
+        ),
+        (
+            'Location',
+            {
+                'fields': (
+                    'location',
+                    'location_source',
+                    'latitude',
+                    'longitude',
+                    'preferred_date',
+                    'preferred_time_start',
+                    'preferred_time_end',
+                ),
+                'classes': ('collapse',),
+            },
+        ),
+        (
+            'Workflow',
+            {
+                'fields': (
+                    'accepted_at',
+                    'master_response_deadline',
+                    'on_the_way_at',
+                    'estimated_arrival_at',
+                    'eta_minutes',
+                    'arrived_at',
+                    'work_started_at',
+                    'expiration_time',
+                ),
+                'classes': ('collapse',),
+            },
+        ),
+        (
+            'Other',
+            {'fields': ('parts_purchase_required', 'car', 'category')},
+        ),
+        (
+            'Timestamps',
+            {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)},
+        ),
+    )
+
+    def offers_count(self, obj):
+        return getattr(obj, '_offers_count', 0)
+
+    offers_count.short_description = 'Offers'
+
+    def get_queryset(self, request):
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(_offers_count=Count('custom_request_offers', distinct=True))
+        )
+
+
 @admin.register(OrderService)
 class OrderServiceAdmin(admin.ModelAdmin):
     list_display = ['id', 'order_link', 'service_name', 'service_price', 'created_at']
@@ -469,8 +593,8 @@ class OrderServiceAdmin(admin.ModelAdmin):
 
 @admin.register(Review)
 class ReviewAdmin(admin.ModelAdmin):
-    list_display = ['id', 'order_link', 'reviewer_link', 'rating_stars', 'tag_badge', 'created_at']
-    list_filter = ['rating', 'tag', ('created_at', admin.DateFieldListFilter)]
+    list_display = ['id', 'order_link', 'reviewer_link', 'rating_stars', 'tags_short', 'created_at']
+    list_filter = ['rating', ('created_at', admin.DateFieldListFilter)]
     search_fields = ['order__id', 'reviewer__email', 'reviewer__phone_number', 'comment']
     readonly_fields = ['id', 'created_at', 'updated_at']
     raw_id_fields = ['order', 'reviewer']
@@ -478,7 +602,7 @@ class ReviewAdmin(admin.ModelAdmin):
     date_hierarchy = 'created_at'
 
     fieldsets = (
-        ('Main', {'fields': ('id', 'order', 'reviewer', 'rating', 'tag')}),
+        ('Main', {'fields': ('id', 'order', 'reviewer', 'rating', 'tags')}),
         ('Comment', {'fields': ('comment',)}),
         ('Timestamps', {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
     )
@@ -504,13 +628,16 @@ class ReviewAdmin(admin.ModelAdmin):
 
     rating_stars.short_description = 'Rating'
 
-    def tag_badge(self, obj):
+    def tags_short(self, obj):
+        tags = obj.tags or []
+        if not tags:
+            return '—'
         return format_html(
-            '<span style="background:#6c757d;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;">{}</span>',
-            obj.get_tag_display(),
+            '<span style="font-size:11px;">{}</span>',
+            ', '.join(tags),
         )
 
-    tag_badge.short_description = 'Tag'
+    tags_short.short_description = 'Tags'
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('order', 'reviewer')
@@ -556,12 +683,3 @@ class MasterOrderCancellationAdmin(admin.ModelAdmin):
     readonly_fields = ['created_at']
     search_fields = ['order__id', 'master__user__email']
     date_hierarchy = 'created_at'
-
-
-@admin.register(CustomRequestOffer)
-class CustomRequestOfferAdmin(admin.ModelAdmin):
-    list_display = ['id', 'order_id', 'master_id', 'price', 'created_at']
-    list_filter = [('created_at', admin.DateFieldListFilter)]
-    raw_id_fields = ['order', 'master']
-    readonly_fields = ['created_at', 'updated_at']
-    search_fields = ['order__id', 'master__user__email']

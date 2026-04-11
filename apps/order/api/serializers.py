@@ -24,14 +24,33 @@ from apps.accounts.serializers import UserSerializer
 from apps.master.api.serializers import MasterSerializer
 from apps.order.services.master_offer import activate_pending_master_offer
 from apps.order.services.sos_master_queue import build_sos_master_id_queue
-from apps.order.services.status_workflow import client_cancellation_snapshot, order_master_distance_km
+from apps.order.services.status_workflow import (
+    client_cancellation_snapshot,
+    order_master_distance_km,
+    resolve_master_coordinates_for_start_job,
+)
 from apps.order.services.order_pricing import get_cached_order_pricing
 from apps.order.services.standard_booking_availability import preferred_slot_blocked_message
+from apps.order.services.notifications import _media_url
 from config.wgs84 import WGS84_COORD_DECIMAL_KWARGS
 
 User = get_user_model()
 
 CUSTOM_REQUEST_CATEGORY_MASK_MASTER = 'Incoming request'
+
+
+def review_tags_detail(tags):
+    """[{value, label}, ...] for API responses."""
+    if not tags:
+        return []
+    out = []
+    for t in tags:
+        try:
+            label = str(ReviewTag(t).label)
+        except ValueError:
+            label = str(t)
+        out.append({'value': t, 'label': label})
+    return out
 
 
 def _request_user_is_master(request) -> bool:
@@ -327,24 +346,27 @@ class OrderSerializer(serializers.ModelSerializer):
     def get_reviews(self, obj):
         """Get order reviews"""
         from apps.order.models import Review
-        
+
+        request = self.context.get('request')
         reviews = Review.objects.filter(order=obj).select_related('reviewer')
         if not reviews.exists():
             return []
-        
+
         return [
             {
                 'id': review.id,
                 'rating': review.rating,
                 'comment': review.comment,
-                'tag': review.tag,
-                'tag_display': review.get_tag_display(),
+                'tags': review.tags,
+                'tags_detail': review_tags_detail(review.tags),
                 'reviewer': {
                     'id': review.reviewer.id,
                     'full_name': review.reviewer.get_full_name(),
-                    'avatar': self.context['request'].build_absolute_uri(review.reviewer.avatar.url) if review.reviewer.avatar and self.context.get('request') else None
-                } if review.reviewer else None,
-                'created_at': review.created_at
+                    'avatar': _media_url(request, review.reviewer.avatar),
+                }
+                if review.reviewer
+                else None,
+                'created_at': review.created_at,
             }
             for review in reviews
         ]
@@ -363,29 +385,27 @@ class OrderSerializer(serializers.ModelSerializer):
     def get_order_images(self, obj):
         request = self.context.get('request')
         out = []
-        for im in obj.images.all():
-            url = None
-            if im.image:
-                url = (
-                    request.build_absolute_uri(im.image.url)
-                    if request
-                    else im.image.url
-                )
-            out.append({'id': im.id, 'image': url, 'created_at': im.created_at})
+        for im in obj.images.all().order_by('id'):
+            out.append(
+                {
+                    'id': im.id,
+                    'image': _media_url(request, im.image),
+                    'created_at': im.created_at,
+                }
+            )
         return out
 
     def get_work_completion_images(self, obj):
         request = self.context.get('request')
         out = []
-        for im in obj.work_completion_images.all():
-            url = None
-            if im.image:
-                url = (
-                    request.build_absolute_uri(im.image.url)
-                    if request
-                    else im.image.url
-                )
-            out.append({'id': im.id, 'image': url, 'created_at': im.created_at})
+        for im in obj.work_completion_images.all().order_by('id'):
+            out.append(
+                {
+                    'id': im.id,
+                    'image': _media_url(request, im.image),
+                    'created_at': im.created_at,
+                }
+            )
         return out
 
     def get_cancellation(self, obj):
@@ -743,6 +763,52 @@ class CustomRequestOfferSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class CustomRequestOfferWithMasterSerializer(serializers.ModelSerializer):
+    """Offer row for custom-request list/detail: full `MasterSerializer` + distance from order coords."""
+
+    master = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CustomRequestOffer
+        fields = ('id', 'price', 'created_at', 'updated_at', 'master')
+        read_only_fields = fields
+
+    def get_master(self, obj):
+        order = self.context['order']
+        request = self.context['request']
+        hide_exact = True
+        if order.master_id and obj.master_id == order.master_id:
+            hide_exact = False
+        if request.user.is_authenticated and obj.master.user_id == request.user.id:
+            hide_exact = False
+
+        m = obj.master
+        if order.latitude is not None and order.longitude is not None:
+            mlat, mlon, _err = resolve_master_coordinates_for_start_job(m, {})
+            if mlat is not None and mlon is not None:
+                m.distance = float(
+                    round(
+                        haversine_distance_km(
+                            mlat,
+                            mlon,
+                            float(order.latitude),
+                            float(order.longitude),
+                        ),
+                        3,
+                    )
+                )
+
+        ctx = {
+            **self.context,
+            'hide_master_exact_location': hide_exact,
+            'embed_order_min_price': True,
+        }
+        first_cat = order.category.first()
+        if first_cat is not None:
+            ctx['filter_service_category_id'] = first_cat.id
+        return MasterSerializer(m, context=ctx).data
+
+
 class OrderMasterPreferredTimePatchSerializer(serializers.Serializer):
     """Assigned master sets preferred_time_end after accept (start comes from client on create)."""
 
@@ -883,30 +949,34 @@ class AddMasterToOrderSerializer(serializers.Serializer):
 
 
 class ReviewSerializer(serializers.ModelSerializer):
-    """Review serializer"""
+    """Review serializer (GET): absolute avatar URL, multiple tags."""
     reviewer_info = serializers.SerializerMethodField()
-    tag_display = serializers.CharField(source='get_tag_display', read_only=True)
+    tags_detail = serializers.SerializerMethodField()
     order_info = serializers.SerializerMethodField()
 
     class Meta:
         model = Review
         fields = [
             'id', 'order', 'order_info', 'reviewer', 'reviewer_info',
-            'rating', 'comment', 'tag', 'tag_display', 'created_at', 'updated_at'
+            'rating', 'comment', 'tags', 'tags_detail', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'reviewer', 'created_at', 'updated_at']
 
     def get_reviewer_info(self, obj):
         """Review author info"""
+        request = self.context.get('request')
         if obj.reviewer:
             return {
                 'id': obj.reviewer.id,
                 'full_name': obj.reviewer.get_full_name(),
                 'email': obj.reviewer.email,
-                'avatar': obj.reviewer.avatar.url if obj.reviewer.avatar else None
+                'avatar': _media_url(request, obj.reviewer.avatar),
             }
         return None
-    
+
+    def get_tags_detail(self, obj):
+        return review_tags_detail(obj.tags)
+
     def get_order_info(self, obj):
         """Short order info"""
         if obj.order:
@@ -914,48 +984,45 @@ class ReviewSerializer(serializers.ModelSerializer):
                 'id': obj.order.id,
                 'text': obj.order.text,
                 'status': obj.order.status,
-                'created_at': obj.order.created_at
+                'created_at': obj.order.created_at,
             }
         return None
 
 
 class ReviewCreateSerializer(serializers.Serializer):
-    """Serializer for creating review"""
-    order_id = serializers.IntegerField(
-        help_text='Order ID'
-    )
-    rating = serializers.IntegerField(
-        min_value=1,
-        max_value=5,
-        help_text='Rating from 1 to 5'
-    )
+    """Create review: multipart or JSON; multiple ``tags``. No images — use work-completion-image API."""
+
+    order_id = serializers.IntegerField(help_text='Order ID')
+    rating = serializers.IntegerField(min_value=1, max_value=5, help_text='Rating from 1 to 5')
     comment = serializers.CharField(
         required=False,
         allow_blank=True,
-        help_text='Review comment'
+        help_text='Review comment',
     )
-    tag = serializers.ChoiceField(
-        choices=ReviewTag.choices,
-        help_text='What best describes your experience: one positive or one negative tag'
+    tags = serializers.ListField(
+        child=serializers.ChoiceField(choices=ReviewTag.choices),
+        min_length=1,
+        max_length=32,
+        help_text='One or more ReviewTag values (same as legacy single tag, but repeatable).',
     )
 
     def validate_order_id(self, value):
-        """Check order exists and can be reviewed"""
+        """Check order exists, belongs to request user, and can be reviewed."""
+        request = self.context.get('request')
         try:
             order = Order.objects.get(id=value)
-
-            if order.status != OrderStatus.COMPLETED:
-                raise serializers.ValidationError(
-                    'Review can only be left for a completed order'
-                )
-
-            if Review.objects.filter(order=order).exists():
-                raise serializers.ValidationError(
-                    'A review for this order has already been submitted'
-                )
-
         except Order.DoesNotExist:
             raise serializers.ValidationError(f'Order with ID {value} not found')
+
+        if order.status != OrderStatus.COMPLETED:
+            raise serializers.ValidationError('Review can only be left for a completed order')
+
+        if Review.objects.filter(order=order).exists():
+            raise serializers.ValidationError('A review for this order has already been submitted')
+
+        if request and request.user.is_authenticated and order.user_id != request.user.id:
+            raise serializers.ValidationError('You can only review your own orders.')
+
         return value
 
 

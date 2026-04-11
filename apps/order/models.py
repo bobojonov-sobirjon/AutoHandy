@@ -365,7 +365,7 @@ class MasterOrderCancellation(models.Model):
 
 
 class ReviewTag(models.TextChoices):
-    """Aspect of the experience (positive or negative); pick one."""
+    """Aspect of the experience (positive or negative); client may pick several."""
 
     FAST_WORK = 'fast_work', 'Fast work'
     NO_OVERPAY = 'no_overpay', 'No overpayment'
@@ -474,11 +474,10 @@ class Review(models.Model):
         verbose_name='Comment',
         help_text='Review text'
     )
-    tag = models.CharField(
-        max_length=50,
-        choices=ReviewTag.choices,
-        verbose_name='Review tag',
-        help_text='What best describes your experience (one tag)'
+    tags = models.JSONField(
+        default=list,
+        verbose_name='Review tags',
+        help_text='List of ReviewTag values (at least one)',
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
@@ -501,6 +500,19 @@ class Review(models.Model):
         """Model validation"""
         if self.rating < 1 or self.rating > 5:
             raise ValidationError({'rating': 'Rating must be from 1 to 5'})
+        valid = {c[0] for c in ReviewTag.choices}
+        raw = self.tags
+        if not isinstance(raw, list) or len(raw) == 0:
+            raise ValidationError({'tags': 'Select at least one tag.'})
+        seen = set()
+        ordered_unique = []
+        for t in raw:
+            if t not in valid:
+                raise ValidationError({'tags': f'Invalid tag: {t}'})
+            if t not in seen:
+                seen.add(t)
+                ordered_unique.append(t)
+        self.tags = ordered_unique
 
     def save(self, *args, **kwargs):
         self.clean()
@@ -528,7 +540,6 @@ class Review(models.Model):
                 user=user,
                 defaults={'average_rating': round(avg_rating, 2)}
             )
-
 
 class UserRating(models.Model):
     """
@@ -674,4 +685,28 @@ class SOSOrder(Order):
         if not self.order_type:
             self.order_type = OrderType.SOS
         self.priority = OrderPriority.HIGH
+        super().save(*args, **kwargs)
+
+
+class CustomRequestOrderManager(models.Manager):
+    """Manager for custom-request orders (client broadcast; masters send offers)."""
+
+    def get_queryset(self):
+        return super().get_queryset().filter(order_type=OrderType.CUSTOM_REQUEST)
+
+
+class CustomRequestOrder(Order):
+    """Proxy for custom-request orders (same DB table as ``Order``)."""
+
+    objects = CustomRequestOrderManager()
+
+    class Meta:
+        proxy = True
+        verbose_name = 'Custom request order'
+        verbose_name_plural = 'Custom request orders'
+        ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        if not self.order_type:
+            self.order_type = OrderType.CUSTOM_REQUEST
         super().save(*args, **kwargs)

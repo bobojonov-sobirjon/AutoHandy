@@ -99,6 +99,48 @@ def normalize_order_create_request_data(request) -> dict:
     return data
 
 
+def _coerce_tag_string_list(value):
+    """Multipart / form: JSON array string, comma-separated, or repeated keys → list[str]."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode('utf-8', errors='replace')
+    if isinstance(value, list):
+        out = []
+        for x in value:
+            if x is None or x == '':
+                continue
+            if isinstance(x, bytes):
+                x = x.decode('utf-8', errors='replace')
+            s = str(x).strip()
+            if s:
+                out.append(s)
+        return out
+    if not isinstance(value, str):
+        return value
+    s = value.strip().lstrip('\ufeff').strip()
+    if not s:
+        return []
+    if s.startswith('['):
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    if ',' in s:
+        return [p.strip() for p in s.split(',') if p.strip()]
+    return [s]
+
+
+def normalize_review_create_request_data(request) -> dict:
+    """multipart/form-data: parse ``tags`` for review create (no file fields on review)."""
+    data = _flatten_request_data(request.data)
+    if 'tags' in data:
+        data['tags'] = _coerce_tag_string_list(data['tags'])
+    return data
+
+
 def normalize_custom_request_create_data(request) -> dict:
     """Same list coercion as standard/SOS; no category_list (server assigns catalog row)."""
     data = _flatten_request_data(request.data)

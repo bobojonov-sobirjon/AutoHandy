@@ -399,6 +399,10 @@ SOS_WEBSOCKET_STALE_SWEEP_SEC = int(os.environ.get('SOS_WEBSOCKET_STALE_SWEEP_SE
 CUSTOM_REQUEST_BROADCAST_RADIUS_MILES = float(os.environ.get('CUSTOM_REQUEST_BROADCAST_RADIUS_MILES', '10'))
 CUSTOM_REQUEST_MIN_IMAGES = int(os.environ.get('CUSTOM_REQUEST_MIN_IMAGES', '2'))
 CUSTOM_REQUEST_MAX_IMAGES = int(os.environ.get('CUSTOM_REQUEST_MAX_IMAGES', '10'))
+# POST /api/order/<id>/work-completion-image/ — max files per request (multipart `images` repeated).
+WORK_COMPLETION_MAX_IMAGES_PER_REQUEST = int(
+    os.environ.get('WORK_COMPLETION_MAX_IMAGES_PER_REQUEST', '20')
+)
 
 # Celery (install redis and run: celery -A config worker -l info && celery -A config beat -l info)
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://127.0.0.1:6379/0')

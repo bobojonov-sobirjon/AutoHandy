@@ -53,6 +53,8 @@ from apps.order.api.payload import (
     attach_order_images_from_request,
     normalize_custom_request_create_data,
     normalize_order_create_request_data,
+    normalize_review_create_request_data,
+    _coerce_tag_string_list,
 )
 from apps.order.api.serializers import (
     OrderSerializer,
@@ -60,6 +62,7 @@ from apps.order.api.serializers import (
     CustomRequestCreateSerializer,
     CustomRequestOfferCreateSerializer,
     CustomRequestOfferSerializer,
+    CustomRequestOfferWithMasterSerializer,
     OrderMasterPreferredTimePatchSerializer,
     OrderUpdateSerializer,
     AddServicesToOrderSerializer,
@@ -98,6 +101,26 @@ MASTER_ACTIVE_WORK_STATUSES = (
     OrderStatus.ARRIVED,
     OrderStatus.IN_PROGRESS,
 )
+
+
+def _custom_request_offers_list_access(request, order):
+    """
+    Who may GET offers for a custom-request order:
+    - Order owner (driver): all offers.
+    - Assigned master: all offers.
+    - Any master who submitted an offer: only their own row(s) (no competitor prices).
+    Returns (allowed: bool, restrict_to_master: Master | None).
+    """
+    if order.user_id == request.user.id:
+        return True, None
+    viewer_master = Master.objects.filter(user=request.user).first()
+    if not viewer_master:
+        return False, None
+    if order.master_id == viewer_master.id:
+        return True, None
+    if CustomRequestOffer.objects.filter(order=order, master=viewer_master).exists():
+        return True, viewer_master
+    return False, None
 
 
 def _normalize_order_type_query_param(raw: str | None) -> str | None:
@@ -895,30 +918,64 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
 
 
 class CustomRequestOfferListCreateView(APIView):
-    """GET: order owner lists offers. POST: master submits one price offer per order (no updates)."""
+    """GET: driver (owner) or master lists offers + full order. POST: master submits one offer per order."""
 
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
-        summary='List price offers for a custom request (order owner)',
+        summary='List custom-request offers with full master + order (driver or master)',
+        description=(
+            '**Driver** (order owner): all offers, each with full `master` (MasterSerializer), plus `order`. '
+            '**Master**: only if they placed an offer on this order or are the assigned master; '
+            'competing masters see **only their own** offer in `offers`.'
+        ),
         tags=[STAG_ORDER_DETAILS],
-        responses={200: CustomRequestOfferSerializer(many=True)},
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'order': {'type': 'object', 'description': 'OrderSerializer payload'},
+                    'offers': {
+                        'type': 'array',
+                        'items': {'type': 'object'},
+                    },
+                },
+            },
+        },
     )
     def get(self, request, order_id):
-        order = get_object_or_404(Order, pk=order_id)
-        if order.user_id != request.user.id:
-            return Response(status=status.HTTP_403_FORBIDDEN)
+        order = get_object_or_404(
+            Order.objects.select_related('user', 'master', 'master__user').prefetch_related(
+                'images', 'category', 'category__parent', 'car', 'car__category'
+            ),
+            pk=order_id,
+        )
         if order.order_type != OrderType.CUSTOM_REQUEST:
             return Response(
                 {'detail': 'Not a custom request order.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        allowed, restrict_master = _custom_request_offers_list_access(request, order)
+        if not allowed:
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
         offers = (
             CustomRequestOffer.objects.filter(order=order)
             .select_related('master', 'master__user')
             .order_by('-created_at')
         )
-        return Response(CustomRequestOfferSerializer(offers, many=True).data)
+        if restrict_master is not None:
+            offers = offers.filter(master=restrict_master)
+
+        ser_ctx = {'request': request, 'order': order}
+        return Response(
+            {
+                'order': OrderSerializer(order, context={'request': request}).data,
+                'offers': CustomRequestOfferWithMasterSerializer(
+                    offers, many=True, context=ser_ctx
+                ).data,
+            }
+        )
 
     @extend_schema(
         summary='Submit a price offer (master, once per order)',
@@ -2538,15 +2595,28 @@ POST /api/order/5/complete/
 
 
 class UploadOrderWorkCompletionImageView(APIView):
-    """Мастер загружает фото выполненной работы (нужно ≥1 перед POST /complete/)."""
+    """Master uploads work-completion photos (≥1 total on order before POST /complete/). Multipart: repeat **`images`**."""
 
     permission_classes = [IsAuthenticated, IsMaster]
     parser_classes = [MultiPartParser, FormParser]
 
     @extend_schema(
-        summary='Загрузить фото выполненной работы',
+        summary='Загрузить фото выполненной работы (несколько файлов)',
+        description=(
+            '**multipart/form-data**: repeat field **`images`** for each file. '
+            'Legacy single field **`image`** is still accepted once. '
+            'Max files per request: **WORK_COMPLETION_MAX_IMAGES_PER_REQUEST** (default 20).'
+        ),
         tags=[STAG_ORDER_MASTER_COMPLETE],
-        request={'multipart/form-data': {'type': 'object', 'properties': {'image': {'type': 'string', 'format': 'binary'}}}},
+        request={
+            'multipart/form-data': {
+                'type': 'object',
+                'properties': {
+                    'images': {'type': 'array', 'items': {'type': 'string', 'format': 'binary'}},
+                    'image': {'type': 'string', 'format': 'binary', 'description': 'Legacy single file'},
+                },
+            }
+        },
         responses={201: OrderSerializer, 400: {'type': 'object'}, 403: {'type': 'object'}},
     )
     def post(self, request, order_id):
@@ -2565,82 +2635,49 @@ class UploadOrderWorkCompletionImageView(APIView):
                 {'error': 'Photos can be added after the order is accepted and until it is completed.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        image = request.FILES.get('image')
-        if not image:
-            return Response({'error': 'Pass an image file'}, status=status.HTTP_400_BAD_REQUEST)
-        OrderWorkCompletionImage.objects.create(order=order, image=image)
+
+        files = [f for f in request.FILES.getlist('images') if f]
+        if not files:
+            one = request.FILES.get('image')
+            if one:
+                files = [one]
+        if not files:
+            return Response(
+                {'error': 'Pass one or more files as `images` (repeat field) or a single `image`.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        max_per = int(getattr(settings, 'WORK_COMPLETION_MAX_IMAGES_PER_REQUEST', 20))
+        if len(files) > max_per:
+            return Response(
+                {'error': f'At most {max_per} images per request.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            for f in files:
+                OrderWorkCompletionImage.objects.create(order=order, image=f)
+
         order.refresh_from_db()
         return Response(OrderSerializer(order, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 
 class CreateReviewView(APIView):
-    """
-    API для создания отзыва о заказе и мастерах
-    """
+    """POST review: multipart (tags) or JSON. Work photos use **`POST .../work-completion-image/`** only."""
+
     permission_classes = [IsAuthenticated]
-    
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
     @extend_schema(
-        summary="Создать отзыв о заказе",
+        summary='Create order review (multipart or JSON; multiple tags)',
         description="""
-## Описание
-Создает отзыв о выполненном заказе. Рейтинг автоматически применяется ко всем мастерам, 
-назначенным на заказ (главный мастер и все мастера из списка).
+Submit as **`multipart/form-data`** or JSON:
 
-## 🎯 Когда использовать?
-- ✅ После завершения заказа (status = COMPLETED)
-- ✅ Клиент хочет оценить работу мастера
-- ✅ Один раз на заказ (повторные отзывы запрещены)
+- **`order_id`**, **`rating`**, **`tags`** (one or more — JSON string array, CSV, or repeated form fields), optional **`comment`**.
 
-## Request Body
-- `order_id`: ID завершенного заказа (обязательно)
-- `rating`: Рейтинг от 1 до 5 (обязательно)
-- `comment`: Текст отзыва (необязательно)
-- `tag`: Один тег, лучше всего описывающий опыт (обязательно). Для низкого рейтинга используйте блок «проблемы».
-  **Положительное:**
-  - `fast_work` - Оперативная работа
-  - `no_overpay` - Без переплат
-  - `deadline` - Соблюдение сроков
-  - `always_available` - Всегда на связи
-  - `individual_approach` - Индивидуальный подход
-  - `polite` - Вежливость
-  **Проблемы / негатив:**
-  - `late_or_delayed` - Опоздания / задержки
-  - `poor_quality` - Низкое качество работы
-  - `overpriced` - Завышенная цена
-  - `unprofessional` - Непрофессиональное поведение
-  - `hard_to_reach` - Плохая связь / трудно дозвониться
-  - `other_issue` - Другое (уточните в `comment`)
+Work completion photos are **not** attached here — use **`POST /api/order/{order_id}/work-completion-image/`** with repeated **`images`**.
 
-## Пример запроса:
-```json
-{
-  "order_id": 5,
-  "rating": 5,
-  "comment": "Отличная работа! Быстро и качественно.",
-  "tag": "fast_work"
-}
-```
-
-## Response:
-```json
-{
-  "message": "Отзыв успешно создан. Рейтинг применен к мастерам.",
-  "review": {
-    "id": 1,
-    "order": 5,
-    "rating": 5,
-    "comment": "Отличная работа!",
-    "tag": "fast_work",
-    "tag_display": "Оперативная работа",
-    "created_at": "2026-01-31T10:00:00Z"
-  }
-}
-```
-
-## Что происходит автоматически:
-1. ✅ Отзыв сохраняется в БД
-2. ✅ Рейтинг обновляется у мастера заказа (`order.master`)
-3. ✅ Средний рейтинг сохраняется в профиле мастера
+Response: **`tags`**, **`tags_detail`**, absolute URLs on nested media where applicable.
         """,
         tags=[STAG_ORDER_DRIVER_REVIEWS],
         request=ReviewCreateSerializer,
@@ -2651,57 +2688,56 @@ class CreateReviewView(APIView):
                 'properties': {'error': {'type': 'string'}},
                 'examples': {
                     'not_completed': {'value': {'error': 'Reviews are only allowed for completed orders'}},
-                    'already_exists': {'value': {'error': 'A review for this order already exists'}}
-                }
+                    'already_exists': {'value': {'error': 'A review for this order already exists'}},
+                },
             },
             404: {
                 'type': 'object',
                 'properties': {'error': {'type': 'string'}},
-                'example': {'error': 'Order not found'}
+                'example': {'error': 'Order not found'},
             },
             401: {
                 'type': 'object',
-                'properties': {'detail': {'type': 'string'}}
+                'properties': {'detail': {'type': 'string'}},
             },
-        }
+        },
     )
     def post(self, request):
-        """Создать отзыв о заказе"""
-        serializer = ReviewCreateSerializer(data=request.data)
-        
+        ct = (request.content_type or '').lower()
+        if 'multipart/form-data' in ct:
+            data = normalize_review_create_request_data(request)
+        else:
+            data = dict(request.data)
+            if isinstance(data.get('tags'), str):
+                data['tags'] = _coerce_tag_string_list(data['tags'])
+
+        serializer = ReviewCreateSerializer(data=data, context={'request': request})
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
+
         order_id = serializer.validated_data['order_id']
+        order = Order.objects.get(id=order_id)
         rating = serializer.validated_data['rating']
-        comment = serializer.validated_data.get('comment', '')
-        tag = serializer.validated_data['tag']
-        
-        try:
-            order = Order.objects.get(id=order_id)
-            
-            # Создаем отзыв
-            review = Review.objects.create(
-                order=order,
-                reviewer=request.user,
-                rating=rating,
-                comment=comment,
-                tag=tag
-            )
-            
-            # Рейтинг автоматически применится ко всем мастерам через save() метод
-            
-            result_serializer = ReviewSerializer(review)
-            return Response({
+        comment = serializer.validated_data.get('comment') or ''
+        tags = serializer.validated_data['tags']
+
+        review = Review.objects.create(
+            order=order,
+            reviewer=request.user,
+            rating=rating,
+            comment=comment,
+            tags=tags,
+        )
+
+        review = Review.objects.select_related('order', 'reviewer').get(pk=review.pk)
+        result_serializer = ReviewSerializer(review, context={'request': request})
+        return Response(
+            {
                 'message': 'Review created successfully. Rating applied to masters.',
-                'review': result_serializer.data
-            }, status=status.HTTP_201_CREATED)
-        
-        except Order.DoesNotExist:
-            return Response(
-                {'error': 'Order not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+                'review': result_serializer.data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 def _get_area_filter_for_orders(request):

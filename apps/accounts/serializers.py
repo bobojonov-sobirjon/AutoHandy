@@ -298,28 +298,44 @@ class UserDetailsSerializer(serializers.ModelSerializer):
     def get_reviews(self, obj):
         """Get all reviews about user (as master)"""
         try:
-            from apps.order.models import Review, Order
+            from apps.order.models import Review, ReviewTag, Order
             from apps.order.services.notifications import _media_url
 
             request = self.context.get('request')
             orders_as_main_master = Order.objects.filter(master__user=obj)
             all_order_ids = set(orders_as_main_master.values_list('id', flat=True))
-            reviews = Review.objects.filter(order_id__in=all_order_ids).order_by('-created_at')
-            
+            reviews = (
+                Review.objects.filter(order_id__in=all_order_ids)
+                .order_by('-created_at')
+                .select_related('reviewer', 'order')
+            )
+
+            def _tags_detail(tags):
+                if not tags:
+                    return []
+                out = []
+                for t in tags:
+                    try:
+                        label = str(ReviewTag(t).label)
+                    except ValueError:
+                        label = str(t)
+                    out.append({'value': t, 'label': label})
+                return out
+
             return [
                 {
                     'id': review.id,
                     'rating': review.rating,
                     'comment': review.comment,
-                    'tag': review.tag,
-                    'tag_display': review.get_tag_display(),
+                    'tags': review.tags,
+                    'tags_detail': _tags_detail(review.tags),
                     'reviewer': {
                         'id': review.reviewer.id,
                         'full_name': review.reviewer.get_full_name(),
                         'avatar': _media_url(request, review.reviewer.avatar),
                     },
                     'order_id': review.order.id,
-                    'created_at': review.created_at
+                    'created_at': review.created_at,
                 }
                 for review in reviews
             ]
