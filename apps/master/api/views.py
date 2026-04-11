@@ -172,7 +172,9 @@ class MasterListView(APIView):
         - `category` — ID категории типа **by_order** (умный поиск по навыкам / дереву parent)
         - `name` — текстовый поиск: услуги (подкатегории), город/адрес, имя/телефон пользователя-мастера
         - `lat` / `long` - геоточка пользователя; вместе с `radius` (**мили**, по умолчанию 10) оставляют мастеров в радиусе (внутри переводится в км для Haversine)
-        
+        - `date` (YYYY-MM-DD) — в БД должен быть **хотя бы один** `Master busy slot` с этой **датой**; рабочее окно дня = min–max времени по всем busy-слотам этого дня (или строка с обедом, как в busy-slots). Без busy-слотов на дату мастер не попадает в выдачу. ``Master schedule day`` для этого фильтра **не используется**.
+        - `time` (HH:MM или HH:MM:SS) — только с `date`: момент в свободном интервале `[start, end)` по той же логике слотов.
+
         **Примеры:**
         - `/api/master/masters/list/` — полный список
         - `/api/master/masters/list/?category=1` - мастера по категории (умный поиск)
@@ -222,7 +224,21 @@ class MasterListView(APIView):
                 location=OpenApiParameter.QUERY,
                 description='Радиус поиска в милях (по умолчанию 10 mi); distance в ответе — км',
                 required=False
-            )
+            ),
+            OpenApiParameter(
+                name='date',
+                type=str,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='YYYY-MM-DD — фильтр по календарю мастера (свободные слоты)',
+            ),
+            OpenApiParameter(
+                name='time',
+                type=str,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='HH:MM (опционально) — только с date; мастер должен быть свободен в этот момент',
+            ),
         ],
         responses={
             200: MasterSerializer(many=True)
@@ -351,7 +367,47 @@ class MasterListView(APIView):
                     {'error': 'Invalid coordinate or radius format'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-        
+
+        date_raw = (request.query_params.get('date') or '').strip()
+        time_raw = (request.query_params.get('time') or '').strip()
+        if time_raw and not date_raw:
+            return Response(
+                {
+                    'error': 'Parameter `date` (YYYY-MM-DD) is required when `time` is provided.',
+                    'code': 'date_required_with_time',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if date_raw:
+            from apps.master.services.slots import (
+                filter_masters_by_schedule_availability,
+                parse_nearby_schedule_date,
+                parse_nearby_schedule_time,
+            )
+
+            try:
+                check_date = parse_nearby_schedule_date(date_raw)
+            except ValueError:
+                return Response(
+                    {'error': 'Invalid date. Use YYYY-MM-DD.', 'code': 'invalid_date'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            at_time = None
+            if time_raw:
+                try:
+                    at_time = parse_nearby_schedule_time(time_raw)
+                except ValueError:
+                    return Response(
+                        {
+                            'error': 'Invalid time. Use HH:MM or HH:MM:SS.',
+                            'code': 'invalid_time',
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            if not isinstance(masters, list):
+                masters = list(masters)
+            masters = filter_masters_by_schedule_availability(masters, check_date, at_time)
+
         # Если после фильтрации нет результатов
         if not masters:
             return Response([], status=status.HTTP_200_OK)

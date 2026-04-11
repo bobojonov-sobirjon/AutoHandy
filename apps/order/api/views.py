@@ -311,6 +311,11 @@ class NearbyMasterCandidatesView(MasterListView):
 
 **Опционально:** `category` (by_order; **строгое** совпадение навыка), `name`.
 
+**Расписание (только ``Master busy slot`` с полем ``date``):**
+- На выбранную `date` у мастера должен быть **хотя бы один** busy-slot с этой датой. Рабочий коридор = min–max времени по слотам этого дня (или строка с обедом — как в GET busy-slots). **Master schedule days** и **working_time** для этого фильтра не используются.
+- Далее: **хотя бы один** свободный слот (`date` без `time`) или момент внутри свободного `[start, end)` (`date` + `time`).
+- `time` без `date` → **400**.
+
 **Пояснение в теле ответа (не ошибка):** `explain=1` или `debug=1` — вместо голого массива приходит объект:
 `{ "masters": [...], "nearby_explain": { счётчики, nearest_outside_radius (ближайшие за пределами radius с distance_km и km_beyond_radius), ... } }`.
 
@@ -365,6 +370,20 @@ JWT обязателен.
                 location=OpenApiParameter.QUERY,
                 required=False,
                 description='То же что explain=1 (алиас)',
+            ),
+            OpenApiParameter(
+                name='date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Фильтр по дню: мастер с ≥1 свободным слотом (логика busy-slots)',
+            ),
+            OpenApiParameter(
+                name='time',
+                type=OpenApiTypes.TIME,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='С date: мастер свободен в этот момент (интервал [start,end) из slots)',
             ),
         ],
         responses={200: MasterSerializer(many=True)},

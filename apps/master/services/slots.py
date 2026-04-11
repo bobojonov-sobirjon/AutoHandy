@@ -320,7 +320,12 @@ def _accepted_standard_order_busy_blocks(
     return blocks
 
 
-def build_master_day_slots_payload(master, check_date: date) -> tuple[dict | None, str | None]:
+def build_master_day_slots_payload(
+    master,
+    check_date: date,
+    *,
+    busy_date_only: bool = False,
+) -> tuple[dict | None, str | None]:
     """
     One-day calendar: working_hours, break_data, slots with availability.
     Same structure as GET /api/order/available-slots/ and GET master busy-slots?date=.
@@ -332,6 +337,10 @@ def build_master_day_slots_payload(master, check_date: date) -> tuple[dict | Non
     **Unavailable** rows show **exact** busy bounds (accepted standard orders + manual busy slots),
     overlapping orders merged. **Available** rows fill remaining work time (minus rest) with
     hour-aligned free intervals.
+
+    ``busy_date_only=True`` (nearby-masters date filter): **no** ``MasterScheduleDay`` / ``working_time``.
+    Work window = min–max ``start_time``/``end_time`` over **all** ``MasterBusySlot`` rows for that date
+    (unless the rest row above applies first). If there are no rows, caller should not invoke this mode.
     """
     from apps.master.models import MasterBusySlot, MasterScheduleDay
     from apps.order.services.status_workflow import validate_master_schedule_day_date
@@ -361,26 +370,36 @@ def build_master_day_slots_payload(master, check_date: date) -> tuple[dict | Non
             f'{work_start.strftime("%H:%M")}-{work_end.strftime("%H:%M")}'
         )
     else:
-        day_row = MasterScheduleDay.objects.filter(master=master, date=check_date).first()
-        schedule_source = 'master_schedule_day' if day_row else 'working_time_fallback'
-        if day_row:
-            work_start = day_row.start_time
-            work_end = day_row.end_time
+        if busy_date_only:
+            if not busy_all:
+                return None, 'No busy slots for this date.'
+            work_start = min(b.start_time for b in busy_all)
+            work_end = max(b.end_time for b in busy_all)
+            schedule_source = 'master_busy_slot_span'
             working_hours_display = (
-                f'{day_row.start_time.strftime("%H:%M")}-{day_row.end_time.strftime("%H:%M")}'
+                f'{work_start.strftime("%H:%M")}-{work_end.strftime("%H:%M")}'
             )
         else:
-            working_time = master.working_time or '09:00-18:00'
-            working_hours_display = working_time
-            try:
-                start_time_str, end_time_str = working_time.split('-')
-                sh, sm = map(int, start_time_str.strip().split(':'))
-                eh, em = map(int, end_time_str.strip().split(':'))
-                work_start = time(sh, sm)
-                work_end = time(eh, em)
-            except Exception:
-                work_start = time(9, 0)
-                work_end = time(18, 0)
+            day_row = MasterScheduleDay.objects.filter(master=master, date=check_date).first()
+            schedule_source = 'master_schedule_day' if day_row else 'working_time_fallback'
+            if day_row:
+                work_start = day_row.start_time
+                work_end = day_row.end_time
+                working_hours_display = (
+                    f'{day_row.start_time.strftime("%H:%M")}-{day_row.end_time.strftime("%H:%M")}'
+                )
+            else:
+                working_time = master.working_time or '09:00-18:00'
+                working_hours_display = working_time
+                try:
+                    start_time_str, end_time_str = working_time.split('-')
+                    sh, sm = map(int, start_time_str.strip().split(':'))
+                    eh, em = map(int, end_time_str.strip().split(':'))
+                    work_start = time(sh, sm)
+                    work_end = time(eh, em)
+                except Exception:
+                    work_start = time(9, 0)
+                    work_end = time(18, 0)
     rest_start = rest_slot.start_time_rest if rest_slot else None
     rest_hours = rest_slot.time_range_rest if rest_slot else None
     busy_for_overlap = [b for b in busy_all if rest_slot is None or b.pk != rest_slot.pk]
@@ -410,3 +429,80 @@ def build_master_day_slots_payload(master, check_date: date) -> tuple[dict | Non
         },
         None,
     )
+
+
+def parse_nearby_schedule_date(raw: str) -> date:
+    return datetime.strptime(raw.strip(), '%Y-%m-%d').date()
+
+
+def parse_nearby_schedule_time(raw: str) -> time:
+    s = raw.strip()
+    if s.endswith('Z') or s.endswith('z'):
+        s = s[:-1]
+    for fmt in ('%H:%M:%S.%f', '%H:%M:%S', '%H:%M'):
+        try:
+            return datetime.strptime(s, fmt).time().replace(microsecond=0)
+        except ValueError:
+            continue
+    raise ValueError('invalid time')
+
+
+def _parse_slot_boundary_label(label: str) -> time:
+    s = label.strip()
+    for fmt in ('%H:%M:%S', '%H:%M'):
+        try:
+            return datetime.strptime(s, fmt).time().replace(microsecond=0)
+        except ValueError:
+            continue
+    raise ValueError(label)
+
+
+def master_has_busy_slot_on_date(master, check_date: date) -> bool:
+    """True if there is at least one ``MasterBusySlot`` row for this master on ``check_date``."""
+    from apps.master.models import MasterBusySlot
+
+    return MasterBusySlot.objects.filter(master=master, date=check_date).exists()
+
+
+def master_has_free_slot_at(master, check_date: date, at_time: time | None) -> bool:
+    """
+    Nearby / list ``date``+``time`` filter: uses **only** ``MasterBusySlot`` rows on ``check_date``
+    (plus accepted standard orders merged the same way as busy-slots). No ``MasterScheduleDay`` /
+    ``working_time`` for the work window — span is min–max of that day's busy slots (or rest row).
+
+    - ``at_time`` is None: keep master if there is at least one ``available: true`` row.
+    - ``at_time`` set: keep only if that instant falls in ``[start, end)`` of an available row.
+    """
+    if not master_has_busy_slot_on_date(master, check_date):
+        return False
+    payload, err = build_master_day_slots_payload(master, check_date, busy_date_only=True)
+    if err or payload is None:
+        return False
+    slots_list = payload.get('slots') or []
+    if at_time is None:
+        return any(bool(s.get('available')) for s in slots_list)
+    point = _combine(check_date, at_time.replace(microsecond=0))
+    for s in slots_list:
+        if not s.get('available'):
+            continue
+        try:
+            st_t = _parse_slot_boundary_label(s['start'])
+            et_t = _parse_slot_boundary_label(s['end'])
+        except (KeyError, ValueError):
+            continue
+        lo = _combine(check_date, st_t)
+        hi = _combine(check_date, et_t)
+        if lo <= point < hi:
+            return True
+    return False
+
+
+def filter_masters_by_schedule_availability(
+    masters: list,
+    check_date: date,
+    at_time: time | None,
+) -> list:
+    """Filter an in-memory master list (e.g. after geo) by one-day schedule."""
+    if not masters:
+        return masters
+    return [m for m in masters if master_has_free_slot_at(m, check_date, at_time)]
