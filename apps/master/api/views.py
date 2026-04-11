@@ -1913,9 +1913,12 @@ class MasterScheduleListBulkView(APIView):
     @extend_schema(
         summary='Расписание: массовое сохранение дней',
         description=(
-            'Тело: `days` — произвольное число объектов `{date, start_time, end_time}`. '
-            'Даты в пределах политики (не в прошлом, не дальше max при штрафах). '
-            'Дубликаты дат в одном запросе запрещены.'
+            'Тело: `days` — объекты `{date, start_time, end_time}` (время можно как `HH:MM` или с `Z`). '
+            'Опционально на корне: `start_time_rest` + `time_range_rest` (часы, как у busy-slots) — '
+            'одинаковые для всех дней; обед должен попадать в рабочее окно каждого дня. '
+            'После сохранения расписания для каждой даты создаётся/обновляется один manual busy-slot '
+            'с `reason="schedule_bulk"` (зеркало графика; дальше можно дополнять через POST busy-slots). '
+            'Даты в пределах политики; дубликаты дат в одном запросе запрещены.'
         ),
         parameters=[
             OpenApiParameter(
@@ -1939,7 +1942,10 @@ class MasterScheduleListBulkView(APIView):
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         from apps.order.services.status_workflow import validate_master_schedule_day_date
 
-        for day in ser.validated_data['days']:
+        validated = ser.validated_data
+        from apps.master.services.schedule_bulk import upsert_schedule_bulk_busy_slots
+
+        for day in validated['days']:
             ok, err_msg = validate_master_schedule_day_date(master, day['date'])
             if not ok:
                 return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
@@ -1948,6 +1954,12 @@ class MasterScheduleListBulkView(APIView):
                 date=day['date'],
                 defaults={'start_time': day['start_time'], 'end_time': day['end_time']},
             )
+        upsert_schedule_bulk_busy_slots(
+            master,
+            validated['days'],
+            rest_start=validated.get('start_time_rest'),
+            rest_hours=validated.get('time_range_rest'),
+        )
         out = MasterScheduleDay.objects.filter(master=master).order_by('date')
         return Response(MasterScheduleDaySerializer(out, many=True).data, status=status.HTTP_201_CREATED)
 

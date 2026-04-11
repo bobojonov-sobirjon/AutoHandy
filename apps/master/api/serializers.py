@@ -1,6 +1,8 @@
 from datetime import date, timedelta
 from decimal import Decimal
 
+from apps.master.services.time_parse import parse_flexible_time
+
 from drf_spectacular.utils import OpenApiExample, extend_schema_serializer
 from rest_framework import serializers
 from apps.master.models import (
@@ -922,6 +924,17 @@ class UpdateServiceItemSerializer(serializers.ModelSerializer):
         return Decimal(str(f))
 
 
+class FlexibleTimeField(serializers.Field):
+    """Accept ``time``, ``HH:MM``, ISO time with ``Z``, or datetime string (``T`` → time part)."""
+
+    def to_internal_value(self, data):
+        if data in (None, ''):
+            if self.allow_null:
+                return None
+            self.fail('required')
+        return parse_flexible_time(data)
+
+
 class MasterScheduleDaySerializer(serializers.ModelSerializer):
     class Meta:
         model = MasterScheduleDay
@@ -943,8 +956,8 @@ class MasterScheduleDaySerializer(serializers.ModelSerializer):
 
 class MasterScheduleDayWriteSerializer(serializers.Serializer):
     date = serializers.DateField()
-    start_time = serializers.TimeField()
-    end_time = serializers.TimeField()
+    start_time = FlexibleTimeField(required=True, allow_null=False)
+    end_time = FlexibleTimeField(required=True, allow_null=False)
 
     def validate(self, attrs):
         if attrs['end_time'] <= attrs['start_time']:
@@ -954,12 +967,42 @@ class MasterScheduleDayWriteSerializer(serializers.Serializer):
 
 class MasterScheduleBulkSerializer(serializers.Serializer):
     days = MasterScheduleDayWriteSerializer(many=True)
+    start_time_rest = FlexibleTimeField(required=False, allow_null=True)
+    time_range_rest = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+    )
 
     def validate_days(self, value):
         dates = [item['date'] for item in value]
         if len(dates) != len(set(dates)):
             raise serializers.ValidationError('Each date must appear at most once.')
         return value
+
+    def validate(self, attrs):
+        from apps.master.services.schedule_bulk import rest_interval_outside_work
+
+        rs = attrs.get('start_time_rest')
+        tr = attrs.get('time_range_rest')
+        if (rs is None) ^ (tr is None):
+            raise serializers.ValidationError(
+                'start_time_rest and time_range_rest must both be sent or both omitted.'
+            )
+        if rs is not None and tr is not None:
+            if tr <= Decimal('0'):
+                raise serializers.ValidationError(
+                    {'time_range_rest': 'Must be greater than 0 when start_time_rest is set.'}
+                )
+            for day in attrs['days']:
+                if rest_interval_outside_work(
+                    day['date'], day['start_time'], day['end_time'], rs, tr
+                ):
+                    raise serializers.ValidationError(
+                        f'Rest interval must fall within working hours on {day["date"]}.'
+                    )
+        return attrs
 
 
 class MasterBusySlotSerializer(serializers.ModelSerializer):
