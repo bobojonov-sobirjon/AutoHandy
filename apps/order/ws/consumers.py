@@ -68,7 +68,15 @@ class MasterSosConsumer(AsyncWebsocketConsumer):
         await self.accept()
         await self.send(
             text_data=json.dumps(
-                {'type': 'connected', 'channel': 'sos_incoming_orders'},
+                {
+                    'type': 'connected',
+                    'channel': 'sos_incoming_orders',
+                    'incoming_sync': {
+                        'method': 'GET',
+                        'path': '/api/order/master/incoming-sync/',
+                        'hint': 'Call after connect/reconnect and on app resume to recover missed SOS/custom_request.',
+                    },
+                },
             )
         )
         from django.conf import settings

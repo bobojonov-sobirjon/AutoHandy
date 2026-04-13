@@ -78,14 +78,21 @@ def current_sos_offered_master_id(order: Order) -> int | None:
     return ids[0] if ids else None
 
 
-def order_ids_sos_currently_offered_to_master(master_pk: int) -> list[int]:
-    """Order PKs for pending SOS broadcast where this master may still accept."""
+def order_ids_sos_currently_offered_to_master(master_pk: int, *, now=None) -> list[int]:
+    """Order PKs for pending SOS broadcast where this master may still accept (active deadline only)."""
+    now = now or timezone.now()
     ids: list[int] = []
-    qs = Order.objects.filter(
-        order_type=OrderType.SOS,
-        status=OrderStatus.PENDING,
-        master__isnull=True,
-    ).exclude(sos_offer_queue=[])
+    qs = (
+        Order.objects.filter(
+            order_type=OrderType.SOS,
+            status=OrderStatus.PENDING,
+            master__isnull=True,
+            master_response_deadline__isnull=False,
+            master_response_deadline__gt=now,
+        )
+        .exclude(sos_offer_queue=[])
+        .only('id', 'sos_offer_queue', 'sos_declined_master_ids', 'latitude', 'longitude')
+    )
     for o in qs.iterator(chunk_size=200):
         if master_eligible_for_pending_sos_offer(o, master_pk):
             ids.append(o.pk)

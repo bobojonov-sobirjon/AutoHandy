@@ -25,6 +25,11 @@ urlpatterns = [
     path('<int:id>/', views.OrderDetailView.as_view(), name='order-detail'),
     path('by-user/', views.OrdersByUserView.as_view(), name='orders-by-user'),
     path('by-master/', views.OrdersByMasterView.as_view(), name='orders-by-master'),
+    path(
+        'master/incoming-sync/',
+        views.MasterIncomingSyncView.as_view(),
+        name='master-incoming-sync',
+    ),
     path('available/', views.AvailableOrdersForMasterView.as_view(), name='available-orders'),
     path('<int:order_id>/cancel/', views.CancelOrderView.as_view(), name='cancel-order'),
     path('<int:order_id>/status/', views.UpdateOrderStatusView.as_view(), name='update-status'),

@@ -26,6 +26,10 @@ from apps.order.services.status_workflow import (
     validate_master_cancel,
 )
 from apps.order.services.celery_schedule import schedule_client_penalty_free_unlock
+from apps.order.services.master_inbox_sync import (
+    pending_assigned_standard_order_ids_for_master,
+    pending_custom_request_order_ids_for_master,
+)
 from apps.order.services.sos_rotation import (
     master_eligible_for_pending_sos_offer,
     master_in_sos_broadcast_queue,
@@ -1799,8 +1803,10 @@ GET /api/order/by-master/?order_type=standard&status=pending
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        # Заказы: FK master + pending SOS где сейчас этот мастер в очереди (FK может быть null)
-        extra_ids = order_ids_sos_currently_offered_to_master(master.id)
+        # Заказы: FK master + pending SOS (активное окно) + открытые custom_request в радиусе broadcast
+        extra_sos = order_ids_sos_currently_offered_to_master(master.id)
+        extra_custom = pending_custom_request_order_ids_for_master(master)
+        extra_ids = list(dict.fromkeys([*extra_sos, *extra_custom]))
         if extra_ids:
             orders = Order.objects.filter(Q(master=master) | Q(pk__in=extra_ids))
         else:
@@ -1893,6 +1899,120 @@ GET /api/order/by-master/?order_type=standard&status=pending
         
         serializer = OrderSerializer(orders, many=True, context={'request': request})
         return Response(serializer.data)
+
+
+def _incoming_sync_typed_items(orders: list[Order], request) -> list[dict]:
+    """Each entry: ``order_type`` (sos | custom_request | standard) + full ``order`` payload."""
+    if not orders:
+        return []
+    ctx = {'request': request}
+    rows = OrderSerializer(orders, many=True, context=ctx).data
+    return [{'order_type': o.order_type, 'order': row} for o, row in zip(orders, rows)]
+
+
+class MasterIncomingSyncView(APIView):
+    """
+    REST-ответ на случай, если WebSocket был офлайн: активные SOS, открытые custom_request
+    и назначенные standard (pending, клиент передал master_id, мастер ещё не принял).
+    """
+
+    permission_classes = [IsAuthenticated, IsMaster]
+
+    @extend_schema(
+        summary='Синхронизация входящих SOS, custom request и standard (pending)',
+        description="""
+Вызывайте при открытии приложения мастера, после **reconnect** WebSocket ``/ws/sos/master/`` или по pull-to-refresh.
+
+1. Сначала выполняется ``expire_stale_master_offers`` (как в других master-эндпоинтах) — просроченные SOS/назначенный standard/custom-offer окна приводятся к актуальному состоянию.
+2. **sos** — ``pending``, broadcast-очередь, ``master_response_deadline`` в будущем, мастер в зоне приёма и не в ``sos_declined_master_ids``.
+3. **custom_request** — ``pending``, без назначенного мастера, не истёк ``expiration_time``, точка заказа в пределах ``CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`` (как при Celery broadcast).
+4. **standard** — ``pending``, ``master`` = текущий мастер (клиент указал ``master_id`` при создании), срок ответа не истёк (см. ``MASTER_OFFER_RESPONSE_MINUTES``).
+
+Каждый элемент массивов **sos**, **custom_request**, **standard** — объект ``{ "order_type": "...", "order": { ... OrderSerializer } }`` (``order_type`` дублирует поле внутри ``order`` для удобства списков).
+
+Ответ не заменяет WebSocket; дубли с уже показанными push-сообщениями клиент может смержить по ``order.id``.
+        """,
+        tags=[STAG_ORDER_MASTER_AVAILABLE],
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'stale_offers_swept': {'type': 'integer'},
+                    'server_time': {'type': 'string', 'format': 'date-time'},
+                    'sos': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'order_type': {'type': 'string'},
+                                'order': {'type': 'object'},
+                            },
+                        },
+                    },
+                    'custom_request': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'order_type': {'type': 'string'},
+                                'order': {'type': 'object'},
+                            },
+                        },
+                    },
+                    'standard': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'order_type': {'type': 'string'},
+                                'order': {'type': 'object'},
+                            },
+                        },
+                    },
+                },
+            },
+            403: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
+        },
+    )
+    def get(self, request):
+        master = request.user.master_profiles.first()
+        if not master:
+            return Response({'error': 'User is not a master'}, status=status.HTTP_403_FORBIDDEN)
+
+        swept = expire_stale_master_offers()
+        sos_ids = order_ids_sos_currently_offered_to_master(master.id)
+        custom_ids = pending_custom_request_order_ids_for_master(master)
+        standard_ids = pending_assigned_standard_order_ids_for_master(master.id)
+        id_set = set(sos_ids) | set(custom_ids) | set(standard_ids)
+        order_map: dict[int, Order] = {}
+        if id_set:
+            order_map = {
+                o.id: o
+                for o in Order.objects.select_related('user', 'master', 'master__user').prefetch_related(
+                    'images',
+                    'category',
+                    'category__parent',
+                    'car',
+                    'car__category',
+                ).filter(pk__in=id_set)
+            }
+
+        sos_orders = [order_map[i] for i in sos_ids if i in order_map]
+        custom_orders = [order_map[i] for i in custom_ids if i in order_map]
+        standard_orders = [order_map[i] for i in standard_ids if i in order_map]
+        sos_orders.sort(key=lambda o: (o.master_response_deadline is None, o.master_response_deadline))
+        custom_orders.sort(key=lambda o: o.created_at, reverse=True)
+        standard_orders.sort(key=lambda o: (o.master_response_deadline is None, o.master_response_deadline))
+
+        return Response(
+            {
+                'stale_offers_swept': swept,
+                'server_time': timezone.now().isoformat(),
+                'sos': _incoming_sync_typed_items(sos_orders, request),
+                'custom_request': _incoming_sync_typed_items(custom_orders, request),
+                'standard': _incoming_sync_typed_items(standard_orders, request),
+            }
+        )
 
 
 class UpdateOrderStatusView(APIView):
