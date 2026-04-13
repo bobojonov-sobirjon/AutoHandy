@@ -1910,6 +1910,32 @@ def _incoming_sync_typed_items(orders: list[Order], request) -> list[dict]:
     return [{'order_type': o.order_type, 'order': row} for o, row in zip(orders, rows)]
 
 
+def _incoming_sync_custom_request_typed_items(
+    orders: list[Order],
+    request,
+    master: Master,
+) -> list[dict]:
+    """Like ``_incoming_sync_typed_items`` plus ``is_offer_sent`` from ``CustomRequestOffer``."""
+    if not orders:
+        return []
+    oid_set = {o.id for o in orders}
+    offered = set(
+        CustomRequestOffer.objects.filter(master=master, order_id__in=oid_set).values_list(
+            'order_id', flat=True
+        )
+    )
+    ctx = {'request': request}
+    rows = OrderSerializer(orders, many=True, context=ctx).data
+    return [
+        {
+            'order_type': o.order_type,
+            'is_offer_sent': o.id in offered,
+            'order': row,
+        }
+        for o, row in zip(orders, rows)
+    ]
+
+
 class MasterIncomingSyncView(APIView):
     """
     REST-ответ на случай, если WebSocket был офлайн: активные SOS, открытые custom_request
@@ -1928,7 +1954,9 @@ class MasterIncomingSyncView(APIView):
 3. **custom_request** — ``pending``, без назначенного мастера, не истёк ``expiration_time``, точка заказа в пределах ``CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`` (как при Celery broadcast).
 4. **standard** — ``pending``, ``master`` = текущий мастер (клиент указал ``master_id`` при создании), срок ответа не истёк (см. ``MASTER_OFFER_RESPONSE_MINUTES``).
 
-Каждый элемент массивов **sos**, **custom_request**, **standard** — объект ``{ "order_type": "...", "order": { ... OrderSerializer } }`` (``order_type`` дублирует поле внутри ``order`` для удобства списков).
+Каждый элемент **sos** и **standard** — ``{ "order_type": "...", "order": { ... OrderSerializer } }``.
+
+Элементы **custom_request** дополнительно содержат ``is_offer_sent`` (bool): есть ли у этого мастера строка ``CustomRequestOffer`` на данный заказ.
 
 Ответ не заменяет WebSocket; дубли с уже показанными push-сообщениями клиент может смержить по ``order.id``.
         """,
@@ -1955,6 +1983,7 @@ class MasterIncomingSyncView(APIView):
                             'type': 'object',
                             'properties': {
                                 'order_type': {'type': 'string'},
+                                'is_offer_sent': {'type': 'boolean'},
                                 'order': {'type': 'object'},
                             },
                         },
@@ -2009,7 +2038,7 @@ class MasterIncomingSyncView(APIView):
                 'stale_offers_swept': swept,
                 'server_time': timezone.now().isoformat(),
                 'sos': _incoming_sync_typed_items(sos_orders, request),
-                'custom_request': _incoming_sync_typed_items(custom_orders, request),
+                'custom_request': _incoming_sync_custom_request_typed_items(custom_orders, request, master),
                 'standard': _incoming_sync_typed_items(standard_orders, request),
             }
         )
