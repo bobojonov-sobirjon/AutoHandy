@@ -160,6 +160,7 @@ class OrderSerializer(serializers.ModelSerializer):
     """Order serializer (pricing/workflow/eta guruhlari; SOS navbati API da yashirin)."""
     user = serializers.SerializerMethodField()
     master = serializers.SerializerMethodField()
+    client_completion_pin = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     order_type_display = serializers.CharField(source='get_order_type_display', read_only=True)
@@ -194,6 +195,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'workflow', 'eta',
             'order_images', 'work_completion_images',
             'timestamps', 'cancellation',
+            'client_completion_pin',
         ]
         read_only_fields = [
             'id',
@@ -202,7 +204,21 @@ class OrderSerializer(serializers.ModelSerializer):
     
     def get_user(self, obj):
         return UserSerializer(obj.user, context=self.context).data
-    
+
+    def get_client_completion_pin(self, obj):
+        """4-digit code for the order owner while in_progress; master never sees this in API."""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return None
+        if obj.user_id != request.user.id:
+            return None
+        if obj.status != OrderStatus.IN_PROGRESS:
+            return None
+        pin = (getattr(obj, 'completion_pin', None) or '').strip()
+        if len(pin) != 4 or not pin.isdigit():
+            return None
+        return pin
+
     def get_master(self, obj):
         if not obj.master_id:
             return None

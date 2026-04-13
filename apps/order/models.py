@@ -231,6 +231,19 @@ class Order(models.Model):
         verbose_name='Preferred time end',
         help_text='Set by assigned master via PATCH when status is accepted.',
     )
+    completion_pin = models.CharField(
+        max_length=4,
+        blank=True,
+        default='',
+        verbose_name='Work completion PIN',
+        help_text='4-digit code shown to the client during in_progress; master must submit it to complete.',
+    )
+    completion_pin_issued_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Completion PIN issued at',
+        help_text='When status became in_progress and the PIN was generated.',
+    )
 
     class Meta:
         verbose_name = 'Order'

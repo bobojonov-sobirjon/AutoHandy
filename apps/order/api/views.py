@@ -14,8 +14,10 @@ from django.utils import timezone
 from django.conf import settings
 import json
 import logging
+import secrets
 
 from apps.categories.query import order_by_order_category_smart_q
+from apps.order.services.completion_pin import clear_completion_pin, issue_completion_pin
 from apps.order.services.offer_expiry import expire_stale_master_offers
 from apps.order.services.master_offer import activate_pending_master_offer
 from apps.order.services.status_workflow import (
@@ -1645,7 +1647,8 @@ class OrdersByMasterView(APIView):
         summary="Получить заказы текущего мастера",
         description="""
 ## Описание
-Возвращает список заказов, назначенных текущему мастеру (master берется из header/token).
+Возвращает список заказов, назначенных текущему мастеру (``master`` FK = вы), плюс активные SOS в очереди.
+**Custom request** с пустым ``master`` сюда **не входит** (пока клиент не выбрал мастера) — только incoming sync / WebSocket.
 
 ## Фильтры (все необязательные)
 
@@ -1787,7 +1790,7 @@ GET /api/order/by-master/?order_type=standard&status=pending
         }
     )
     def get(self, request):
-        """Получить заказы текущего мастера в области"""
+        """Получить заказы текущего мастера (custom request без назначенного master FK не включаются)."""
         expire_stale_master_offers()
         # Проверяем, что пользователь является мастером
         try:
@@ -1803,10 +1806,9 @@ GET /api/order/by-master/?order_type=standard&status=pending
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        # Заказы: FK master + pending SOS (активное окно) + открытые custom_request в радиусе broadcast
+        # Заказы: FK master + pending SOS. Custom request с master=null не показываем — клиент должен назначить мастера.
         extra_sos = order_ids_sos_currently_offered_to_master(master.id)
-        extra_custom = pending_custom_request_order_ids_for_master(master)
-        extra_ids = list(dict.fromkeys([*extra_sos, *extra_custom]))
+        extra_ids = list(dict.fromkeys(extra_sos))
         if extra_ids:
             orders = Order.objects.filter(Q(master=master) | Q(pk__in=extra_ids))
         else:
@@ -2048,7 +2050,7 @@ class UpdateOrderStatusView(APIView):
     """
     Строгий workflow: мастер — accepted → on_the_way → arrived → in_progress
     (для проверки дистанции: lat/lon в теле опционально — иначе из профиля Master / user).
-    Клиент / мастер — отмена заказа: предпочтительно **POST /api/order/{id}/cancel/** (там же оценка штрафа). Здесь `status=cancelled` оставлен для совместимости. Завершение — POST /complete/.
+    Клиент / мастер — отмена заказа: предпочтительно **POST /api/order/{id}/cancel/** (там же оценка штрафа). Здесь `status=cancelled` оставлен для совместимости. Завершение — **POST /complete/** только мастером, с телом **completion_pin** (код у клиента).
     """
 
     permission_classes = [IsAuthenticated, IsOrderOwnerOrMaster]
@@ -2063,7 +2065,9 @@ class UpdateOrderStatusView(APIView):
             'Отмена мастером: status=cancelled, cancel_reason. '
             'Клиент: status=cancelled. '
             'После N ч «в пути» (Celery / таймер) — client_penalty_free_cancel_unlocked и отмена без штрафа. '
-            'В in_progress отмена клиентом запрещена (см. cancellation в Order).'
+            'В in_progress отмена клиентом запрещена (см. cancellation в Order). '
+            'После перехода в in_progress клиенту выдаётся 4-значный PIN (поле client_completion_pin в заказе); '
+            'завершение только мастером: POST /complete/ с completion_pin.'
         ),
         tags=[STAG_ORDER_STATUS],
         parameters=[
@@ -2155,6 +2159,7 @@ class UpdateOrderStatusView(APIView):
                 order.client_penalty_free_cancel_unlocked = False
                 order.estimated_arrival_at = None
                 order.eta_minutes = None
+                clear_completion_pin(order)
                 order.save()
                 data = OrderSerializer(order, context={'request': request}).data
                 data.update(extra_response)
@@ -2170,6 +2175,7 @@ class UpdateOrderStatusView(APIView):
                 order.client_penalty_free_cancel_unlocked = False
                 order.estimated_arrival_at = None
                 order.eta_minutes = None
+                clear_completion_pin(order)
                 order.save()
                 return Response(OrderSerializer(order, context={'request': request}).data)
 
@@ -2280,12 +2286,15 @@ class UpdateOrderStatusView(APIView):
             order.work_started_at = now
             order.estimated_arrival_at = None
             order.eta_minutes = None
+            issue_completion_pin(order)
             order.save(
                 update_fields=[
                     'status',
                     'work_started_at',
                     'estimated_arrival_at',
                     'eta_minutes',
+                    'completion_pin',
+                    'completion_pin_issued_at',
                     'updated_at',
                 ]
             )
@@ -2353,6 +2362,7 @@ class CancelOrderView(APIView):
             order.client_penalty_free_cancel_unlocked = False
             order.estimated_arrival_at = None
             order.eta_minutes = None
+            clear_completion_pin(order)
             order.save()
             data = OrderSerializer(order, context={'request': request}).data
             data['cancellation_penalty_applies'] = snap['penalty_applies']
@@ -2373,6 +2383,7 @@ class CancelOrderView(APIView):
             order.client_penalty_free_cancel_unlocked = False
             order.estimated_arrival_at = None
             order.eta_minutes = None
+            clear_completion_pin(order)
             order.save()
             return Response(
                 {
@@ -2646,119 +2657,145 @@ class OrderMasterPreferredTimePatchView(APIView):
 
 class CompleteOrderView(APIView):
     """
-    API для завершения заказа (отметка как выполненного)
+    Завершение заказа только назначенным мастером: в теле JSON обязателен **completion_pin**
+    (4 цифры, клиент видит код в приложении пока заказ **in_progress**).
     """
+
     permission_classes = [IsAuthenticated]
-    
+
     @extend_schema(
-        summary="Завершить заказ",
+        summary="Завершить заказ (мастер + PIN клиента)",
         description="""
-## Описание
-Завершает заказ, устанавливая статус **COMPLETED** (Завершен).
+Только **назначенный мастер**. Статус заказа — **in_progress**, загружено ≥1 фото работы.
 
-## 🎯 Когда использовать?
-- ✅ Работа по заказу выполнена
-- ✅ Клиент доволен результатом
-- ✅ Заказ готов к закрытию
-- ✅ Можно оставить рейтинг и отзыв
+В теле передайте **completion_pin** — 4-значный код, который клиент видит в своём приложении
+(поле **client_completion_pin** в ответе заказа для владельца).
 
-## Требования:
-- Заказ должен существовать
-- Пользователь должен быть авторизован
-
-## Пример запроса:
-```
-POST /api/order/5/complete/
-```
-
-## Response:
-```json
-{
-  "message": "Заказ успешно завершен",
-  "order": {
-    "id": 5,
-    "status": "completed",
-    "status_display": "Завершен",
-    "user": {...},
-    "master": {...},
-    "text": "Замена масла",
-    "created_at": "2026-01-30T10:00:00Z"
-  }
-}
-```
-
-## Workflow:
-1. Мастер завершает работу по заказу
-2. Отправляет POST запрос на `/api/order/{order_id}/complete/`
-3. Заказ переходит в статус **COMPLETED**
-4. Клиент может оставить рейтинг и отзыв
+Клиент не может завершить заказ через этот endpoint.
         """,
         tags=[STAG_ORDER_MASTER_COMPLETE],
         parameters=[
             {'name': 'order_id', 'in': 'path', 'description': 'Order ID', 'type': 'integer', 'required': True},
         ],
+        request={
+            'application/json': {
+                'type': 'object',
+                'required': ['completion_pin'],
+                'properties': {
+                    'completion_pin': {
+                        'type': 'string',
+                        'description': '4-digit code from the client app',
+                        'example': '4242',
+                    },
+                },
+            }
+        },
         responses={
             200: {
                 'type': 'object',
                 'properties': {
-                    'message': {'type': 'string', 'example': 'Заказ успешно завершен'},
-                    'order': {'$ref': '#/components/schemas/Order'}
-                }
+                    'message': {'type': 'string', 'example': 'Order completed successfully'},
+                    'order': {'$ref': '#/components/schemas/Order'},
+                },
             },
-            404: {
-                'type': 'object',
-                'properties': {'error': {'type': 'string', 'example': 'Order not found'}}
-            },
+            400: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
+            403: {'type': 'object', 'properties': {'error': {'type': 'string'}, 'detail': {'type': 'string'}}},
+            404: {'type': 'object', 'properties': {'error': {'type': 'string'}}},
             401: {
                 'type': 'object',
-                'properties': {'detail': {'type': 'string', 'example': 'Authentication credentials were not provided.'}}
+                'properties': {'detail': {'type': 'string'}},
             },
-        }
+        },
     )
     def post(self, request, order_id):
-        """Завершить заказ (установить статус COMPLETED)"""
+        """Завершить заказ: только мастер, с PIN от клиента."""
         expire_stale_master_offers()
         try:
             order = Order.objects.get(id=order_id)
             master = request.user.master_profiles.first()
-            if order.user_id == request.user.id:
-                if order.status != OrderStatus.IN_PROGRESS:
-                    return Response(
-                        {'error': 'Only orders in in_progress status can be completed.'},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-            elif master and order.master_id == master.id:
-                if order.status != OrderStatus.IN_PROGRESS:
-                    return Response(
-                        {
-                            'error': 'The master can complete only after work has started (in_progress).',
-                        },
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                if not order.work_completion_images.exists():
-                    return Response(
-                        {
-                            'error': 'Upload at least one work completion photo '
-                                     '(POST /api/order/{id}/work-completion-image/) before completing.',
-                        },
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-            else:
+
+            if order.user_id == request.user.id and not master:
+                return Response(
+                    {
+                        'error': 'Only the assigned master can complete the order. '
+                        'Show the completion code (client_completion_pin) to the master.',
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            if not master or order.master_id != master.id:
                 return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
-            
+
+            if order.status != OrderStatus.IN_PROGRESS:
+                return Response(
+                    {
+                        'error': 'The master can complete only after work has started (in_progress).',
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if not order.work_completion_images.exists():
+                return Response(
+                    {
+                        'error': 'Upload at least one work completion photo '
+                        '(POST /api/order/{id}/work-completion-image/) before completing.',
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            raw_pin = request.data.get('completion_pin')
+            if raw_pin is None:
+                return Response(
+                    {'error': 'completion_pin is required (4-digit code from the client).'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            pin_s = ''.join(ch for ch in str(raw_pin).strip() if ch.isdigit())
+            if len(pin_s) != 4:
+                return Response(
+                    {'error': 'completion_pin must be exactly 4 digits.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            expected = (order.completion_pin or '').strip()
+            if len(expected) != 4:
+                return Response(
+                    {
+                        'error': 'No valid completion PIN on this order. '
+                        'Ask the client to refresh the order or contact support.',
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if not secrets.compare_digest(expected, pin_s):
+                return Response(
+                    {'error': 'Invalid completion PIN.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             order.status = OrderStatus.COMPLETED
-            order.save()
-            
+            clear_completion_pin(order)
+            order.save(
+                update_fields=[
+                    'status',
+                    'completion_pin',
+                    'completion_pin_issued_at',
+                    'updated_at',
+                ]
+            )
+
             serializer = OrderSerializer(order, context={'request': request})
-            return Response({
-                'message': 'Order completed successfully',
-                'order': serializer.data
-            }, status=status.HTTP_200_OK)
-        
+            return Response(
+                {
+                    'message': 'Order completed successfully',
+                    'order': serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
         except Order.DoesNotExist:
             return Response(
-                {'error': 'Order not found'}, 
-                status=status.HTTP_404_NOT_FOUND
+                {'error': 'Order not found'},
+                status=status.HTTP_404_NOT_FOUND,
             )
 
 
