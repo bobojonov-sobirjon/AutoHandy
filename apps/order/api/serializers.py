@@ -29,6 +29,7 @@ from apps.order.services.status_workflow import (
     order_master_distance_km,
     resolve_master_coordinates_for_start_job,
 )
+from apps.order.services.completion_pin import clear_completion_pin, issue_completion_pin
 from apps.order.services.order_pricing import get_cached_order_pricing
 from apps.order.services.standard_booking_availability import preferred_slot_blocked_message
 from apps.order.services.notifications import _media_url
@@ -879,6 +880,23 @@ class OrderUpdateSerializer(serializers.ModelSerializer):
         if value is not None and (value < -180 or value > 180):
             raise serializers.ValidationError('Longitude must be between -180 and 180')
         return value
+
+    def update(self, instance, validated_data):
+        """Keep completion PIN in sync for generic status updates."""
+        previous_status = instance.status
+        new_status = validated_data.get('status', previous_status)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        if new_status != previous_status:
+            if new_status == OrderStatus.IN_PROGRESS:
+                issue_completion_pin(instance)
+            else:
+                clear_completion_pin(instance)
+
+        instance.save()
+        return instance
 
 
 class OrderStatusUpdateSerializer(serializers.Serializer):
