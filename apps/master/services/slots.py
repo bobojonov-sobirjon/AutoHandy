@@ -338,6 +338,11 @@ def build_master_day_slots_payload(
     overlapping orders merged. **Available** rows fill remaining work time (minus rest) with
     hour-aligned free intervals.
 
+    If there is **no** ``MasterScheduleDay`` for ``check_date`` and **no** ``MasterBusySlot`` rows
+    that day, the day is treated as **not scheduled** (empty ``slots``, ``schedule_source=not_scheduled``).
+    Profile ``working_time`` is **not** used to invent a working window (avoids false availability
+    on days omitted from bulk schedule).
+
     ``busy_date_only=True`` (nearby-masters date filter): **no** ``MasterScheduleDay`` / ``working_time``.
     Work window = min–max ``start_time``/``end_time`` over **all** ``MasterBusySlot`` rows for that date
     (unless the rest row above applies first). If there are no rows, caller should not invoke this mode.
@@ -381,14 +386,29 @@ def build_master_day_slots_payload(
             )
         else:
             day_row = MasterScheduleDay.objects.filter(master=master, date=check_date).first()
-            schedule_source = 'master_schedule_day' if day_row else 'working_time_fallback'
             if day_row:
+                schedule_source = 'master_schedule_day'
                 work_start = day_row.start_time
                 work_end = day_row.end_time
                 working_hours_display = (
                     f'{day_row.start_time.strftime("%H:%M")}-{day_row.end_time.strftime("%H:%M")}'
                 )
+            elif not busy_all:
+                master_name = master.user.get_full_name() or master.user.phone_number
+                return (
+                    {
+                        'date': check_date.isoformat(),
+                        'master_id': master.id,
+                        'master_name': master_name,
+                        'working_hours': '',
+                        'schedule_source': 'not_scheduled',
+                        'break_data': None,
+                        'slots': [],
+                    },
+                    None,
+                )
             else:
+                schedule_source = 'working_time_fallback'
                 working_time = master.working_time or '09:00-18:00'
                 working_hours_display = working_time
                 try:

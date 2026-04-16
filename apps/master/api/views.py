@@ -2020,7 +2020,10 @@ class MasterBusySlotListCreateView(APIView):
             '`working_hours`, `break_data`, `slots`. '
             'If a manual busy row on that day has `start_time_rest` + `time_range_rest`, '
             '`working_hours` and slot bounds use that row’s `start_time`–`end_time` and '
-            '`schedule_source` is `master_busy_slot`; otherwise schedule / `working_time`. '
+            '`schedule_source` is `master_busy_slot`. Otherwise: `MasterScheduleDay` for that date, '
+            'else if there is no schedule row and no busy-slot rows for the date — empty `slots` and '
+            '`schedule_source` `not_scheduled`. If there are busy slots but no schedule row, '
+            'profile `working_time` is used as the work window (`working_time_fallback`). '
             'Without **date** — flat list of BusySlot rows (filters date_from/date_to/manual_only).'
         ),
         parameters=[
