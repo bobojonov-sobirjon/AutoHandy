@@ -267,7 +267,7 @@ class MasterSerializer(serializers.ModelSerializer):
     ],
 )
 class MasterCreateSerializer(serializers.ModelSerializer):
-    """Master create (no skills here — use POST /api/master/service-items/)."""
+    """Master create (no skills here — use POST /api/master/service-items/). One Master row per user."""
 
     latitude = serializers.DecimalField(
         **WGS84_COORD_DECIMAL_KWARGS,
@@ -375,6 +375,12 @@ class MasterCreateSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        request = self.context.get('request')
+        if request and getattr(request, 'user', None) and request.user.is_authenticated:
+            if request.user.master_profiles.exists():
+                raise serializers.ValidationError(
+                    'This account already has a master profile. Only one workshop profile per user is allowed.'
+                )
         validate_master_service_area_triplet(attrs, instance=getattr(self, 'instance', None))
         return attrs
 
