@@ -174,6 +174,7 @@ class OrderSerializer(serializers.ModelSerializer):
     order_images = serializers.SerializerMethodField()
     work_completion_images = serializers.SerializerMethodField()
     cancellation = serializers.SerializerMethodField()
+    custom_request_selected_offer = serializers.SerializerMethodField()
     latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
     longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
 
@@ -197,6 +198,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'order_images', 'work_completion_images',
             'timestamps', 'cancellation',
             'client_completion_pin',
+            'custom_request_selected_offer',
         ]
         read_only_fields = [
             'id',
@@ -205,6 +207,35 @@ class OrderSerializer(serializers.ModelSerializer):
     
     def get_user(self, obj):
         return UserSerializer(obj.user, context=self.context).data
+
+    def get_custom_request_selected_offer(self, obj):
+        """
+        Custom-request: price offer from the master currently assigned on the order (``order.master``).
+        Not all offers — only the row matching ``CustomRequestOffer`` (order + assigned master).
+        """
+        if obj.order_type != OrderType.CUSTOM_REQUEST or not obj.master_id:
+            return None
+        matched = None
+        cache = getattr(obj, '_prefetched_objects_cache', None)
+        if cache and 'custom_request_offers' in cache:
+            for o in cache['custom_request_offers']:
+                if o.master_id == obj.master_id:
+                    matched = o
+                    break
+        else:
+            matched = (
+                CustomRequestOffer.objects.filter(order_id=obj.pk, master_id=obj.master_id)
+                .only('id', 'price', 'created_at', 'updated_at')
+                .first()
+            )
+        if not matched:
+            return None
+        return {
+            'id': matched.id,
+            'price': str(matched.price),
+            'created_at': matched.created_at,
+            'updated_at': matched.updated_at,
+        }
 
     def get_client_completion_pin(self, obj):
         """4-digit code for the order owner while in_progress; master never sees this in API."""

@@ -7,7 +7,7 @@ from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -1301,7 +1301,19 @@ class OrderDetailView(APIView):
     def get_object(self, order_id):
         """Get order object"""
         try:
-            order = Order.objects.get(id=order_id)
+            order = (
+                Order.objects.prefetch_related(
+                    'images',
+                    'category',
+                    'car',
+                    Prefetch(
+                        'custom_request_offers',
+                        queryset=CustomRequestOffer.objects.only(
+                            'id', 'order_id', 'master_id', 'price', 'created_at', 'updated_at'
+                        ),
+                    ),
+                ).get(id=order_id)
+            )
             # Check access
             self.check_object_permissions(self.request, order)
             return order
@@ -1562,7 +1574,17 @@ GET /api/order/by-user/?order_type=standard&status=pending
     def get(self, request):
         """Получить заказы текущего пользователя"""
         expire_stale_master_offers()
-        orders = Order.objects.filter(user=request.user).prefetch_related('images', 'category', 'car')
+        orders = Order.objects.filter(user=request.user).prefetch_related(
+            'images',
+            'category',
+            'car',
+            Prefetch(
+                'custom_request_offers',
+                queryset=CustomRequestOffer.objects.only(
+                    'id', 'order_id', 'master_id', 'price', 'created_at', 'updated_at'
+                ),
+            ),
+        )
         
         # Фильтр по статусу
         status_filter = request.query_params.get('status')
@@ -1813,7 +1835,6 @@ GET /api/order/by-master/?order_type=standard&status=pending
             orders = Order.objects.filter(Q(master=master) | Q(pk__in=extra_ids))
         else:
             orders = Order.objects.filter(master=master)
-        orders = orders.prefetch_related('images', 'category', 'car')
         
         # Фильтр is_new — заказы без назначенного master (FK)
         is_new = request.query_params.get('is_new', '').lower() == 'true'
@@ -1891,6 +1912,17 @@ GET /api/order/by-master/?order_type=standard&status=pending
         
         # Убираем дубликаты и сортируем
         orders = orders.distinct().order_by('-created_at')
+        orders = orders.prefetch_related(
+            'images',
+            'category',
+            'car',
+            Prefetch(
+                'custom_request_offers',
+                queryset=CustomRequestOffer.objects.only(
+                    'id', 'order_id', 'master_id', 'price', 'created_at', 'updated_at'
+                ),
+            ),
+        )
         
         # Применяем пагинацию
         paginator = self.pagination_class()
