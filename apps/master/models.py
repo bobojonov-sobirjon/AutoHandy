@@ -271,11 +271,11 @@ class MasterBusySlot(models.Model):
                 raise ValidationError('Rest fields are not allowed on order-linked busy slots.')
 
         if self.start_time_rest is not None:
-            if self.time_range_rest is None or self.time_range_rest <= 0:
+            if self.time_range_rest is None or self.time_range_rest < 0:
                 raise ValidationError(
-                    {'time_range_rest': 'Set a positive duration when start_time_rest is set.'}
+                    {'time_range_rest': 'Set a duration >= 0 when start_time_rest is set.'}
                 )
-        elif self.time_range_rest is not None and self.time_range_rest > 0:
+        elif self.time_range_rest is not None:
             raise ValidationError(
                 {'start_time_rest': 'Set start_time_rest when time_range_rest is set.'}
             )

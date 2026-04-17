@@ -997,9 +997,9 @@ class MasterScheduleBulkSerializer(serializers.Serializer):
                 'start_time_rest and time_range_rest must both be sent or both omitted.'
             )
         if rs is not None and tr is not None:
-            if tr <= Decimal('0'):
+            if tr < Decimal('0'):
                 raise serializers.ValidationError(
-                    {'time_range_rest': 'Must be greater than 0 when start_time_rest is set.'}
+                    {'time_range_rest': 'Must be 0 or greater when start_time_rest is set.'}
                 )
             for day in attrs['days']:
                 if rest_interval_outside_work(
@@ -1063,11 +1063,11 @@ class MasterBusySlotSerializer(serializers.ModelSerializer):
 
         def _validate_rest_pair(rs, tr):
             if rs is not None:
-                if tr is None or tr <= 0:
+                if tr is None or tr < 0:
                     raise serializers.ValidationError(
-                        {'time_range_rest': 'Set a positive duration when start_time_rest is set.'}
+                        {'time_range_rest': 'Set a duration >= 0 when start_time_rest is set.'}
                     )
-            elif tr is not None and tr > 0:
+            elif tr is not None:
                 raise serializers.ValidationError(
                     {'start_time_rest': 'Set start_time_rest when time_range_rest is set.'}
                 )
