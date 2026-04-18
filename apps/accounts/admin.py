@@ -152,6 +152,7 @@ class CarOwnerAdmin(UserAdmin):
 
     fieldsets = (
         ('Personal information', {'fields': ('private_id', 'first_name', 'last_name', 'email', 'phone_number', 'date_of_birth', 'avatar')}),
+        ('Location', {'fields': ('address', 'longitude', 'latitude')}),
         ('Verification', {'fields': ('is_verified', 'is_email_verified')}),
         ('Important dates', {'fields': ('last_login', 'date_joined', 'created_at', 'updated_at')}),
     )
