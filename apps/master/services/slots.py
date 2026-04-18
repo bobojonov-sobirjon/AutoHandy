@@ -335,8 +335,9 @@ def build_master_day_slots_payload(
     ``start_time`` / ``end_time`` instead of ``MasterScheduleDay`` / ``working_time``.
 
     **Unavailable** rows show **exact** busy bounds (accepted standard orders + manual busy slots),
-    overlapping orders merged. **Available** rows fill remaining work time (minus rest) with
-    hour-aligned free intervals.
+    overlapping orders merged. Rows with ``reason=schedule_bulk`` and no ``order`` are **not**
+    treated as busy (bulk schedule mirror only). **Available** rows fill remaining work time
+    (minus rest) with hour-aligned free intervals.
 
     If there is **no** ``MasterScheduleDay`` for ``check_date`` and **no** ``MasterBusySlot`` rows
     that day, the day is treated as **not scheduled** (empty ``slots``, ``schedule_source=not_scheduled``).
@@ -348,6 +349,7 @@ def build_master_day_slots_payload(
     (unless the rest row above applies first). If there are no rows, caller should not invoke this mode.
     """
     from apps.master.models import MasterBusySlot, MasterScheduleDay
+    from apps.master.services.schedule_bulk import is_schedule_bulk_calendar_mirror_row
     from apps.order.services.status_workflow import validate_master_schedule_day_date
 
     ok, err_msg = validate_master_schedule_day_date(master, check_date)
@@ -422,7 +424,12 @@ def build_master_day_slots_payload(
                     work_end = time(18, 0)
     rest_start = rest_slot.start_time_rest if rest_slot else None
     rest_hours = rest_slot.time_range_rest if rest_slot else None
-    busy_for_overlap = [b for b in busy_all if rest_slot is None or b.pk != rest_slot.pk]
+    busy_for_overlap = [
+        b
+        for b in busy_all
+        if (rest_slot is None or b.pk != rest_slot.pk)
+        and not is_schedule_bulk_calendar_mirror_row(b)
+    ]
     busy_for_overlap.extend(
         _accepted_standard_order_busy_blocks(master.id, check_date, work_end)
     )

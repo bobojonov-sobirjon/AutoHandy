@@ -7,6 +7,7 @@ from datetime import date, time
 from decimal import Decimal
 
 from apps.master.models import MasterBusySlot
+from apps.master.services.schedule_bulk import is_schedule_bulk_calendar_mirror_row
 from apps.master.services.slots import break_window_times
 from apps.order.models import Order, OrderStatus, OrderType
 
@@ -28,10 +29,10 @@ def preferred_slot_blocked_message(
     - **Accepted orders** (same master, same date): blocked if ``preferred_time_start`` lies in
       ``[order.preferred_time_start, order.preferred_time_end]`` when both ends exist, or if it
       exactly equals another accepted order's start when that order has no end yet.
-    - **Calendar blocks** (``MasterBusySlot`` with no ``order``): if ``start_time_rest`` and
-      positive ``time_range_rest`` are set, only the **computed break** ``[rest_start, rest_end)``
-      blocks booking (same as busy-slots / ``schedule_bulk`` full-day rows). Otherwise the whole
-      ``start_time``–``end_time`` interval is a manual block.
+    - **Calendar blocks** (``MasterBusySlot`` with no ``order``): rows with ``reason=schedule_bulk``
+      are **ignored** (workday mirror from bulk schedule, not a manual block). If ``start_time_rest``
+      and positive ``time_range_rest`` are set on other rows, only the **computed break** blocks
+      booking. Otherwise the whole ``start_time``–``end_time`` interval is a manual block.
     """
     accepted = Order.objects.filter(
         master_id=master_id,
@@ -66,6 +67,8 @@ def preferred_slot_blocked_message(
     pt = preferred_time_start.replace(microsecond=0)
 
     for slot in busy_manual:
+        if is_schedule_bulk_calendar_mirror_row(slot):
+            continue
         tr = slot.time_range_rest
         srs = slot.start_time_rest
         # Match GET available-slots / build_master_day_slots_payload: a row with both rest fields set

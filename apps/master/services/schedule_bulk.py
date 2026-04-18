@@ -11,6 +11,17 @@ from apps.master.services.slots import break_window_times
 SCHEDULE_BULK_BUSY_REASON = 'schedule_bulk'
 
 
+def is_schedule_bulk_calendar_mirror_row(slot) -> bool:
+    """
+    True for bulk-schedule mirror rows: they define the day on the calendar but must not count as
+    unavailable time in slot math or standard-order booking (same semantics as docs for reason).
+    """
+    if getattr(slot, 'order_id', None):
+        return False
+    reason = (getattr(slot, 'reason', None) or '').strip()
+    return reason == SCHEDULE_BULK_BUSY_REASON
+
+
 def upsert_schedule_bulk_busy_slots(
     master,
     days: list[dict],
