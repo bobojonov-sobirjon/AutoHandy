@@ -68,15 +68,19 @@ def preferred_slot_blocked_message(
     for slot in busy_manual:
         tr = slot.time_range_rest
         srs = slot.start_time_rest
-        if srs is not None and tr is not None and tr > Decimal('0'):
-            r0, r1 = break_window_times(preferred_date, srs, tr)
-            lo = r0.time().replace(microsecond=0)
-            hi = r1.time().replace(microsecond=0)
-            if lo <= pt < hi:
-                return (
-                    'This time falls in the master’s scheduled break '
-                    f'({lo.isoformat(timespec="seconds")}–{hi.isoformat(timespec="seconds")}).'
-                )
+        # Match GET available-slots / build_master_day_slots_payload: a row with both rest fields set
+        # but time_range_rest <= 0 is only the working-window mirror (e.g. schedule_bulk), excluded
+        # from overlap there — it must not block the whole start_time–end_time span here either.
+        if srs is not None and tr is not None:
+            if tr > Decimal('0'):
+                r0, r1 = break_window_times(preferred_date, srs, tr)
+                lo = r0.time().replace(microsecond=0)
+                hi = r1.time().replace(microsecond=0)
+                if lo <= pt < hi:
+                    return (
+                        'This time falls in the master’s scheduled break '
+                        f'({lo.isoformat(timespec="seconds")}–{hi.isoformat(timespec="seconds")}).'
+                    )
             continue
 
         if _closed_time_interval_contains(slot.start_time, slot.end_time, preferred_time_start):
