@@ -982,7 +982,10 @@ class OrderServiceSerializer(serializers.ModelSerializer):
         """Get service details"""
         if obj.master_service_item:
             from apps.master.api.serializers import MasterServiceItemsSerializer
-            return MasterServiceItemsSerializer(obj.master_service_item).data
+            return MasterServiceItemsSerializer(
+                obj.master_service_item,
+                context=self.context,
+            ).data
         return None
 
 

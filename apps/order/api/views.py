@@ -3666,10 +3666,11 @@ GET /api/order/services-list/?master_id=5
         # Получаем все items этих services
         service_items = MasterServiceItems.objects.filter(
             master_service__in=master_services
-        ).select_related('category', 'master_service')
-        
-        # Сериализуем
-        serializer = MasterServiceItemsSerializer(service_items, many=True)
+        ).select_related('category', 'category__parent', 'master_service')
+
+        serializer = MasterServiceItemsSerializer(
+            service_items, many=True, context={'request': request}
+        )
         return Response(serializer.data)
 
 
