@@ -827,6 +827,17 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         'description': 'GPS longitude (WGS84).',
                         'example': 69.2797,
                     },
+                    'custom_request_date': {
+                        'type': 'string',
+                        'format': 'date',
+                        'description': 'Preferred calendar day for the service (client local / request date).',
+                        'example': '2026-04-18',
+                    },
+                    'request_date': {
+                        'type': 'string',
+                        'format': 'date',
+                        'description': 'Alias for custom_request_date.',
+                    },
                     'car_list': {
                         'type': 'array',
                         'items': {'type': 'integer'},
@@ -855,6 +866,16 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         'type': 'string',
                         'description': 'Decimal as string (e.g. "69.2797")',
                         'example': '69.2797',
+                    },
+                    'custom_request_date': {
+                        'type': 'string',
+                        'format': 'date',
+                        'description': 'Preferred calendar day (YYYY-MM-DD).',
+                    },
+                    'request_date': {
+                        'type': 'string',
+                        'format': 'date',
+                        'description': 'Alias for custom_request_date.',
                     },
                     'car_list': {
                         'type': 'string',
@@ -2082,7 +2103,9 @@ class UpdateOrderStatusView(APIView):
     """
     Строгий workflow: мастер — accepted → on_the_way → arrived → in_progress
     (для проверки дистанции: lat/lon в теле опционально — иначе из профиля Master / user).
-    Клиент / мастер — отмена заказа: предпочтительно **POST /api/order/{id}/cancel/** (там же оценка штрафа). Здесь `status=cancelled` оставлен для совместимости. Завершение — **POST /complete/** только мастером, с телом **completion_pin** (код у клиента).
+    Standard: перед **on_the_way** должен быть задан **preferred_time_end** (PATCH preferred-time после accept).
+    **completed** через этот endpoint запрещён — только **POST /complete/** с PIN.
+    Клиент / мастер — отмена: предпочтительно **POST /api/order/{id}/cancel/**. Здесь `status=cancelled` для совместимости.
     """
 
     permission_classes = [IsAuthenticated, IsOrderOwnerOrMaster]
@@ -2160,14 +2183,23 @@ class UpdateOrderStatusView(APIView):
         if new_status not in [c[0] for c in OrderStatus.choices]:
             return Response({'error': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
 
+        if new_status == OrderStatus.COMPLETED:
+            return Response(
+                {
+                    'error': 'Do not set status to completed here. '
+                    'Use POST /api/order/<order_id>/complete/ with completion_pin.',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         master = request.user.master_profiles.first()
         is_assigned_master = bool(master and order.master_id == master.id)
         is_owner = order.user_id == request.user.id
         now = timezone.now()
 
-        if new_status in (OrderStatus.COMPLETED, OrderStatus.REJECTED, OrderStatus.PENDING):
+        if new_status in (OrderStatus.REJECTED, OrderStatus.PENDING):
             return Response(
-                {'error': 'Use /accept/, /decline/, or /complete/ for these statuses.'},
+                {'error': 'Use /accept/ or /decline/ for these statuses.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -2220,6 +2252,14 @@ class UpdateOrderStatusView(APIView):
             )
 
         if order.status == OrderStatus.ACCEPTED and new_status == OrderStatus.ON_THE_WAY:
+            if order.order_type == OrderType.STANDARD and order.preferred_time_end is None:
+                return Response(
+                    {
+                        'error': 'Set preferred_time_end before marking on the way '
+                        '(PATCH /api/order/<order_id>/preferred-time/).',
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             est, em, eta_err = resolve_on_the_way_eta(request.data, now)
             if eta_err:
                 eta_messages = {
@@ -2761,7 +2801,8 @@ class CompleteOrderView(APIView):
             if order.status != OrderStatus.IN_PROGRESS:
                 return Response(
                     {
-                        'error': 'The master can complete only after work has started (in_progress).',
+                        'error': 'You can complete the order only when status is in_progress. '
+                        'Finish the workflow first, then call this endpoint.',
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )

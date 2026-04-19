@@ -231,6 +231,12 @@ class Order(models.Model):
         verbose_name='Preferred time end',
         help_text='Set by assigned master via PATCH when status is accepted.',
     )
+    custom_request_date = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name='Custom request date',
+        help_text='Calendar day for the requested service (client local / request time zone).',
+    )
     completion_pin = models.CharField(
         max_length=4,
         blank=True,

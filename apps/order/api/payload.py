@@ -24,6 +24,21 @@ def _coerce_bool(value) -> bool:
     return bool(value)
 
 
+def _flatten_int_ids(items):
+    """Turn nested lists from bad clients into a flat list of ints."""
+    out = []
+    for x in items:
+        if x is None or x == '':
+            continue
+        if isinstance(x, (list, tuple)):
+            out.extend(_flatten_int_ids(x))
+            continue
+        if isinstance(x, bytes):
+            x = x.decode('utf-8', errors='replace')
+        out.append(int(x))
+    return out
+
+
 def _coerce_id_list(value):
     """
     Multipart / form fields send ``car_list`` / ``category_list`` as a single string like ``[1,2]``
@@ -34,14 +49,7 @@ def _coerce_id_list(value):
     if isinstance(value, bytes):
         value = value.decode('utf-8', errors='replace')
     if isinstance(value, list):
-        out = []
-        for x in value:
-            if x is None or x == '':
-                continue
-            if isinstance(x, bytes):
-                x = x.decode('utf-8', errors='replace')
-            out.append(int(x))
-        return out
+        return _flatten_int_ids(value)
     if not isinstance(value, str):
         return value
     s = value.strip().lstrip('\ufeff').strip()
@@ -51,7 +59,7 @@ def _coerce_id_list(value):
         try:
             parsed = json.loads(s)
             if isinstance(parsed, list):
-                return [int(x) for x in parsed]
+                return _flatten_int_ids(parsed)
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
     if ',' in s:
@@ -149,6 +157,24 @@ def normalize_custom_request_create_data(request) -> dict:
         data['car_list'] = _coerce_id_list(data.get('car_list'))
     if 'parts_purchase_required' in data:
         data['parts_purchase_required'] = _coerce_bool(data['parts_purchase_required'])
+    from datetime import date as date_cls, datetime as datetime_cls
+
+    req_alias = data.pop('request_date', None)
+    crd = data.pop('custom_request_date', None)
+    raw_date = crd if crd not in (None, '') else req_alias
+    if raw_date is not None and raw_date != '':
+        if isinstance(raw_date, datetime_cls):
+            data['custom_request_date'] = raw_date.date()
+        elif isinstance(raw_date, date_cls):
+            data['custom_request_date'] = raw_date
+        else:
+            s = str(raw_date).strip()
+            for fmt in ('%Y-%m-%d', '%d.%m.%Y', '%d/%m/%Y'):
+                try:
+                    data['custom_request_date'] = datetime_cls.strptime(s, fmt).date()
+                    break
+                except ValueError:
+                    continue
     return data
 
 

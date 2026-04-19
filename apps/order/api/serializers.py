@@ -192,6 +192,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'location', 'latitude', 'longitude', 'location_precision',
             'parts_purchase_required',
             'preferred_date', 'preferred_time_start', 'preferred_time_end',
+            'custom_request_date',
             'master',
             'pricing', 'services', 'reviews', 'average_rating',
             'workflow', 'eta',
@@ -578,17 +579,23 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         return value
 
     def validate_car_list(self, value):
-        """Validate car list"""
+        """Validate car list: all IDs must exist and belong to the requesting user."""
         if not isinstance(value, list):
             raise serializers.ValidationError("car_list must be a list of IDs")
 
-        for car_id in value:
+        user = self.context['request'].user
+        seen = []
+        for car_id in dict.fromkeys(value):
             try:
-                Car.objects.get(id=car_id)
+                car = Car.objects.get(id=car_id)
             except Car.DoesNotExist:
                 raise serializers.ValidationError(f"Car with ID {car_id} not found")
-
-        return value
+            if car.user_id != user.id:
+                raise serializers.ValidationError(
+                    f'Car {car_id} does not belong to you.'
+                )
+            seen.append(car_id)
+        return seen
 
     def validate_category_list(self, value):
         """Validate category list"""
@@ -716,7 +723,7 @@ class OrderCreateSerializer(serializers.ModelSerializer):
 
         order = super().create(validated_data)
         if car_list:
-            order.car.set(car_list)
+            order.car.set(list(dict.fromkeys(car_list)))
         if category_list:
             order.category.set(category_list)
 
@@ -743,6 +750,17 @@ class CustomRequestCreateSerializer(serializers.Serializer):
     location = serializers.CharField()
     latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
     longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    custom_request_date = serializers.DateField(
+        required=False,
+        allow_null=True,
+        help_text='Calendar day for the requested service (client local date / request time).',
+    )
+    request_date = serializers.DateField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text='Alias for custom_request_date (same value).',
+    )
     car_list = serializers.ListField(
         child=serializers.IntegerField(),
         required=False,
@@ -752,14 +770,16 @@ class CustomRequestCreateSerializer(serializers.Serializer):
 
     def validate_car_list(self, value):
         user = self.context['request'].user
-        for car_id in value:
+        out = []
+        for car_id in dict.fromkeys(value):
             try:
                 car = Car.objects.get(id=car_id)
             except Car.DoesNotExist:
                 raise serializers.ValidationError(f'Car with ID {car_id} not found')
             if car.user_id and car.user_id != user.id:
                 raise serializers.ValidationError(f'Car {car_id} does not belong to you.')
-        return value
+            out.append(car_id)
+        return out
 
     def validate_latitude(self, value):
         if value is not None and (value < -90 or value > 90):
@@ -779,13 +799,18 @@ class CustomRequestCreateSerializer(serializers.Serializer):
                 'Custom request is not configured. Add a main by_order category with '
                 'is_custom_request_entry in the admin.'
             )
+        alias = attrs.pop('request_date', None)
+        if alias is not None and attrs.get('custom_request_date') is None:
+            attrs['custom_request_date'] = alias
         return attrs
 
     def create(self, validated_data):
         from apps.order.services.custom_request_broadcast import get_custom_request_catalog_category
 
         user = self.context['request'].user
+        validated_data.pop('request_date', None)
         car_list = validated_data.pop('car_list', [])
+        crd = validated_data.pop('custom_request_date', None)
         cat = get_custom_request_catalog_category()
         order = Order.objects.create(
             user=user,
@@ -798,9 +823,10 @@ class CustomRequestCreateSerializer(serializers.Serializer):
             priority=OrderPriority.LOW,
             location_source=LocationSource.GPS_CUSTOM,
             parts_purchase_required=validated_data.get('parts_purchase_required', False),
+            custom_request_date=crd,
         )
         if car_list:
-            order.car.set(car_list)
+            order.car.set(list(dict.fromkeys(car_list)))
         order.category.set([cat.pk])
         return order
 
