@@ -56,7 +56,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
     Sum prices from OrderService → master_service_item.price.
 
     **Custom request:** if ``order.master`` is set and a ``CustomRequestOffer`` exists for that
-    order+master, **subtotal** is the offer price (no ``OrderService`` lines required); discount
+    order+master, **subtotal** is the offer price only (not multiplied by car count); discount
     rules on ``order.discount`` apply the same way.
 
     Discount (``order.discount``):
@@ -68,7 +68,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
     offer_subtotal = _custom_request_offer_subtotal(order)
     if offer_subtotal is not None:
         car_count = _order_car_count(order)
-        subtotal = _q(offer_subtotal * car_count)
+        subtotal = offer_subtotal
         raw = _q(order.discount or 0)
         if raw < 0:
             raw = Decimal('0')
