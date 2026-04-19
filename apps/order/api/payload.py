@@ -157,11 +157,9 @@ def normalize_custom_request_create_data(request) -> dict:
         data['car_list'] = _coerce_id_list(data.get('car_list'))
     if 'parts_purchase_required' in data:
         data['parts_purchase_required'] = _coerce_bool(data['parts_purchase_required'])
-    from datetime import date as date_cls, datetime as datetime_cls
+    from datetime import date as date_cls, datetime as datetime_cls, time as time_cls
 
-    req_alias = data.pop('request_date', None)
-    crd = data.pop('custom_request_date', None)
-    raw_date = crd if crd not in (None, '') else req_alias
+    raw_date = data.pop('custom_request_date', None)
     if raw_date is not None and raw_date != '':
         if isinstance(raw_date, datetime_cls):
             data['custom_request_date'] = raw_date.date()
@@ -176,11 +174,7 @@ def normalize_custom_request_create_data(request) -> dict:
                 except ValueError:
                     continue
 
-    from datetime import time as time_cls
-
-    rt_alias = data.pop('request_time', None)
-    crt_raw = data.pop('custom_request_time', None)
-    raw_time = crt_raw if crt_raw not in (None, '') else rt_alias
+    raw_time = data.pop('custom_request_time', None)
     if raw_time is not None and raw_time != '':
         if isinstance(raw_time, time_cls):
             data['custom_request_time'] = raw_time

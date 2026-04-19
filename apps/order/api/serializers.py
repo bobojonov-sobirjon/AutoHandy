@@ -755,22 +755,10 @@ class CustomRequestCreateSerializer(serializers.Serializer):
         allow_null=True,
         help_text='Calendar day for the requested service (client local date / request time).',
     )
-    request_date = serializers.DateField(
-        required=False,
-        allow_null=True,
-        write_only=True,
-        help_text='Alias for custom_request_date (same value).',
-    )
     custom_request_time = LenientTimeField(
         required=False,
         allow_null=True,
         help_text='Preferred time for the service (client local; use with custom_request_date).',
-    )
-    request_time = LenientTimeField(
-        required=False,
-        allow_null=True,
-        write_only=True,
-        help_text='Alias for custom_request_time.',
     )
     car_list = serializers.ListField(
         child=serializers.IntegerField(),
@@ -810,20 +798,12 @@ class CustomRequestCreateSerializer(serializers.Serializer):
                 'Custom request is not configured. Add a main by_order category with '
                 'is_custom_request_entry in the admin.'
             )
-        alias = attrs.pop('request_date', None)
-        if alias is not None and attrs.get('custom_request_date') is None:
-            attrs['custom_request_date'] = alias
-        alias_t = attrs.pop('request_time', None)
-        if alias_t is not None and attrs.get('custom_request_time') is None:
-            attrs['custom_request_time'] = alias_t
         return attrs
 
     def create(self, validated_data):
         from apps.order.services.custom_request_broadcast import get_custom_request_catalog_category
 
         user = self.context['request'].user
-        validated_data.pop('request_date', None)
-        validated_data.pop('request_time', None)
         car_list = validated_data.pop('car_list', [])
         crd = validated_data.pop('custom_request_date', None)
         crt = validated_data.pop('custom_request_time', None)
