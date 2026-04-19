@@ -237,6 +237,12 @@ class Order(models.Model):
         verbose_name='Custom request date',
         help_text='Calendar day for the requested service (client local / request time zone).',
     )
+    custom_request_time = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name='Custom request time',
+        help_text='Preferred time of day for the service (client local / same TZ as custom_request_date).',
+    )
     completion_pin = models.CharField(
         max_length=4,
         blank=True,

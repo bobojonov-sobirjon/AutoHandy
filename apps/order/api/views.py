@@ -838,6 +838,17 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         'format': 'date',
                         'description': 'Alias for custom_request_date.',
                     },
+                    'custom_request_time': {
+                        'type': 'string',
+                        'format': 'time',
+                        'description': 'Preferred local time for the service (HH:MM or HH:MM:SS).',
+                        'example': '14:30:00',
+                    },
+                    'request_time': {
+                        'type': 'string',
+                        'format': 'time',
+                        'description': 'Alias for custom_request_time.',
+                    },
                     'car_list': {
                         'type': 'array',
                         'items': {'type': 'integer'},
@@ -876,6 +887,14 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         'type': 'string',
                         'format': 'date',
                         'description': 'Alias for custom_request_date.',
+                    },
+                    'custom_request_time': {
+                        'type': 'string',
+                        'description': 'Local time, e.g. "14:30" or "14:30:00".',
+                    },
+                    'request_time': {
+                        'type': 'string',
+                        'description': 'Alias for custom_request_time.',
                     },
                     'car_list': {
                         'type': 'string',

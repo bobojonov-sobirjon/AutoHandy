@@ -175,6 +175,25 @@ def normalize_custom_request_create_data(request) -> dict:
                     break
                 except ValueError:
                     continue
+
+    from datetime import time as time_cls
+
+    rt_alias = data.pop('request_time', None)
+    crt_raw = data.pop('custom_request_time', None)
+    raw_time = crt_raw if crt_raw not in (None, '') else rt_alias
+    if raw_time is not None and raw_time != '':
+        if isinstance(raw_time, time_cls):
+            data['custom_request_time'] = raw_time
+        else:
+            s = str(raw_time).strip()
+            if s.endswith('Z') or s.endswith('z'):
+                s = s[:-1]
+            for fmt in ('%H:%M:%S.%f', '%H:%M:%S', '%H:%M'):
+                try:
+                    data['custom_request_time'] = datetime_cls.strptime(s, fmt).time()
+                    break
+                except ValueError:
+                    continue
     return data
 
 
