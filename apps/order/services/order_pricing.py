@@ -11,6 +11,18 @@ def _q(x: Any) -> Decimal:
     return Decimal(str(x)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
+def _order_car_count(order) -> int:
+    """
+    Multiply line-item service prices by how many cars are on the order (same work per vehicle).
+    If no cars are linked yet, use 1 so totals stay usable.
+    """
+    try:
+        n = order.car.count()
+    except Exception:
+        n = 0
+    return max(1, n)
+
+
 def _custom_request_offer_subtotal(order) -> Decimal | None:
     """If custom-request order has assigned master and their offer row, use offer price as subtotal base."""
     from apps.order.models import CustomRequestOffer, OrderType
@@ -55,7 +67,8 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
     """
     offer_subtotal = _custom_request_offer_subtotal(order)
     if offer_subtotal is not None:
-        subtotal = offer_subtotal
+        car_count = _order_car_count(order)
+        subtotal = _q(offer_subtotal * car_count)
         raw = _q(order.discount or 0)
         if raw < 0:
             raw = Decimal('0')
@@ -76,9 +89,11 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
             'discount_mode': mode,
             'discount_applied': discount_applied,
             'total': total,
+            'car_count': car_count,
             'lines_by_order_service_id': {},
         }
 
+    car_count = _order_car_count(order)
     rows: list[dict[str, Any]] = []
     subtotal = Decimal('0')
 
@@ -87,8 +102,9 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
         if not item:
             continue
         p = _q(item.price or 0)
-        subtotal += p
-        rows.append({'os': os_row, 'price': p})
+        line_gross = _q(p * car_count)
+        subtotal += line_gross
+        rows.append({'os': os_row, 'unit_price_per_car': p, 'line_gross': line_gross})
 
     raw = _q(order.discount or 0)
     if raw < 0:
@@ -113,31 +129,37 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
 
     if not rows or discount_applied == 0:
         for r in rows:
-            os_row, p = r['os'], r['price']
+            os_row = r['os']
+            p = r['unit_price_per_car']
+            lg = r['line_gross']
             lines_out.append(
                 {
                     'order_service_id': os_row.id,
                     'unit_price': p,
+                    'car_count': car_count,
                     'discount_allocated': Decimal('0'),
-                    'line_total': p,
+                    'line_total': lg,
                 }
             )
     else:
         for i, r in enumerate(rows):
-            os_row, p = r['os'], r['price']
+            os_row = r['os']
+            p = r['unit_price_per_car']
+            lg = r['line_gross']
             if i == n - 1:
                 ld = _q(discount_applied - acc_disc)
             else:
                 if mode == 'percent':
-                    ld = _q(p * raw / Decimal('100'))
+                    ld = _q(lg * raw / Decimal('100'))
                 else:
-                    ld = _q(p / subtotal * discount_applied) if subtotal > 0 else Decimal('0')
+                    ld = _q(lg / subtotal * discount_applied) if subtotal > 0 else Decimal('0')
                 acc_disc += ld
-            lt = _q(p - ld)
+            lt = _q(lg - ld)
             lines_out.append(
                 {
                     'order_service_id': os_row.id,
                     'unit_price': p,
+                    'car_count': car_count,
                     'discount_allocated': ld,
                     'line_total': lt,
                 }
@@ -150,6 +172,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
         'discount_mode': mode,
         'discount_applied': discount_applied,
         'total': total,
+        'car_count': car_count,
         'lines_by_order_service_id': by_id,
     }
 

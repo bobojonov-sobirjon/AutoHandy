@@ -93,6 +93,7 @@ def _money_fmt(v) -> str:
 class OrderPricingNestedSerializer(serializers.ModelSerializer):
     """
     Line subtotal from order services; discount split across lines (proportional for amount mode).
+    Service line amounts are multiplied by the number of cars on the order (same work per vehicle).
     See ``ORDER_DISCOUNT_IS_PERCENT`` in settings for percent vs fixed amount.
     """
 
@@ -100,6 +101,7 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
     subtotal = serializers.SerializerMethodField()
     discount_applied = serializers.SerializerMethodField()
     total = serializers.SerializerMethodField()
+    car_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -109,6 +111,7 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
             'subtotal',
             'discount_applied',
             'total',
+            'car_count',
         )
 
     def get_discount_mode(self, obj):
@@ -122,6 +125,9 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
 
     def get_total(self, obj):
         return format(get_cached_order_pricing(obj, self.context)['total'], 'f')
+
+    def get_car_count(self, obj):
+        return get_cached_order_pricing(obj, self.context).get('car_count', 1)
 
 
 class OrderWorkflowNestedSerializer(serializers.ModelSerializer):
@@ -393,9 +399,11 @@ class OrderSerializer(serializers.ModelSerializer):
             if meta:
                 line['discount_allocated'] = format(meta['discount_allocated'], 'f')
                 line['line_total'] = format(meta['line_total'], 'f')
+                line['car_count'] = meta.get('car_count', br.get('car_count', 1))
             else:
                 line['discount_allocated'] = '0.00'
                 line['line_total'] = _money_fmt(line.get('price'))
+                line['car_count'] = br.get('car_count', 1)
             groups[gid]['items'].append(line)
         return list(groups.values())
     
