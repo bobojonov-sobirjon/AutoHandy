@@ -727,6 +727,11 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         if category_list:
             order.category.set(category_list)
 
+        if order.master_id:
+            from apps.order.services.order_category_services import sync_order_services_from_order_categories
+
+            sync_order_services_from_order_categories(order)
+
         if order.order_type == OrderType.SOS:
             if sos_queue is not None:
                 order.sos_offer_queue = sos_queue

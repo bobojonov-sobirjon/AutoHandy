@@ -2579,6 +2579,9 @@ class AcceptOrderView(APIView):
                         'updated_at',
                     ]
                 )
+                from apps.order.services.order_category_services import sync_order_services_from_order_categories
+
+                sync_order_services_from_order_categories(order)
 
             order.refresh_from_db()
             serializer = OrderSerializer(order, context={'request': request})
