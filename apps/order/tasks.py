@@ -106,3 +106,99 @@ def sweep_client_penalty_free_unlock_task() -> int:
     )
     n = qs.update(client_penalty_free_cancel_unlocked=True)
     return n
+
+
+@shared_task(ignore_result=True)
+def auto_cancel_master_no_show_task(order_id: int) -> None:
+    """
+    ETA task: if the master is still "on the way" past arrival_deadline_at, auto-cancel the order
+    and unlock client penalty-free cancellation (client should not be penalized for master no-show).
+    """
+    now = timezone.now()
+    qs = Order.objects.filter(
+        pk=order_id,
+        status=OrderStatus.ON_THE_WAY,
+        arrival_deadline_at__isnull=False,
+        arrival_deadline_at__lte=now,
+    )
+    for order in qs.select_related('master').only(
+        'id',
+        'status',
+        'arrival_deadline_at',
+        'client_penalty_free_cancel_unlocked',
+        'estimated_arrival_at',
+        'eta_minutes',
+        'completion_pin',
+        'completion_pin_issued_at',
+        'master_id',
+    ):
+        # Terminal / progressed states are filtered out by the queryset.
+        order.status = OrderStatus.CANCELLED
+        order.auto_cancel_reason = 'master_no_show'
+        order.client_penalty_free_cancel_unlocked = True
+        order.estimated_arrival_at = None
+        order.eta_minutes = None
+        order.arrival_deadline_at = None
+        order.completion_pin = ''
+        order.completion_pin_issued_at = None
+        order.save(
+            update_fields=[
+                'status',
+                'auto_cancel_reason',
+                'client_penalty_free_cancel_unlocked',
+                'estimated_arrival_at',
+                'eta_minutes',
+                'arrival_deadline_at',
+                'completion_pin',
+                'completion_pin_issued_at',
+                'updated_at',
+            ]
+        )
+
+
+@shared_task(ignore_result=True)
+def sweep_auto_cancel_master_no_show_task() -> int:
+    """
+    Fallback if ETA tasks were missed (worker down): auto-cancel stale on_the_way orders
+    whose arrival_deadline_at already passed.
+    """
+    now = timezone.now()
+    qs = Order.objects.filter(
+        status=OrderStatus.ON_THE_WAY,
+        arrival_deadline_at__isnull=False,
+        arrival_deadline_at__lte=now,
+    )
+    n = 0
+    for order in qs.only(
+        'id',
+        'status',
+        'arrival_deadline_at',
+        'client_penalty_free_cancel_unlocked',
+        'estimated_arrival_at',
+        'eta_minutes',
+        'completion_pin',
+        'completion_pin_issued_at',
+    ):
+        order.status = OrderStatus.CANCELLED
+        order.auto_cancel_reason = 'master_no_show'
+        order.client_penalty_free_cancel_unlocked = True
+        order.estimated_arrival_at = None
+        order.eta_minutes = None
+        order.arrival_deadline_at = None
+        order.completion_pin = ''
+        order.completion_pin_issued_at = None
+        order.save(
+            update_fields=[
+                'status',
+                'auto_cancel_reason',
+                'client_penalty_free_cancel_unlocked',
+                'estimated_arrival_at',
+                'eta_minutes',
+                'arrival_deadline_at',
+                'completion_pin',
+                'completion_pin_issued_at',
+                'updated_at',
+            ]
+        )
+        n += 1
+    return n

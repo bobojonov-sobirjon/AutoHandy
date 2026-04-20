@@ -12,6 +12,7 @@ from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from django.conf import settings
+from datetime import timedelta
 import json
 import logging
 import secrets
@@ -27,7 +28,10 @@ from apps.order.services.status_workflow import (
     resolve_on_the_way_eta,
     validate_master_cancel,
 )
-from apps.order.services.celery_schedule import schedule_client_penalty_free_unlock
+from apps.order.services.celery_schedule import (
+    schedule_client_penalty_free_unlock,
+    schedule_master_no_show_autocancel,
+)
 from apps.order.services.master_inbox_sync import (
     pending_assigned_standard_order_ids_for_master,
     pending_custom_request_order_ids_for_master,
@@ -2226,9 +2230,11 @@ class UpdateOrderStatusView(APIView):
                     order, snap['penalty_percent'] if snap['penalty_applies'] else 0
                 )
                 order.status = OrderStatus.CANCELLED
+                order.auto_cancel_reason = ''
                 order.client_penalty_free_cancel_unlocked = False
                 order.estimated_arrival_at = None
                 order.eta_minutes = None
+                order.arrival_deadline_at = None
                 clear_completion_pin(order)
                 order.save()
                 data = OrderSerializer(order, context={'request': request}).data
@@ -2242,9 +2248,11 @@ class UpdateOrderStatusView(APIView):
                     return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
                 MasterOrderCancellation.objects.create(master=master, order=order, reason=reason)
                 order.status = OrderStatus.CANCELLED
+                order.auto_cancel_reason = ''
                 order.client_penalty_free_cancel_unlocked = False
                 order.estimated_arrival_at = None
                 order.eta_minutes = None
+                order.arrival_deadline_at = None
                 clear_completion_pin(order)
                 order.save()
                 return Response(OrderSerializer(order, context={'request': request}).data)
@@ -2282,20 +2290,26 @@ class UpdateOrderStatusView(APIView):
                 est, em = auto_eta_from_order_master(order, master, now)
             order.status = OrderStatus.ON_THE_WAY
             order.on_the_way_at = now
+            order.auto_cancel_reason = ''
             order.client_penalty_free_cancel_unlocked = False
             order.estimated_arrival_at = est
             order.eta_minutes = em
+            grace_min = int(getattr(settings, 'ORDER_AUTO_CANCEL_NO_SHOW_GRACE_MINUTES', 40))
+            order.arrival_deadline_at = (est or now) + timedelta(minutes=grace_min)
             order.save(
                 update_fields=[
                     'status',
                     'on_the_way_at',
+                    'auto_cancel_reason',
                     'client_penalty_free_cancel_unlocked',
                     'estimated_arrival_at',
                     'eta_minutes',
+                    'arrival_deadline_at',
                     'updated_at',
                 ]
             )
             schedule_client_penalty_free_unlock(order.pk, order.on_the_way_at)
+            schedule_master_no_show_autocancel(order.pk, order.arrival_deadline_at)
             return Response(OrderSerializer(order, context={'request': request}).data)
 
         if order.status == OrderStatus.ON_THE_WAY and new_status == OrderStatus.ARRIVED:
@@ -2304,6 +2318,7 @@ class UpdateOrderStatusView(APIView):
             order.client_penalty_free_cancel_unlocked = False
             order.estimated_arrival_at = None
             order.eta_minutes = None
+            order.arrival_deadline_at = None
             order.save(
                 update_fields=[
                     'status',
@@ -2311,6 +2326,7 @@ class UpdateOrderStatusView(APIView):
                     'client_penalty_free_cancel_unlocked',
                     'estimated_arrival_at',
                     'eta_minutes',
+                    'arrival_deadline_at',
                     'updated_at',
                 ]
             )
@@ -2364,6 +2380,7 @@ class UpdateOrderStatusView(APIView):
             order.work_started_at = now
             order.estimated_arrival_at = None
             order.eta_minutes = None
+            order.arrival_deadline_at = None
             issue_completion_pin(order)
             order.save(
                 update_fields=[
@@ -2371,6 +2388,7 @@ class UpdateOrderStatusView(APIView):
                     'work_started_at',
                     'estimated_arrival_at',
                     'eta_minutes',
+                    'arrival_deadline_at',
                     'completion_pin',
                     'completion_pin_issued_at',
                     'updated_at',
@@ -2437,9 +2455,11 @@ class CancelOrderView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             order.status = OrderStatus.CANCELLED
+            order.auto_cancel_reason = ''
             order.client_penalty_free_cancel_unlocked = False
             order.estimated_arrival_at = None
             order.eta_minutes = None
+            order.arrival_deadline_at = None
             clear_completion_pin(order)
             order.save()
             data = OrderSerializer(order, context={'request': request}).data
@@ -2458,9 +2478,11 @@ class CancelOrderView(APIView):
                 return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
             MasterOrderCancellation.objects.create(master=master, order=order, reason=reason)
             order.status = OrderStatus.CANCELLED
+            order.auto_cancel_reason = ''
             order.client_penalty_free_cancel_unlocked = False
             order.estimated_arrival_at = None
             order.eta_minutes = None
+            order.arrival_deadline_at = None
             clear_completion_pin(order)
             order.save()
             return Response(

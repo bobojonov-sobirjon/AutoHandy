@@ -429,6 +429,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.order.tasks.sweep_client_penalty_free_unlock_task',
         'schedule': crontab(minute='*/5'),
     },
+    'sweep-auto-cancel-master-no-show': {
+        'task': 'apps.order.tasks.sweep_auto_cancel_master_no_show_task',
+        'schedule': crontab(minute='*'),
+    },
 }
 
 # After master is "on the way", client may cancel without penalty after this many hours (still on the way).
@@ -454,6 +458,8 @@ ORDER_START_JOB_MAX_DISTANCE_M = int(os.getenv('ORDER_START_JOB_MAX_DISTANCE_M',
 ORDER_ETA_MAX_MINUTES = int(os.getenv('ORDER_ETA_MAX_MINUTES', str(72 * 60)))
 # Avg speed (km/h) for auto ETA: order GPS → master workshop/user GPS when status=on_the_way without manual eta.
 ORDER_ETA_ASSUMED_SPEED_KMH = float(os.getenv('ORDER_ETA_ASSUMED_SPEED_KMH', '35'))
+# Auto-cancel if the master did not arrive by (estimated_arrival_at + grace minutes).
+ORDER_AUTO_CANCEL_NO_SHOW_GRACE_MINUTES = int(os.getenv('ORDER_AUTO_CANCEL_NO_SHOW_GRACE_MINUTES', '40'))
 # If True: order.discount in 0..100 is a percent of subtotal; above 100 = fixed amount. If False: always fixed amount.
 ORDER_DISCOUNT_IS_PERCENT = os.getenv('ORDER_DISCOUNT_IS_PERCENT', 'false').lower() in (
     '1',

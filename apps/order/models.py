@@ -169,6 +169,19 @@ class Order(models.Model):
         verbose_name='ETA minutes',
         help_text='Minutes until arrival committed when marking on the way.',
     )
+    arrival_deadline_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Arrival deadline',
+        help_text='Auto-cancel cutoff when master did not arrive in time (ETA + grace).',
+    )
+    auto_cancel_reason = models.CharField(
+        max_length=32,
+        blank=True,
+        default='',
+        verbose_name='Auto-cancel reason',
+        help_text='Internal reason code when the system cancels an order automatically.',
+    )
     arrived_at = models.DateTimeField(
         null=True,
         blank=True,

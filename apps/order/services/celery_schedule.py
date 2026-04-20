@@ -36,3 +36,12 @@ def schedule_client_penalty_free_unlock(order_id: int, on_the_way_at: datetime) 
         unlock_client_penalty_free_cancel_task.apply_async(args=[order_id], eta=eta)
     except Exception:
         pass
+
+
+def schedule_master_no_show_autocancel(order_id: int, arrival_deadline_at: datetime) -> None:
+    try:
+        from apps.order.tasks import auto_cancel_master_no_show_task
+
+        auto_cancel_master_no_show_task.apply_async(args=[order_id], eta=arrival_deadline_at)
+    except Exception:
+        pass

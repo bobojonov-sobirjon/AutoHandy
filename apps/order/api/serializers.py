@@ -138,9 +138,11 @@ class OrderWorkflowNestedSerializer(serializers.ModelSerializer):
         fields = (
             'accepted_at',
             'on_the_way_at',
+            'arrival_deadline_at',
             'arrived_at',
             'work_started_at',
             'client_penalty_free_cancel_unlocked',
+            'auto_cancel_reason',
         )
 
 
