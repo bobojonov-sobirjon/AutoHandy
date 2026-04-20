@@ -357,7 +357,11 @@ class MasterListView(APIView):
                     )
                     master.distance = round(km_to_miles(distance_km), 2)
 
-                    if distance_km <= radius_km:
+                    # Show only masters that are both:
+                    # - within the user's search radius
+                    # - within the master's own acceptance zone radius
+                    max_km = float(master.max_order_distance_km())
+                    if distance_km <= radius_km and distance_km <= max_km:
                         filtered_masters.append(master)
 
                 masters = filtered_masters

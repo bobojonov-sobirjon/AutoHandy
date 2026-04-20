@@ -195,7 +195,8 @@ def _nearby_masters_debug_snapshot(
         mlat, mlon = m.get_work_location_for_distance()
         if mlat is None or mlon is None:
             continue
-        if haversine_distance_km(user_lat, user_lng, mlat, mlon) <= radius_km:
+        d_km = haversine_distance_km(user_lat, user_lng, mlat, mlon)
+        if d_km <= radius_km and d_km <= float(m.max_order_distance_km()):
             in_radius += 1
     out['masters_within_radius'] = in_radius
     return out
