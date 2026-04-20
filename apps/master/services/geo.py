@@ -5,6 +5,12 @@ import math
 
 R_EARTH_KM = 6371.0
 MILES_TO_KM = 1.609344
+KM_TO_MILES = 1.0 / MILES_TO_KM
+
+
+def km_to_miles(km: float) -> float:
+    """Convert kilometers to statute miles (same basis as ``MILES_TO_KM``)."""
+    return km * KM_TO_MILES
 
 
 def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

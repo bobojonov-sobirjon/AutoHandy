@@ -9,7 +9,7 @@ from django.conf import settings
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from apps.master.services.geo import haversine_distance_km
+from apps.master.services.geo import haversine_distance_km, km_to_miles
 from apps.master.models import Master, MasterScheduleDay
 from apps.order.models import (
     MasterCancelReason,
@@ -347,8 +347,8 @@ def resolve_on_the_way_eta(
     return None, None, None
 
 
-def order_master_distance_km(order: Order) -> float | None:
-    """Straight-line km from master’s saved location to order client coordinates."""
+def order_master_distance_mi(order: Order) -> float | None:
+    """Straight-line miles from master’s saved location to order client coordinates."""
     if order.latitude is None or order.longitude is None or not order.master_id:
         return None
     mlat, mlon, _err = resolve_master_coordinates_for_start_job(order.master, {})
@@ -356,7 +356,8 @@ def order_master_distance_km(order: Order) -> float | None:
         return None
     olat = float(order.latitude)
     olon = float(order.longitude)
-    return round(haversine_distance_km(mlat, mlon, olat, olon), 3)
+    km = haversine_distance_km(mlat, mlon, olat, olon)
+    return round(km_to_miles(km), 3)
 
 
 def auto_eta_from_order_master(order: Order, master: Master, on_the_way_at: datetime) -> tuple[datetime | None, int | None]:

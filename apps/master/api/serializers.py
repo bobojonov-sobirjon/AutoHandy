@@ -176,11 +176,11 @@ class MasterSerializer(serializers.ModelSerializer):
         return Order.objects.filter(master=obj, status=OrderStatus.COMPLETED).count()
 
     def get_eta_minutes_approx(self, obj):
-        """Грубая оценка времени в пути: расстояние / 30 км/ч."""
-        d_km = getattr(obj, 'distance', None)
-        if d_km is None:
+        """Rough drive time: distance (miles) / 30 mph."""
+        d_mi = getattr(obj, 'distance', None)
+        if d_mi is None:
             return None
-        hours = float(d_km) / 30.0
+        hours = float(d_mi) / 30.0
         return max(1, int(round(hours * 60)))
 
     def get_min_service_price_for_category(self, obj):

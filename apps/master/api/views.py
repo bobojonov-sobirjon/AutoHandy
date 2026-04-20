@@ -20,6 +20,7 @@ from apps.master.images_utils import save_master_images_from_request
 from django.contrib.auth import get_user_model
 from apps.accounts.services import SMSService
 from apps.categories.models import Category
+from apps.master.services.geo import km_to_miles
 
 User = get_user_model()
 
@@ -188,7 +189,7 @@ class MasterListView(APIView):
         **Геолокация:**
         - Расчет расстояния выполняется по формуле Haversine
         - Возвращаются только мастера с заполненными координатами (latitude и longitude)
-        - Поле `distance` в ответе — **километры** от точки пользователя; параметр `radius` — **мили** поиска
+        - Поле `distance` в ответе — **мили** от точки пользователя; параметр `radius` — **мили** поиска
         """,
         parameters=[
             OpenApiParameter(
@@ -223,7 +224,7 @@ class MasterListView(APIView):
                 name='radius',
                 type=float,
                 location=OpenApiParameter.QUERY,
-                description='Радиус поиска в милях (по умолчанию 10 mi); distance в ответе — км',
+                description='Радиус поиска в милях (по умолчанию 10 mi); distance в ответе — mi',
                 required=False
             ),
             OpenApiParameter(
@@ -350,15 +351,13 @@ class MasterListView(APIView):
                     mlat, mlon = master.get_work_location_for_distance()
                     if mlat is None:
                         continue
-                    distance = self.calculate_distance(
+                    distance_km = self.calculate_distance(
                         user_lat, user_long,
                         mlat, mlon,
                     )
-                    # Добавляем расстояние как атрибут для отображения
-                    master.distance = round(distance, 2)
-                    
-                    # Фильтруем только тех, кто в пределах радиуса (мили → км)
-                    if distance <= radius_km:
+                    master.distance = round(km_to_miles(distance_km), 2)
+
+                    if distance_km <= radius_km:
                         filtered_masters.append(master)
 
                 masters = filtered_masters
@@ -432,8 +431,8 @@ class MasterListView(APIView):
     
     def calculate_distance(self, lat1, lon1, lat2, lon2):
         """
-        Вычисление расстояния между двумя точками по формуле Haversine
-        Возвращает расстояние в километрах
+        Haversine distance between two points (internal math in **km** for filtering).
+        Responses expose **miles** via ``km_to_miles`` on ``master.distance``.
         """
         from math import radians, sin, cos, sqrt, atan2
         
@@ -1382,12 +1381,11 @@ GET /api/master/masters/by-user/?service_items=Шиномонтаж&category=1&c
                     
                     a = sin(dlat / 2)**2 + cos(lat1_rad) * cos(lat2_rad) * sin(dlon / 2)**2
                     c = 2 * atan2(sqrt(a), sqrt(1 - a))
-                    distance = R * c
-                    
-                    master.distance = round(distance, 2)
+                    distance_km = R * c
+
+                    master.distance = round(km_to_miles(distance_km), 2)
                     masters_with_distance.append(master)
-                
-                # Сортируем по расстоянию
+
                 masters_with_distance.sort(key=lambda x: x.distance)
                 masters = masters_with_distance
                 

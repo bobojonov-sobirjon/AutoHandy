@@ -19,14 +19,14 @@ from apps.order.models import (
 from apps.car.models import Car
 from apps.categories.models import Category
 from apps.master.models import Master
-from apps.master.services.geo import haversine_distance_km
+from apps.master.services.geo import haversine_distance_km, km_to_miles
 from apps.accounts.serializers import UserSerializer
 from apps.master.api.serializers import MasterSerializer
 from apps.order.services.master_offer import activate_pending_master_offer
 from apps.order.services.sos_master_queue import build_sos_master_id_queue
 from apps.order.services.status_workflow import (
     client_cancellation_snapshot,
-    order_master_distance_km,
+    order_master_distance_mi,
     resolve_master_coordinates_for_start_job,
 )
 from apps.order.services.completion_pin import clear_completion_pin, issue_completion_pin
@@ -145,16 +145,16 @@ class OrderWorkflowNestedSerializer(serializers.ModelSerializer):
 
 
 class OrderEtaNestedSerializer(serializers.ModelSerializer):
-    """Taxminiy yetib kelish: vaqt, daqiqa, masofa (km)."""
+    """Taxminiy yetib kelish: vaqt, daqiqa, masofa (miles)."""
 
-    eta_distance_km = serializers.SerializerMethodField()
+    eta_distance_mi = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
-        fields = ('estimated_arrival_at', 'eta_minutes', 'eta_distance_km')
+        fields = ('estimated_arrival_at', 'eta_minutes', 'eta_distance_mi')
 
-    def get_eta_distance_km(self, obj):
-        return order_master_distance_km(obj)
+    def get_eta_distance_mi(self, obj):
+        return order_master_distance_mi(obj)
 
 
 class OrderTimestampsNestedSerializer(serializers.ModelSerializer):
@@ -273,9 +273,9 @@ class OrderSerializer(serializers.ModelSerializer):
                 else:
                     hide = False
         master = obj.master
-        dist_km = order_master_distance_km(obj)
-        if dist_km is not None:
-            master.distance = float(dist_km)
+        dist_mi = order_master_distance_mi(obj)
+        if dist_mi is not None:
+            master.distance = float(dist_mi)
         ctx = {
             **self.context,
             'hide_master_exact_location': hide,
@@ -698,19 +698,21 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                     })
                 lat1 = float(order_lat)
                 lon1 = float(order_lon)
-                distance = haversine_distance_km(lat1, lon1, wlat, wlon)
+                distance_km = haversine_distance_km(lat1, lon1, wlat, wlon)
                 max_km = master.max_order_distance_km()
-                if distance > max_km:
+                if distance_km > max_km:
+                    d_mi = km_to_miles(distance_km)
+                    max_mi = km_to_miles(max_km)
                     if order_type == OrderType.STANDARD:
                         msg = (
                             f'This master cannot take this booking: the order location is outside their '
-                            f'acceptance zone ({distance:.1f} km from their map pin; maximum allowed '
-                            f'{max_km:.1f} km). Choose another master or change the visit coordinates.'
+                            f'acceptance zone ({d_mi:.1f} mi from their map pin; maximum allowed '
+                            f'{max_mi:.1f} mi). Choose another master or change the visit coordinates.'
                         )
                     else:
                         msg = (
                             f'The SOS location is outside this master’s acceptance zone '
-                            f'({distance:.1f} km; limit {max_km:.1f} km). Choose another master.'
+                            f'({d_mi:.1f} mi; limit {max_mi:.1f} mi). Choose another master.'
                         )
                     raise serializers.ValidationError({'master_id': msg})
 
@@ -879,11 +881,13 @@ class CustomRequestOfferWithMasterSerializer(serializers.ModelSerializer):
             if mlat is not None and mlon is not None:
                 m.distance = float(
                     round(
-                        haversine_distance_km(
-                            mlat,
-                            mlon,
-                            float(order.latitude),
-                            float(order.longitude),
+                        km_to_miles(
+                            haversine_distance_km(
+                                mlat,
+                                mlon,
+                                float(order.latitude),
+                                float(order.longitude),
+                            )
                         ),
                         3,
                     )

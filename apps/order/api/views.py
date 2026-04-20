@@ -38,7 +38,12 @@ from apps.order.services.sos_rotation import (
     order_ids_sos_currently_offered_to_master,
     sos_broadcast_decline,
 )
-from apps.master.services.geo import MILES_TO_KM, haversine_distance_m, haversine_distance_km
+from apps.master.services.geo import (
+    MILES_TO_KM,
+    haversine_distance_m,
+    haversine_distance_km,
+    km_to_miles,
+)
 
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
@@ -154,7 +159,7 @@ def _nearby_masters_debug_snapshot(
 
     out: dict = {
         'search_point': {'lat': user_lat, 'lng': user_lng},
-        'radius_km': radius_km,
+        'radius_mi': round(km_to_miles(radius_km), 4),
         'category_query': category_id_raw,
         'masters_total': Master.objects.count(),
         'masters_with_coordinates': Master.objects.filter(
@@ -221,16 +226,18 @@ def _nearby_nearest_outside_radius(
         mlat, mlon = m.get_work_location_for_distance()
         if mlat is None or mlon is None:
             continue
-        d = haversine_distance_km(user_lat, user_lng, mlat, mlon)
-        if d > radius_km:
+        d_km = haversine_distance_km(user_lat, user_lng, mlat, mlon)
+        if d_km > radius_km:
+            d_mi = km_to_miles(d_km)
+            r_mi = km_to_miles(radius_km)
             rows.append(
                 {
                     'master_id': m.id,
-                    'distance_km': round(d, 2),
-                    'km_beyond_radius': round(d - radius_km, 2),
+                    'distance_mi': round(d_mi, 2),
+                    'mi_beyond_radius': round(d_mi - r_mi, 2),
                 }
             )
-    rows.sort(key=lambda x: x['distance_km'])
+    rows.sort(key=lambda x: x['distance_mi'])
     return rows[:limit]
 
 
@@ -285,9 +292,8 @@ def _nearby_build_full_explain(
         category_id_raw
     )
     snap['hint'] = (
-        'radius query is in miles; radius_km is the effective search radius. '
-        'nearest_outside_radius: same filters (category if any) + coords, but distance_km > radius_km; '
-        'km_beyond_radius = km past that circle. '
+        'radius query is in miles; radius_mi is the search radius in miles. '
+        'nearest_outside_radius: masters past that circle with distance_mi and mi_beyond_radius. '
         'masters_skill_match_but_no_coordinates: have the skill but lat/lon empty.'
     )
     return snap
@@ -313,7 +319,7 @@ class NearbyMasterCandidatesView(MasterListView):
 - Иначе берутся **`request.user.latitude` и `request.user.longitude`** из профиля (если заданы).
 - Если ни query, ни профиль не дают координаты — **400** с подсказкой.
 
-**По умолчанию:** `radius=50` **миль** (в ответе `distance` по-прежнему в км).
+**По умолчанию:** `radius=50` **миль** (в ответе `distance` в **милях**).
 
 **Опционально:** `category` (by_order; **строгое** совпадение навыка), `name`.
 
@@ -323,7 +329,7 @@ class NearbyMasterCandidatesView(MasterListView):
 - `time` без `date` → **400**.
 
 **Пояснение в теле ответа (не ошибка):** `explain=1` или `debug=1` — вместо голого массива приходит объект:
-`{ "masters": [...], "nearby_explain": { счётчики, nearest_outside_radius (ближайшие за пределами radius с distance_km и km_beyond_radius), ... } }`.
+`{ "masters": [...], "nearby_explain": { счётчики, nearest_outside_radius (distance_mi, mi_beyond_radius), ... } }`.
 
 Без `explain` ответ по-прежнему **массив** мастеров (как раньше).
 
@@ -600,7 +606,7 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
                             },
                             'distance_error': {
                                 'summary': 'Master too far',
-                                'value': {'master_id': ['Selected master is too far (150.5 km). Maximum distance: 50 km.']}
+                                'value': {'master_id': ['Selected master is too far (93.5 mi). Maximum distance: 31.1 mi.']}
                             }
                         }
                     }
@@ -755,7 +761,7 @@ Do NOT use for **planned work** (use `/api/order/standard/`).
                             },
                             'distance_error': {
                                 'summary': 'Master too far',
-                                'value': {'master_id': ['Selected master is too far (150.5 km). Maximum distance: 50 km.']}
+                                'value': {'master_id': ['Selected master is too far (93.5 mi). Maximum distance: 31.1 mi.']}
                             }
                         }
                     }
