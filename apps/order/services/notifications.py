@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 from asgiref.sync import async_to_sync
@@ -15,6 +16,130 @@ if TYPE_CHECKING:
     from apps.order.models import Order
 
 logger = logging.getLogger(__name__)
+
+_FIREBASE_APPS: dict[str, Any] = {}
+
+
+def _env(key: str, default: str = '') -> str:
+    return (os.getenv(key, default) or '').strip()
+
+
+def _firebase_service_account_from_env(prefix: str) -> dict[str, str]:
+    pk = _env(f'{prefix}PRIVATE_KEY')
+    if '\\n' in pk:
+        pk = pk.replace('\\n', '\n')
+    return {
+        'type': _env(f'{prefix}TYPE', 'service_account'),
+        'project_id': _env(f'{prefix}PROJECT_ID'),
+        'private_key_id': _env(f'{prefix}PRIVATE_KEY_ID'),
+        'private_key': pk,
+        'client_email': _env(f'{prefix}CLIENT_EMAIL'),
+        'client_id': _env(f'{prefix}CLIENT_ID'),
+        'auth_uri': _env(f'{prefix}AUTH_URI', 'https://accounts.google.com/o/oauth2/auth'),
+        'token_uri': _env(f'{prefix}TOKEN_URI', 'https://oauth2.googleapis.com/token'),
+        'auth_provider_x509_cert_url': _env(
+            f'{prefix}AUTH_PROVIDER_X509_CERT_URL',
+            'https://www.googleapis.com/oauth2/v1/certs',
+        ),
+        'client_x509_cert_url': _env(f'{prefix}CLIENT_X509_CERT_URL'),
+    }
+
+
+def _get_firebase_app(kind: str):
+    if kind in _FIREBASE_APPS:
+        return _FIREBASE_APPS[kind]
+
+    try:
+        import firebase_admin
+        from firebase_admin import credentials
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError('firebase-admin is not installed') from exc
+
+    prefix = 'FIREBASE_' if kind == 'user' else 'FIREBASE_MASTER_'
+    sa = _firebase_service_account_from_env(prefix)
+    if not sa.get('project_id') or not sa.get('private_key') or not sa.get('client_email'):
+        raise RuntimeError(f'Firebase env missing for kind={kind} (prefix {prefix})')
+
+    cred = credentials.Certificate(sa)
+    app = firebase_admin.initialize_app(cred, name=f'autohandy_{kind}')
+    _FIREBASE_APPS[kind] = app
+    return app
+
+
+def _device_tokens_for_user(user_id: int) -> list[str]:
+    from apps.accounts.models import UserDevice
+
+    tokens = list(
+        UserDevice.objects.filter(user_id=user_id)
+        .order_by('-updated_at')
+        .values_list('device_token', flat=True)
+    )
+    seen = set()
+    out: list[str] = []
+    for t in tokens:
+        t = (t or '').strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def send_fcm_to_user_devices(
+    *,
+    user_id: int,
+    firebase_kind: str,
+    title: str,
+    body: str,
+    data: dict[str, str] | None = None,
+) -> None:
+    """
+    Best-effort FCM send. Does not raise.
+    firebase_kind: "user" or "master"
+    """
+    try:
+        from firebase_admin import messaging
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('FCM skipped (firebase-admin not available): %s', exc)
+        return
+
+    tokens = _device_tokens_for_user(user_id)
+    if not tokens:
+        return
+
+    try:
+        app = _get_firebase_app(firebase_kind)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('FCM init failed (kind=%s): %s', firebase_kind, exc)
+        return
+
+    payload_data = {str(k): str(v) for k, v in (data or {}).items()}
+    msg = messaging.MulticastMessage(
+        tokens=tokens,
+        notification=messaging.Notification(title=title, body=body),
+        data=payload_data,
+    )
+    try:
+        resp = messaging.send_multicast(msg, app=app)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('FCM send failed (kind=%s user_id=%s): %s', firebase_kind, user_id, exc)
+        return
+
+    invalid_tokens: list[str] = []
+    for i, r in enumerate(resp.responses):
+        if r.success:
+            continue
+        err = getattr(r, 'exception', None)
+        code = getattr(err, 'code', '') if err else ''
+        if 'registration-token-not-registered' in str(code) or 'invalid-argument' in str(code):
+            invalid_tokens.append(tokens[i])
+    if invalid_tokens:
+        try:
+            from apps.accounts.models import UserDevice
+
+            UserDevice.objects.filter(device_token__in=invalid_tokens).delete()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('FCM token cleanup failed: %s', exc)
 
 
 def _ws_json_safe(value: Any) -> Any:
@@ -434,8 +559,65 @@ def notify_master_new_order(order: 'Order', *, target_master_id: int | None = No
     mid = target_master_id if target_master_id is not None else order.master_id
     if not mid:
         return
-    logger.info(
-        'notify_master_new_order: order_id=%s master_id=%s (implement FCM for production)',
-        order.id,
-        mid,
+    try:
+        from apps.master.models import Master
+
+        master = Master.objects.select_related('user').only('id', 'user_id').get(pk=mid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('notify_master_new_order: master lookup failed: %s', exc)
+        return
+
+    send_fcm_to_user_devices(
+        user_id=master.user_id,
+        firebase_kind='master',
+        title='New order',
+        body=f'Order #{order.id} is available',
+        data={
+            'kind': 'order_new',
+            'order_id': str(order.id),
+            'order_type': str(getattr(order, 'order_type', '') or ''),
+        },
+    )
+
+
+def notify_user_order_event(
+    order: 'Order',
+    *,
+    title: str,
+    body: str,
+    kind: str,
+    extra_data: dict[str, str] | None = None,
+) -> None:
+    if not getattr(order, 'user_id', None):
+        return
+    data = {'kind': kind, 'order_id': str(order.id)}
+    if extra_data:
+        data.update({str(k): str(v) for k, v in extra_data.items()})
+    send_fcm_to_user_devices(
+        user_id=order.user_id,
+        firebase_kind='user',
+        title=title,
+        body=body,
+        data=data,
+    )
+
+
+def notify_master_order_event(
+    *,
+    master_user_id: int,
+    order_id: int,
+    title: str,
+    body: str,
+    kind: str,
+    extra_data: dict[str, str] | None = None,
+) -> None:
+    data = {'kind': kind, 'order_id': str(order_id)}
+    if extra_data:
+        data.update({str(k): str(v) for k, v in extra_data.items()})
+    send_fcm_to_user_devices(
+        user_id=master_user_id,
+        firebase_kind='master',
+        title=title,
+        body=body,
+        data=data,
     )

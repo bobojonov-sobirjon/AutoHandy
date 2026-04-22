@@ -117,6 +117,15 @@ class Order(models.Model):
         related_name='orders',
         verbose_name='Master',
     )
+    chat_room = models.ForeignKey(
+        'chat.ChatRoom',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='orders',
+        verbose_name='Chat room',
+        help_text='Auto-created on accept: master (initiator) ↔ user (receiver).',
+    )
 
     discount = models.DecimalField(
         max_digits=10,

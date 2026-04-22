@@ -2238,6 +2238,58 @@ class UpdateOrderStatusView(APIView):
                 order.arrival_deadline_at = None
                 clear_completion_pin(order)
                 order.save()
+                try:
+                    from apps.order.services.notifications import notify_master_order_event, notify_user_order_event
+                    from apps.master.models import Master
+
+                    notify_user_order_event(
+                        order,
+                        title='Order cancelled',
+                        body=f'Order #{order.id} was cancelled',
+                        kind='order_cancelled',
+                        extra_data={'by': 'user', 'status': str(order.status)},
+                    )
+                    # If there is an assigned master — notify them; for pending SOS broadcast — notify all in queue.
+                    if order.master_id:
+                        mu = (
+                            Master.objects.select_related('user')
+                            .only('id', 'user_id')
+                            .get(pk=order.master_id)
+                        )
+                        notify_master_order_event(
+                            master_user_id=mu.user_id,
+                            order_id=order.id,
+                            title='Order cancelled',
+                            body=f'Order #{order.id} was cancelled by the customer',
+                            kind='order_cancelled',
+                            extra_data={'by': 'user'},
+                        )
+                    elif order.order_type == OrderType.SOS and order.sos_offer_queue:
+                        mids = []
+                        for x in (order.sos_offer_queue or []):
+                            try:
+                                mids.append(int(x))
+                            except (TypeError, ValueError):
+                                continue
+                        for mid in mids:
+                            try:
+                                mu = (
+                                    Master.objects.select_related('user')
+                                    .only('id', 'user_id')
+                                    .get(pk=mid)
+                                )
+                                notify_master_order_event(
+                                    master_user_id=mu.user_id,
+                                    order_id=order.id,
+                                    title='Order cancelled',
+                                    body=f'Order #{order.id} was cancelled by the customer',
+                                    kind='order_cancelled',
+                                    extra_data={'by': 'user'},
+                                )
+                            except Exception:  # noqa: BLE001
+                                continue
+                except Exception:  # noqa: BLE001
+                    pass
                 data = OrderSerializer(order, context={'request': request}).data
                 data.update(extra_response)
                 return Response(data)
@@ -2256,6 +2308,18 @@ class UpdateOrderStatusView(APIView):
                 order.arrival_deadline_at = None
                 clear_completion_pin(order)
                 order.save()
+                try:
+                    from apps.order.services.notifications import notify_user_order_event
+
+                    notify_user_order_event(
+                        order,
+                        title='Order cancelled',
+                        body=f'Order #{order.id} was cancelled by the master',
+                        kind='order_cancelled',
+                        extra_data={'by': 'master', 'status': str(order.status)},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 return Response(OrderSerializer(order, context={'request': request}).data)
 
             return Response({'error': 'Not allowed to cancel'}, status=status.HTTP_403_FORBIDDEN)
@@ -2311,6 +2375,18 @@ class UpdateOrderStatusView(APIView):
             )
             schedule_client_penalty_free_unlock(order.pk, order.on_the_way_at)
             schedule_master_no_show_autocancel(order.pk, order.arrival_deadline_at)
+            try:
+                from apps.order.services.notifications import notify_user_order_event
+
+                notify_user_order_event(
+                    order,
+                    title='Master is on the way',
+                    body=f'Order #{order.id}: master is on the way',
+                    kind='order_status_changed',
+                    extra_data={'status': str(order.status)},
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return Response(OrderSerializer(order, context={'request': request}).data)
 
         if order.status == OrderStatus.ON_THE_WAY and new_status == OrderStatus.ARRIVED:
@@ -2331,6 +2407,18 @@ class UpdateOrderStatusView(APIView):
                     'updated_at',
                 ]
             )
+            try:
+                from apps.order.services.notifications import notify_user_order_event
+
+                notify_user_order_event(
+                    order,
+                    title='Master arrived',
+                    body=f'Order #{order.id}: master arrived',
+                    kind='order_status_changed',
+                    extra_data={'status': str(order.status)},
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return Response(OrderSerializer(order, context={'request': request}).data)
 
         if order.status == OrderStatus.ARRIVED and new_status == OrderStatus.IN_PROGRESS:
@@ -2395,6 +2483,18 @@ class UpdateOrderStatusView(APIView):
                     'updated_at',
                 ]
             )
+            try:
+                from apps.order.services.notifications import notify_user_order_event
+
+                notify_user_order_event(
+                    order,
+                    title='Work started',
+                    body=f'Order #{order.id}: work started',
+                    kind='order_status_changed',
+                    extra_data={'status': str(order.status)},
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return Response(OrderSerializer(order, context={'request': request}).data)
 
         return Response(
@@ -2463,6 +2563,57 @@ class CancelOrderView(APIView):
             order.arrival_deadline_at = None
             clear_completion_pin(order)
             order.save()
+            try:
+                from apps.order.services.notifications import notify_master_order_event, notify_user_order_event
+                from apps.master.models import Master
+
+                notify_user_order_event(
+                    order,
+                    title='Order cancelled',
+                    body=f'Order #{order.id} was cancelled',
+                    kind='order_cancelled',
+                    extra_data={'by': 'user', 'status': str(order.status)},
+                )
+                if order.master_id:
+                    mu = (
+                        Master.objects.select_related('user')
+                        .only('id', 'user_id')
+                        .get(pk=order.master_id)
+                    )
+                    notify_master_order_event(
+                        master_user_id=mu.user_id,
+                        order_id=order.id,
+                        title='Order cancelled',
+                        body=f'Order #{order.id} was cancelled by the customer',
+                        kind='order_cancelled',
+                        extra_data={'by': 'user'},
+                    )
+                elif order.order_type == OrderType.SOS and order.sos_offer_queue:
+                    mids = []
+                    for x in (order.sos_offer_queue or []):
+                        try:
+                            mids.append(int(x))
+                        except (TypeError, ValueError):
+                            continue
+                    for mid in mids:
+                        try:
+                            mu = (
+                                Master.objects.select_related('user')
+                                .only('id', 'user_id')
+                                .get(pk=mid)
+                            )
+                            notify_master_order_event(
+                                master_user_id=mu.user_id,
+                                order_id=order.id,
+                                title='Order cancelled',
+                                body=f'Order #{order.id} was cancelled by the customer',
+                                kind='order_cancelled',
+                                extra_data={'by': 'user'},
+                            )
+                        except Exception:  # noqa: BLE001
+                            continue
+            except Exception:  # noqa: BLE001
+                pass
             data = OrderSerializer(order, context={'request': request}).data
             data['cancellation_penalty_applies'] = snap['penalty_applies']
             data['cancellation_penalty_percent'] = snap['penalty_percent']
@@ -2486,6 +2637,18 @@ class CancelOrderView(APIView):
             order.arrival_deadline_at = None
             clear_completion_pin(order)
             order.save()
+            try:
+                from apps.order.services.notifications import notify_user_order_event
+
+                notify_user_order_event(
+                    order,
+                    title='Order cancelled',
+                    body=f'Order #{order.id} was cancelled by the master',
+                    kind='order_cancelled',
+                    extra_data={'by': 'master', 'status': str(order.status)},
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return Response(
                 {
                     'message': 'Order cancelled by master.',
@@ -2614,6 +2777,18 @@ class AcceptOrderView(APIView):
 
             order.refresh_from_db()
             serializer = OrderSerializer(order, context={'request': request})
+            try:
+                from apps.order.services.notifications import notify_user_order_event
+
+                notify_user_order_event(
+                    order,
+                    title='Order accepted',
+                    body=f'Order #{order.id} was accepted by a master',
+                    kind='order_accepted',
+                    extra_data={'status': str(order.status), 'master_id': str(order.master_id or '')},
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return Response(
                 {
                     'message': 'Заказ принят. Далее: «В пути» → «Прибыл» → «Начать работу».',
@@ -2688,6 +2863,18 @@ class DeclineOrderView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             order.refresh_from_db()
+            try:
+                from apps.order.services.notifications import notify_user_order_event
+
+                notify_user_order_event(
+                    order,
+                    title='Order declined',
+                    body=f'Order #{order.id} was declined by a master',
+                    kind='order_declined',
+                    extra_data={'master_id': str(master.id), 'order_type': str(order.order_type)},
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return Response(
                 OrderSerializer(order, context={'request': request}).data,
                 status=status.HTTP_200_OK,
@@ -2697,6 +2884,18 @@ class DeclineOrderView(APIView):
         order.master = None
         order.master_response_deadline = None
         order.save(update_fields=['status', 'master', 'master_response_deadline', 'updated_at'])
+        try:
+            from apps.order.services.notifications import notify_user_order_event
+
+            notify_user_order_event(
+                order,
+                title='Order declined',
+                body=f'Order #{order.id} was declined by the master',
+                kind='order_declined',
+                extra_data={'master_id': str(master.id), 'status': str(order.status)},
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return Response(
             OrderSerializer(order, context={'request': request}).data,
             status=status.HTTP_200_OK,
@@ -2872,6 +3071,18 @@ class CompleteOrderView(APIView):
                 )
 
             if not secrets.compare_digest(expected, pin_s):
+                try:
+                    from apps.order.services.notifications import notify_user_order_event
+
+                    notify_user_order_event(
+                        order,
+                        title='PIN check failed',
+                        body=f'Order #{order.id}: master entered a wrong PIN',
+                        kind='completion_pin_invalid',
+                        extra_data={'status': str(order.status)},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 return Response(
                     {'error': 'Invalid completion PIN.'},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -2889,6 +3100,18 @@ class CompleteOrderView(APIView):
             )
 
             serializer = OrderSerializer(order, context={'request': request})
+            try:
+                from apps.order.services.notifications import notify_user_order_event
+
+                notify_user_order_event(
+                    order,
+                    title='Order completed',
+                    body=f'Order #{order.id} was completed',
+                    kind='order_completed',
+                    extra_data={'status': str(order.status)},
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return Response(
                 {
                     'message': 'Order completed successfully',

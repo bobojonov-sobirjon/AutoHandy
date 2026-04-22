@@ -30,7 +30,10 @@ def run_broadcast_custom_request(order_id: int) -> int:
     Core logic for custom-request geo push (used by Celery task and inline fallback when Redis is down).
     """
     from apps.order.services.custom_request_broadcast import master_ids_within_custom_request_radius
-    from apps.order.services.notifications import push_custom_request_to_master_websocket
+    from apps.order.services.notifications import (
+        notify_master_order_event,
+        push_custom_request_to_master_websocket,
+    )
 
     try:
         order = Order.objects.get(pk=order_id)
@@ -42,6 +45,24 @@ def run_broadcast_custom_request(order_id: int) -> int:
         return 0
     mids = master_ids_within_custom_request_radius(float(order.latitude), float(order.longitude))
     for mid in mids:
+        try:
+            from apps.master.models import Master
+
+            mu = (
+                Master.objects.select_related('user')
+                .only('id', 'user_id')
+                .get(pk=mid)
+            )
+            notify_master_order_event(
+                master_user_id=mu.user_id,
+                order_id=order.id,
+                title='New custom request',
+                body=f'Order #{order.id} is available',
+                kind='custom_request_new',
+                extra_data={'order_type': str(order.order_type)},
+            )
+        except Exception:  # noqa: BLE001
+            pass
         push_custom_request_to_master_websocket(order, target_master_id=mid)
     return len(mids)
 

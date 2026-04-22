@@ -27,6 +27,9 @@ tzdata==2025.2
 uritemplate==4.2.0
 urllib3==2.5.0
 
+# Push notifications (Firebase Cloud Messaging)
+firebase-admin==7.1.0
+
 # Optional: Redis for production cache (if USE_REDIS_CACHE=True)
 django-redis==5.4.0
 redis==5.0.1
