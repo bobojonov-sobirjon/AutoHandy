@@ -105,6 +105,7 @@ def send_fcm_to_user_devices(
 
     tokens = _device_tokens_for_user(user_id)
     if not tokens:
+        logger.info('FCM no_tokens (kind=%s user_id=%s)', firebase_kind, user_id)
         return
 
     try:
@@ -112,6 +113,14 @@ def send_fcm_to_user_devices(
     except Exception as exc:  # noqa: BLE001
         logger.warning('FCM init failed (kind=%s): %s', firebase_kind, exc)
         return
+
+    logger.info(
+        'FCM send attempt (kind=%s user_id=%s tokens=%s title=%s)',
+        firebase_kind,
+        user_id,
+        len(tokens),
+        (title or '')[:60],
+    )
 
     payload_data = {str(k): str(v) for k, v in (data or {}).items()}
     msg = messaging.MulticastMessage(
@@ -124,6 +133,14 @@ def send_fcm_to_user_devices(
     except Exception as exc:  # noqa: BLE001
         logger.warning('FCM send failed (kind=%s user_id=%s): %s', firebase_kind, user_id, exc)
         return
+
+    logger.info(
+        'FCM send result (kind=%s user_id=%s success=%s failure=%s)',
+        firebase_kind,
+        user_id,
+        getattr(resp, 'success_count', None),
+        getattr(resp, 'failure_count', None),
+    )
 
     invalid_tokens: list[str] = []
     for i, r in enumerate(resp.responses):
@@ -138,6 +155,12 @@ def send_fcm_to_user_devices(
             from apps.accounts.models import UserDevice
 
             UserDevice.objects.filter(device_token__in=invalid_tokens).delete()
+            logger.info(
+                'FCM cleaned invalid tokens (kind=%s user_id=%s removed=%s)',
+                firebase_kind,
+                user_id,
+                len(invalid_tokens),
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning('FCM token cleanup failed: %s', exc)
 
