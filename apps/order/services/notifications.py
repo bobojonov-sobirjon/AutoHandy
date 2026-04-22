@@ -105,7 +105,7 @@ def send_fcm_to_user_devices(
 
     tokens = _device_tokens_for_user(user_id)
     if not tokens:
-        logger.info('FCM no_tokens (kind=%s user_id=%s)', firebase_kind, user_id)
+        logger.warning('FCM no_tokens (kind=%s user_id=%s)', firebase_kind, user_id)
         return
 
     try:
@@ -114,7 +114,7 @@ def send_fcm_to_user_devices(
         logger.warning('FCM init failed (kind=%s): %s', firebase_kind, exc)
         return
 
-    logger.info(
+    logger.warning(
         'FCM send attempt (kind=%s user_id=%s tokens=%s title=%s)',
         firebase_kind,
         user_id,
@@ -134,7 +134,7 @@ def send_fcm_to_user_devices(
         logger.warning('FCM send failed (kind=%s user_id=%s): %s', firebase_kind, user_id, exc)
         return
 
-    logger.info(
+    logger.warning(
         'FCM send result (kind=%s user_id=%s success=%s failure=%s)',
         firebase_kind,
         user_id,
@@ -155,7 +155,7 @@ def send_fcm_to_user_devices(
             from apps.accounts.models import UserDevice
 
             UserDevice.objects.filter(device_token__in=invalid_tokens).delete()
-            logger.info(
+            logger.warning(
                 'FCM cleaned invalid tokens (kind=%s user_id=%s removed=%s)',
                 firebase_kind,
                 user_id,
