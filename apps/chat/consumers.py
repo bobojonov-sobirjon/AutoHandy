@@ -74,8 +74,22 @@ class ChatConsumer(AsyncWebsocketConsumer):
             print(f"[DEBUG] Message type: {message_type}")
 
             if message_type == 'chat_message':
-                # Save message to DB
-                message = await self.save_message(data)
+                # Save message to DB (text) OR broadcast existing message (attachments uploaded via REST)
+                msg_id = data.get('message_id')
+                if msg_id:
+                    message = await self.get_message_if_allowed(msg_id)
+                    if not message:
+                        await self.send(
+                            text_data=json.dumps(
+                                {'type': 'error', 'message': 'Message not found or access denied'}
+                            )
+                        )
+                        return
+                else:
+                    message = await self.save_message(data)
+
+                # Push to the other participant (best-effort)
+                await self.push_other_participant(message)
 
                 # Send message to everyone in group
                 await self.channel_layer.group_send(
@@ -183,6 +197,64 @@ class ChatConsumer(AsyncWebsocketConsumer):
         )
         room.save()
         return message
+
+    @database_sync_to_async
+    def get_message_if_allowed(self, message_id):
+        try:
+            msg = ChatMessage.objects.select_related('room', 'sender').get(id=message_id)
+        except ChatMessage.DoesNotExist:
+            return None
+        if str(msg.room_id) != str(self.room_id):
+            return None
+        if not msg.room.participants.filter(id=self.user.id).exists():
+            return None
+        return msg
+
+    @database_sync_to_async
+    def _other_participant_id_and_kind(self):
+        """
+        Returns (other_user_id, firebase_kind_str).
+        firebase_kind: "master" if other participant is a master user, else "user".
+        """
+        room = ChatRoom.objects.get(id=self.room_id)
+        other = room.get_other_participant(self.user)
+        if not other:
+            return None, None
+        try:
+            # Master users have at least one master profile.
+            is_master = bool(getattr(other, 'master_profiles', None) and other.master_profiles.exists())
+        except Exception:  # noqa: BLE001
+            is_master = False
+        return other.id, ('master' if is_master else 'user')
+
+    async def push_other_participant(self, message):
+        try:
+            other_user_id, other_kind = await self._other_participant_id_and_kind()
+            if not other_user_id or not other_kind:
+                return
+            from apps.order.services.notifications import send_fcm_to_user_devices
+
+            # Keep push body short
+            body = ''
+            if message.message_type == 'text':
+                body = (message.text or '').strip()[:120] or 'New message'
+            else:
+                body = f'New {message.message_type} message'
+
+            send_fcm_to_user_devices(
+                user_id=other_user_id,
+                firebase_kind=other_kind,
+                title='New message',
+                body=body,
+                data={
+                    'kind': 'chat_message',
+                    'room_id': str(message.room_id),
+                    'message_id': str(message.id),
+                    'message_type': str(message.message_type),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            return
 
     @database_sync_to_async
     def message_to_dict(self, message):

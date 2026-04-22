@@ -306,6 +306,51 @@ image: <file>
             room.save()
 
             result_serializer = ChatMessageSerializer(message, context={'request': request})
+            try:
+                # Realtime broadcast for REST-sent attachments + push notification
+                from asgiref.sync import async_to_sync
+                from channels.layers import get_channel_layer
+                from apps.order.services.notifications import send_fcm_to_user_devices
+
+                other = room.get_other_participant(request.user)
+                if other:
+                    try:
+                        is_master = bool(
+                            getattr(other, 'master_profiles', None)
+                            and other.master_profiles.exists()
+                        )
+                    except Exception:  # noqa: BLE001
+                        is_master = False
+                    other_kind = 'master' if is_master else 'user'
+                    body = ''
+                    if message.message_type == 'text':
+                        body = (message.text or '').strip()[:120] or 'New message'
+                    else:
+                        body = f'New {message.message_type} message'
+                    send_fcm_to_user_devices(
+                        user_id=other.id,
+                        firebase_kind=other_kind,
+                        title='New message',
+                        body=body,
+                        data={
+                            'kind': 'chat_message',
+                            'room_id': str(room.id),
+                            'message_id': str(message.id),
+                            'message_type': str(message.message_type),
+                        },
+                    )
+
+                layer = get_channel_layer()
+                if layer:
+                    async_to_sync(layer.group_send)(
+                        f'chat_{room.id}',
+                        {
+                            'type': 'chat_message',
+                            'message': result_serializer.data,
+                        },
+                    )
+            except Exception:  # noqa: BLE001
+                pass
             return Response(result_serializer.data, status=status.HTTP_201_CREATED)
 
         except ChatRoom.DoesNotExist:

@@ -183,6 +183,7 @@ class OrderSerializer(serializers.ModelSerializer):
     work_completion_images = serializers.SerializerMethodField()
     cancellation = serializers.SerializerMethodField()
     custom_request_selected_offer = serializers.SerializerMethodField()
+    chat_room_id = serializers.IntegerField(source='chat_room_id', read_only=True)
     latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
     longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
 
@@ -208,6 +209,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'timestamps', 'cancellation',
             'client_completion_pin',
             'custom_request_selected_offer',
+            'chat_room_id',
         ]
         read_only_fields = [
             'id',

@@ -2789,6 +2789,19 @@ class AcceptOrderView(APIView):
                 )
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                # Auto-create chat room between master (initiator) and user (receiver)
+                from apps.chat.services import get_or_create_order_chat_room
+
+                if order.chat_room_id is None and order.master_id:
+                    room = get_or_create_order_chat_room(
+                        master_user=request.user,
+                        customer_user=order.user,
+                    )
+                    order.chat_room = room
+                    order.save(update_fields=['chat_room', 'updated_at'])
+            except Exception:  # noqa: BLE001
+                pass
             return Response(
                 {
                     'message': 'Заказ принят. Далее: «В пути» → «Прибыл» → «Начать работу».',
