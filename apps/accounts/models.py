@@ -350,7 +350,6 @@ class UserDevice(models.Model):
     )
     device_token = models.CharField(
         max_length=512,
-        unique=True,
         db_index=True,
         verbose_name='Device token',
         help_text='FCM/APNs token; unique so one installation maps to one user at a time.',

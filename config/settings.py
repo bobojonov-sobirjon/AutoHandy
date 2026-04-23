@@ -425,6 +425,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.order.tasks.expire_stale_master_offers_task',
         'schedule': crontab(minute='*'),
     },
+    'warn-upcoming-order-deadlines': {
+        'task': 'apps.order.tasks.warn_upcoming_order_deadlines_task',
+        'schedule': crontab(minute='*'),
+    },
     'sweep-penalty-free-unlock': {
         'task': 'apps.order.tasks.sweep_client_penalty_free_unlock_task',
         'schedule': crontab(minute='*/5'),
@@ -434,6 +438,12 @@ CELERY_BEAT_SCHEDULE = {
         'schedule': crontab(minute='*'),
     },
 }
+
+# Push warnings before automatic deadlines (minutes).
+ORDER_DEADLINE_WARN_MINUTES = int(os.getenv('ORDER_DEADLINE_WARN_MINUTES', '3'))
+
+# WebSocket chat upload limit (base64 decoded bytes).
+CHAT_WS_MAX_UPLOAD_BYTES = int(os.getenv('CHAT_WS_MAX_UPLOAD_BYTES', str(5 * 1024 * 1024)))
 
 # After master is "on the way", client may cancel without penalty after this many hours (still on the way).
 CLIENT_CANCEL_NO_PENALTY_AFTER_ON_THE_WAY_HOURS = int(

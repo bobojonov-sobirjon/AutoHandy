@@ -13,8 +13,13 @@ if TYPE_CHECKING:
     from django.http import HttpRequest
 
 
-def activate_pending_master_offer(order: Order, request: 'HttpRequest | None' = None) -> None:
-    """Set master_response_deadline and trigger push (FCM hook)."""
+def activate_pending_master_offer(
+    order: Order,
+    request: 'HttpRequest | None' = None,
+    *,
+    send_push: bool = True,
+) -> None:
+    """Set master_response_deadline; optionally trigger push (FCM hook)."""
     if order.status != OrderStatus.PENDING:
         return
     if order.order_type == OrderType.CUSTOM_REQUEST:
@@ -37,6 +42,7 @@ def activate_pending_master_offer(order: Order, request: 'HttpRequest | None' = 
     from apps.order.services.notifications import notify_master_new_order
     from apps.order.services.celery_schedule import schedule_master_offer_expiry
 
-    notify_master_new_order(order)
+    if send_push:
+        notify_master_new_order(order)
     if order.master_response_deadline:
         schedule_master_offer_expiry(order.pk, order.master_response_deadline)

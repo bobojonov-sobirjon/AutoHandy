@@ -117,6 +117,19 @@ def _finish_sos_broadcast_exhausted(order: Order) -> None:
             'updated_at',
         ]
     )
+    # Push to order owner: SOS window ended with no accept.
+    try:
+        from apps.order.services.notifications import notify_user_order_event
+
+        notify_user_order_event(
+            order,
+            title='SOS request expired',
+            body=f'SOS order #{order.id}: no master responded in time. Please try again.',
+            kind='sos_expired',
+            extra_data={'by': 'system'},
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def finish_sos_broadcast_on_timeout(order: Order) -> None:

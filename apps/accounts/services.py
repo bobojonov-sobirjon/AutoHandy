@@ -609,7 +609,26 @@ def upsert_user_device_for_login(user, device_token: str, device_type: str) -> N
     """
     from .models import UserDevice
 
+    token = (device_token or '').strip()
+    dtype = (device_type or '').strip()
+    if not token:
+        logger.warning(
+            'UserDevice upsert skipped: empty token (user_id=%s device_type=%s)',
+            getattr(user, 'id', None),
+            dtype or None,
+        )
+        return
+
+    # Do not log full token (sensitive); prefix + length is enough for debugging.
+    logger.warning(
+        'UserDevice upsert (user_id=%s device_type=%s token_len=%s token_prefix=%s)',
+        getattr(user, 'id', None),
+        dtype or None,
+        len(token),
+        token[:12] + '…' if len(token) > 12 else token,
+    )
+
     UserDevice.objects.update_or_create(
-        device_token=device_token,
-        defaults={'user': user, 'device_type': device_type},
+        device_token=token,
+        defaults={'user': user, 'device_type': dtype or 'unknown'},
     )

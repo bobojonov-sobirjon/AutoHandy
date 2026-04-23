@@ -24,6 +24,18 @@ def _env(key: str, default: str = '') -> str:
     return (os.getenv(key, default) or '').strip()
 
 
+def _fcm_debug_enabled() -> bool:
+    return _env('FCM_DEBUG', '').lower() in ('1', 'true', 'yes', 'on')
+
+
+def _fcm_dbg(msg: str) -> None:
+    if _fcm_debug_enabled():
+        try:
+            print(f'[FCM_DEBUG] {msg}')
+        except Exception:  # noqa: BLE001
+            return
+
+
 def _firebase_service_account_from_env(prefix: str) -> dict[str, str]:
     pk = _env(f'{prefix}PRIVATE_KEY')
     if '\\n' in pk:
@@ -55,12 +67,22 @@ def _get_firebase_app(kind: str):
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError('firebase-admin is not installed') from exc
 
-    prefix = 'FIREBASE_' if kind == 'user' else 'FIREBASE_MASTER_'
+    # Project selection:
+    # - In production we may use a single Firebase project for both customer + provider apps.
+    # - This project currently uses FIREBASE_MASTER_* for both kinds to avoid token/project mismatch.
+    prefix = 'FIREBASE_MASTER_'
     sa = _firebase_service_account_from_env(prefix)
     if not sa.get('project_id') or not sa.get('private_key') or not sa.get('client_email'):
         raise RuntimeError(f'Firebase env missing for kind={kind} (prefix {prefix})')
 
     cred = credentials.Certificate(sa)
+    logger.warning(
+        'FCM init app (kind=%s project_id=%s client_email=%s)',
+        kind,
+        sa.get('project_id'),
+        (sa.get('client_email') or '').split('@')[0] + '@…',
+    )
+    _fcm_dbg(f'init app kind={kind} project_id={sa.get("project_id")}')
     app = firebase_admin.initialize_app(cred, name=f'autohandy_{kind}')
     _FIREBASE_APPS[kind] = app
     return app
@@ -74,14 +96,24 @@ def _device_tokens_for_user(user_id: int) -> list[str]:
         .order_by('-updated_at')
         .values_list('device_token', flat=True)
     )
+    _fcm_dbg(f'devices_lookup user_id={user_id} rows={len(tokens)}')
     seen = set()
     out: list[str] = []
+    empty = 0
     for t in tokens:
         t = (t or '').strip()
-        if not t or t in seen:
+        if not t:
+            empty += 1
+            continue
+        if t in seen:
             continue
         seen.add(t)
         out.append(t)
+    if empty:
+        _fcm_dbg(f'devices_lookup user_id={user_id} empty_tokens={empty}')
+    if out:
+        sample = out[0]
+        _fcm_dbg(f'devices_lookup user_id={user_id} unique_tokens={len(out)} sample_prefix={sample[:12]}…')
     return out
 
 
@@ -101,17 +133,20 @@ def send_fcm_to_user_devices(
         from firebase_admin import messaging
     except Exception as exc:  # noqa: BLE001
         logger.warning('FCM skipped (firebase-admin not available): %s', exc)
+        _fcm_dbg(f'skipped: firebase-admin not available: {exc}')
         return
 
     tokens = _device_tokens_for_user(user_id)
     if not tokens:
         logger.warning('FCM no_tokens (kind=%s user_id=%s)', firebase_kind, user_id)
+        _fcm_dbg(f'no_tokens kind={firebase_kind} user_id={user_id}')
         return
 
     try:
         app = _get_firebase_app(firebase_kind)
     except Exception as exc:  # noqa: BLE001
         logger.warning('FCM init failed (kind=%s): %s', firebase_kind, exc)
+        _fcm_dbg(f'init_failed kind={firebase_kind} user_id={user_id}: {exc}')
         return
 
     logger.warning(
@@ -121,6 +156,9 @@ def send_fcm_to_user_devices(
         len(tokens),
         (title or '')[:60],
     )
+    _fcm_dbg(
+        f'send_attempt kind={firebase_kind} user_id={user_id} tokens={len(tokens)} title={(title or "")[:60]}'
+    )
 
     payload_data = {str(k): str(v) for k, v in (data or {}).items()}
     msg = messaging.MulticastMessage(
@@ -129,9 +167,25 @@ def send_fcm_to_user_devices(
         data=payload_data,
     )
     try:
-        resp = messaging.send_multicast(msg, app=app)
+        # firebase-admin 7.x removed send_multicast in favor of send_each_for_multicast.
+        if hasattr(messaging, 'send_each_for_multicast'):
+            resp = messaging.send_each_for_multicast(msg, app=app)
+        elif hasattr(messaging, 'send_multicast'):
+            resp = messaging.send_multicast(msg, app=app)
+        else:
+            # Very old fallback (should not happen in this project): expand into per-token messages.
+            messages = [
+                messaging.Message(
+                    token=t,
+                    notification=messaging.Notification(title=title, body=body),
+                    data=payload_data,
+                )
+                for t in tokens
+            ]
+            resp = messaging.send_all(messages, app=app)
     except Exception as exc:  # noqa: BLE001
         logger.warning('FCM send failed (kind=%s user_id=%s): %s', firebase_kind, user_id, exc)
+        _fcm_dbg(f'send_failed kind={firebase_kind} user_id={user_id}: {exc}')
         return
 
     logger.warning(
@@ -141,6 +195,10 @@ def send_fcm_to_user_devices(
         getattr(resp, 'success_count', None),
         getattr(resp, 'failure_count', None),
     )
+    _fcm_dbg(
+        f'send_result kind={firebase_kind} user_id={user_id} success={getattr(resp,"success_count",None)} '
+        f'failure={getattr(resp,"failure_count",None)}'
+    )
 
     invalid_tokens: list[str] = []
     for i, r in enumerate(resp.responses):
@@ -148,6 +206,17 @@ def send_fcm_to_user_devices(
             continue
         err = getattr(r, 'exception', None)
         code = getattr(err, 'code', '') if err else ''
+        msg_txt = str(err) if err else ''
+        # Log first few failures for diagnostics.
+        if i < 3:
+            logger.warning(
+                'FCM send failure detail (kind=%s user_id=%s token_idx=%s code=%s err=%s)',
+                firebase_kind,
+                user_id,
+                i,
+                code,
+                (msg_txt or '')[:200],
+            )
         if 'registration-token-not-registered' in str(code) or 'invalid-argument' in str(code):
             invalid_tokens.append(tokens[i])
     if invalid_tokens:
@@ -163,6 +232,153 @@ def send_fcm_to_user_devices(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning('FCM token cleanup failed: %s', exc)
+
+
+def _pro_push_copy(
+    *,
+    kind: str,
+    order_id: int | None,
+    audience: str,
+    extra_data: dict[str, str] | None,
+    fallback_title: str,
+    fallback_body: str,
+) -> tuple[str, str]:
+    """
+    Central place for polished push copy.
+    audience: "user" (customer/driver app) or "master" (provider app)
+    """
+    k = (kind or '').strip()
+    by = (extra_data or {}).get('by') if extra_data else None
+    order_type = (extra_data or {}).get('order_type') if extra_data else None
+    push_source = (extra_data or {}).get('push_source') if extra_data else None
+    oid = f'#{order_id}' if order_id else ''
+
+    if k == 'order_new' and audience == 'master':
+        if (order_type or '').lower() == 'sos':
+            return (
+                'Emergency request',
+                f'Urgent SOS order received. Tap to respond now — {oid}'.strip(),
+            )
+        return 'New order received', f'A new order is waiting for you. Tap to view — {oid}'.strip()
+
+    if k == 'offer_expiring_soon':
+        mins = (extra_data or {}).get('minutes_left') if extra_data else None
+        if audience == 'user':
+            if mins:
+                return 'Order update', f'Order {oid}: waiting for master response. About {mins} min left.'.strip()
+            return 'Order update', f'Order {oid}: waiting for master response. The timer ends soon.'.strip()
+        if mins:
+            return 'Response needed', f'Order {oid}: about {mins} min left to accept or decline.'.strip()
+        return 'Response needed', f'Order {oid}: please accept or decline before the timer ends.'.strip()
+
+    if k == 'offer_expired':
+        if audience == 'user':
+            return 'Order expired', f'Order {oid}: no master accepted in time. Please choose another master.'.strip()
+        return 'Offer expired', f'Order {oid}: the response window ended.'.strip()
+
+    if k == 'sos_expiring_soon' and audience == 'user':
+        mins = (extra_data or {}).get('minutes_left') if extra_data else None
+        if mins:
+            return 'SOS update', f'SOS order {oid}: about {mins} min left for a response.'.strip()
+        return 'SOS update', f'SOS order {oid}: the response window ends very soon.'.strip()
+
+    if k == 'sos_expired' and audience == 'user':
+        return 'SOS request expired', f'SOS order {oid}: no master responded in time. Please try again.'.strip()
+
+    if k == 'penalty_free_unlock_soon':
+        if audience == 'user':
+            return 'Cancellation update', f'Order {oid}: penalty-free cancellation will unlock soon.'.strip()
+        return 'Cancellation update', f'Order {oid}: the customer will be able to cancel without penalty soon.'.strip()
+
+    if k == 'penalty_free_unlocked':
+        if audience == 'user':
+            return 'Cancellation unlocked', f'Order {oid}: you can now cancel without a penalty (while the master is on the way).'.strip()
+        return 'Cancellation unlocked', f'Order {oid}: the customer can now cancel without a penalty (while you are on the way).'.strip()
+
+    if k == 'arrival_deadline_soon':
+        if audience == 'user':
+            return 'Arrival reminder', f'Order {oid}: the arrival deadline is approaching.'.strip()
+        return 'Arrival deadline approaching', f'Order {oid}: please arrive before the deadline to avoid auto-cancel.'.strip()
+
+    if k == 'auto_cancel_no_show':
+        if audience == 'user':
+            return 'Order cancelled', f'Order {oid} was cancelled because the master did not arrive in time.'.strip()
+        return 'Order cancelled', f'Order {oid} was auto-cancelled because the arrival deadline passed.'.strip()
+
+    if k == 'order_selected' and audience == 'master':
+        return (
+            'You were selected',
+            f'A customer selected you for order {oid}. Tap to review and accept.'.strip(),
+        )
+
+    if k == 'custom_request_new' and audience == 'master':
+        return (
+            'New custom request nearby',
+            f'A customer posted a custom request near you. Tap to view and send your price — {oid}'.strip(),
+        )
+
+    if k == 'custom_request_offer' and audience == 'user':
+        price = (extra_data or {}).get('price') if extra_data else None
+        master_name = (extra_data or {}).get('master_name') if extra_data else None
+        if price and master_name:
+            return (
+                'New offer received',
+                f'{master_name} offered {price} for your request {oid}. Tap to view.'.strip(),
+            )
+        if price:
+            return (
+                'New offer received',
+                f'You received an offer of {price} for your request {oid}. Tap to view.'.strip(),
+            )
+        return 'New offer received', f'You received a new offer for your request {oid}. Tap to view.'.strip()
+
+    if k == 'order_accepted' and audience == 'user':
+        return 'Order accepted', f'Good news — a master accepted your order {oid}. Tap to view details.'.strip()
+
+    if k == 'order_declined' and audience == 'user':
+        return 'Order declined', f'Your order {oid} was declined. You can try again or choose another master.'.strip()
+
+    if k == 'order_cancelled':
+        if audience == 'user' and by == 'master':
+            return 'Order cancelled', f'The master cancelled your order {oid}. Tap to see details.'.strip()
+        if audience == 'master' and by == 'user':
+            return 'Order cancelled', f'The customer cancelled order {oid}.'.strip()
+        return 'Order cancelled', f'Order {oid} was cancelled.'.strip()
+
+    if k == 'order_completed' and audience == 'user':
+        return 'Order completed', f'Your order {oid} has been marked as completed. Tap to review the details.'.strip()
+
+    if k == 'completion_pin_invalid' and audience == 'user':
+        return 'PIN incorrect', f'Order {oid}: the master entered an incorrect completion PIN. Please double-check and try again.'.strip()
+
+    if k == 'order_services_added' and audience == 'user':
+        cnt_raw = (extra_data or {}).get('service_count') if extra_data else None
+        try:
+            cnt = int(cnt_raw) if cnt_raw is not None else 0
+        except (TypeError, ValueError):
+            cnt = 0
+        if cnt > 0:
+            return (
+                'Services updated',
+                f'The master added {cnt} service{"s" if cnt != 1 else ""} to your order {oid}. Tap to review.'.strip(),
+            )
+        return 'Services updated', f'The master updated the services for your order {oid}. Tap to review.'.strip()
+
+    if k == 'review_created' and audience == 'master':
+        stars = (extra_data or {}).get('rating') if extra_data else None
+        who = (extra_data or {}).get('reviewer_name') if extra_data else None
+        if stars and who:
+            return 'New review received', f'{who} left a {stars}-star review for order {oid}. Tap to view.'.strip()
+        if stars:
+            return 'New review received', f'You received a {stars}-star review for order {oid}. Tap to view.'.strip()
+        return 'New review received', f'You received a new review for order {oid}. Tap to view.'.strip()
+
+    if k == 'order_status_changed':
+        if audience == 'user':
+            return fallback_title or 'Order update', fallback_body or f'Your order {oid} has an update.'.strip()
+        return fallback_title or 'Order update', fallback_body or f'Order {oid} has an update.'.strip()
+
+    return fallback_title, fallback_body
 
 
 def _ws_json_safe(value: Any) -> Any:
@@ -590,11 +806,19 @@ def notify_master_new_order(order: 'Order', *, target_master_id: int | None = No
         logger.warning('notify_master_new_order: master lookup failed: %s', exc)
         return
 
+    title, body = _pro_push_copy(
+        kind='order_new',
+        order_id=order.id,
+        audience='master',
+        extra_data={'order_type': str(getattr(order, 'order_type', '') or '')},
+        fallback_title='New order received',
+        fallback_body=f'A new order is waiting for you. Tap to view — #{order.id}',
+    )
     send_fcm_to_user_devices(
         user_id=master.user_id,
         firebase_kind='master',
-        title='New order',
-        body=f'Order #{order.id} is available',
+        title=title,
+        body=body,
         data={
             'kind': 'order_new',
             'order_id': str(order.id),
@@ -613,14 +837,22 @@ def notify_user_order_event(
 ) -> None:
     if not getattr(order, 'user_id', None):
         return
+    title_out, body_out = _pro_push_copy(
+        kind=kind,
+        order_id=order.id,
+        audience='user',
+        extra_data=extra_data,
+        fallback_title=title,
+        fallback_body=body,
+    )
     data = {'kind': kind, 'order_id': str(order.id)}
     if extra_data:
         data.update({str(k): str(v) for k, v in extra_data.items()})
     send_fcm_to_user_devices(
         user_id=order.user_id,
         firebase_kind='user',
-        title=title,
-        body=body,
+        title=title_out,
+        body=body_out,
         data=data,
     )
 
@@ -634,13 +866,21 @@ def notify_master_order_event(
     kind: str,
     extra_data: dict[str, str] | None = None,
 ) -> None:
+    title_out, body_out = _pro_push_copy(
+        kind=kind,
+        order_id=order_id,
+        audience='master',
+        extra_data=extra_data,
+        fallback_title=title,
+        fallback_body=body,
+    )
     data = {'kind': kind, 'order_id': str(order_id)}
     if extra_data:
         data.update({str(k): str(v) for k, v in extra_data.items()})
     send_fcm_to_user_devices(
         user_id=master_user_id,
         firebase_kind='master',
-        title=title,
-        body=body,
+        title=title_out,
+        body=body_out,
         data=data,
     )

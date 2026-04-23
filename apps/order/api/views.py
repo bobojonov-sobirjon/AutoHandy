@@ -1104,6 +1104,24 @@ class CustomRequestOfferListCreateView(APIView):
             created_at_iso=offer.created_at.isoformat() if offer.created_at else None,
             request=request,
         )
+        # Best-effort push to the order owner: master submitted an offer with price.
+        try:
+            from apps.order.services.notifications import notify_user_order_event
+
+            master_name = (getattr(master, 'user', None).get_full_name() if getattr(master, 'user', None) else '')  # type: ignore[union-attr]
+            master_name = (master_name or '').strip()
+            notify_user_order_event(
+                order,
+                title='New offer received',
+                body=f'You received a new offer for order #{order.id}.',
+                kind='custom_request_offer',
+                extra_data={
+                    'price': str(offer.price),
+                    'master_name': master_name,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return Response(
             CustomRequestOfferSerializer(offer).data,
             status=status.HTTP_201_CREATED,
@@ -3277,6 +3295,33 @@ Response: **`tags`**, **`tags_detail`**, absolute URLs on nested media where app
 
         review = Review.objects.select_related('order', 'reviewer').get(pk=review.pk)
         result_serializer = ReviewSerializer(review, context={'request': request})
+
+        # Best-effort push to assigned master: customer left a review.
+        try:
+            if order.master_id:
+                from apps.order.services.notifications import notify_master_order_event
+                from apps.master.models import Master
+
+                mu = (
+                    Master.objects.select_related('user')
+                    .only('id', 'user_id')
+                    .get(pk=order.master_id)
+                )
+                reviewer_name = (getattr(request.user, 'get_full_name', lambda: '')() or '').strip()
+                notify_master_order_event(
+                    master_user_id=mu.user_id,
+                    order_id=order.id,
+                    title='New review received',
+                    body=f'You received a new review for order #{order.id}.',
+                    kind='review_created',
+                    extra_data={
+                        'rating': str(rating),
+                        'reviewer_name': reviewer_name,
+                    },
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
         return Response(
             {
                 'message': 'Review created successfully. Rating applied to masters.',
@@ -3814,6 +3859,25 @@ class AddServicesToOrderView(APIView):
                 created_services.append(order_service)
             except MasterServiceItems.DoesNotExist:
                 continue
+
+        # Best-effort push to order owner when the assigned master updates services.
+        try:
+            master = request.user.master_profiles.first()
+        except Exception:  # noqa: BLE001
+            master = None
+        if master and order.master_id == master.id:
+            try:
+                from apps.order.services.notifications import notify_user_order_event
+
+                notify_user_order_event(
+                    order,
+                    title='Services updated',
+                    body=f'The master updated the services for your order #{order.id}.',
+                    kind='order_services_added',
+                    extra_data={'service_count': str(len(created_services))},
+                )
+            except Exception:  # noqa: BLE001
+                pass
         
         # Сериализуем результат
         result_serializer = OrderServiceSerializer(created_services, many=True)
@@ -4004,7 +4068,21 @@ class AddMasterToOrderView(APIView):
         order.master = master
         order.save(update_fields=['master', 'updated_at'])
         if order.status == OrderStatus.PENDING:
-            activate_pending_master_offer(order, request=request)
+            # Push a "selected" notification to the master, then start the response window without duplicating push.
+            try:
+                from apps.order.services.notifications import notify_master_order_event
+
+                notify_master_order_event(
+                    master_user_id=master.user_id,
+                    order_id=order.id,
+                    title='You were selected',
+                    body=f'A customer selected you for order #{order.id}. Tap to review and accept.',
+                    kind='order_selected',
+                    extra_data={'order_type': str(getattr(order, 'order_type', '') or '')},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            activate_pending_master_offer(order, request=request, send_push=False)
         return Response(
             OrderSerializer(order, context={'request': request}).data,
             status=status.HTTP_200_OK,

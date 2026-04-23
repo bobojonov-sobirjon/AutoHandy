@@ -10,7 +10,8 @@ from drf_spectacular.types import OpenApiTypes
 from .models import ChatRoom, ChatMessage
 from .serializers import (
     ChatRoomSerializer, ChatMessageSerializer,
-    CreateChatRoomSerializer, SendMessageSerializer
+    CreateChatRoomSerializer, SendMessageSerializer, ChatRoomDetailSerializer,
+    build_chat_messages_api_payload,
 )
 
 
@@ -159,7 +160,13 @@ class ChatRoomDetailView(APIView):
     def get(self, request, room_id):
         """Get chat details"""
         try:
-            room = ChatRoom.objects.get(id=room_id)
+            room = (
+                ChatRoom.objects.filter(id=room_id)
+                .prefetch_related('participants')
+                .first()
+            )
+            if not room:
+                return Response({'error': 'Chat not found'}, status=status.HTTP_404_NOT_FOUND)
 
             if not room.participants.filter(id=request.user.id).exists():
                 return Response(
@@ -167,14 +174,10 @@ class ChatRoomDetailView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            serializer = ChatRoomSerializer(room, context={'request': request})
+            serializer = ChatRoomDetailSerializer(room, context={'request': request})
             return Response(serializer.data)
-
-        except ChatRoom.DoesNotExist:
-            return Response(
-                {'error': 'Chat not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        except Exception:  # noqa: BLE001
+            return Response({'error': 'Chat not found'}, status=status.HTTP_404_NOT_FOUND)
 
 
 class ChatMessagesView(APIView):
@@ -237,11 +240,11 @@ Returns list of messages with pagination.
             paginator = self.pagination_class()
             page = paginator.paginate_queryset(messages, request)
             if page is not None:
-                serializer = ChatMessageSerializer(page, many=True, context={'request': request})
-                return paginator.get_paginated_response(serializer.data)
+                payload = build_chat_messages_api_payload(messages=list(page), request=request)
+                return paginator.get_paginated_response(payload)
 
-            serializer = ChatMessageSerializer(messages, many=True, context={'request': request})
-            return Response(serializer.data)
+            payload = build_chat_messages_api_payload(messages=list(messages), request=request)
+            return Response(payload)
 
         except ChatRoom.DoesNotExist:
             return Response(
@@ -324,13 +327,13 @@ image: <file>
                     other_kind = 'master' if is_master else 'user'
                     body = ''
                     if message.message_type == 'text':
-                        body = (message.text or '').strip()[:120] or 'New message'
+                        body = (message.text or '').strip()[:120] or 'You have a new message'
                     else:
-                        body = f'New {message.message_type} message'
+                        body = f'You received a new {message.message_type} message'
                     send_fcm_to_user_devices(
                         user_id=other.id,
                         firebase_kind=other_kind,
-                        title='New message',
+                        title='New chat message',
                         body=body,
                         data={
                             'kind': 'chat_message',

@@ -1,4 +1,7 @@
 import json
+import base64
+import binascii
+import os
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
 from django.contrib.auth import get_user_model
@@ -85,45 +88,113 @@ class ChatConsumer(AsyncWebsocketConsumer):
                             )
                         )
                         return
+                    messages = [message]
                 else:
-                    message = await self.save_message(data)
+                    # New WS-native message. For multiple images, save_message may return a list.
+                    messages = await self.save_message(data)
+                    if not messages:
+                        await self.send(
+                            text_data=json.dumps({'type': 'error', 'message': 'Message validation failed'})
+                        )
+                        return
 
-                # Push to the other participant (best-effort)
-                await self.push_other_participant(message)
+                payloads = []
+                for message in messages:
+                    # Push to the other participant (best-effort)
+                    await self.push_other_participant(message)
+                    payloads.append(await self.message_to_dict(message))
+
+                # If this is a WS multi-image send, return/broadcast a single "gallery" object
+                # with `images: [...]` (as requested by the mobile client).
+                is_gallery = (
+                    not msg_id
+                    and isinstance(data.get('images'), list)
+                    and (data.get('message_type') or '').strip() == 'image'
+                    and len(payloads) > 1
+                )
+                if is_gallery:
+                    gallery = {
+                        'id': payloads[0].get('id'),
+                        'room_id': payloads[0].get('room_id'),
+                        'sender': payloads[0].get('sender'),
+                        'sender_type': payloads[0].get('sender_type'),
+                        'message_type': 'image',
+                        'text': payloads[0].get('text') or '',
+                        'file': None,
+                        'image': None,
+                        'audio': None,
+                        'images': [
+                            {
+                                'id': p.get('id'),
+                                'image': p.get('image'),
+                                'image_name': p.get('image_name'),
+                            }
+                            for p in payloads
+                        ],
+                        'is_read': False,
+                        'created_at': payloads[0].get('created_at'),
+                    }
+                    payloads_to_send = [gallery]
+                else:
+                    payloads_to_send = payloads
+
+                # Always ACK back to the sender so API tools (Postman/Insomnia) show a response
+                # even if the channel layer is not configured or group delivery is delayed.
+                await self.send(
+                    text_data=json.dumps(
+                        {
+                            'type': 'chat_message_ack',
+                            'messages': payloads_to_send,
+                            'ack': True,
+                        }
+                    )
+                )
 
                 # Send message to everyone in group
-                await self.channel_layer.group_send(
-                    self.room_group_name,
-                    {
-                        'type': 'chat_message',
-                        'message': await self.message_to_dict(message)
-                    }
-                )
+                if self.channel_layer:
+                    if len(payloads_to_send) == 1:
+                        await self.channel_layer.group_send(
+                            self.room_group_name,
+                            {
+                                'type': 'chat_message',
+                                'message': payloads_to_send[0],
+                            },
+                        )
+                    else:
+                        await self.channel_layer.group_send(
+                            self.room_group_name,
+                            {
+                                'type': 'chat_message_batch',
+                                'messages': payloads_to_send,
+                            },
+                        )
 
             elif message_type == 'typing':
                 # Typing indicator
-                await self.channel_layer.group_send(
-                    self.room_group_name,
-                    {
-                        'type': 'typing_indicator',
-                        'user_id': self.user.id,
-                        'is_typing': data.get('is_typing', False)
-                    }
-                )
+                if self.channel_layer:
+                    await self.channel_layer.group_send(
+                        self.room_group_name,
+                        {
+                            'type': 'typing_indicator',
+                            'user_id': self.user.id,
+                            'is_typing': data.get('is_typing', False),
+                        },
+                    )
 
             elif message_type == 'read_receipt':
                 # Read receipt
                 message_id = data.get('message_id')
                 if message_id:
                     await self.mark_as_read(message_id)
-                    await self.channel_layer.group_send(
-                        self.room_group_name,
-                        {
-                            'type': 'read_receipt',
-                            'message_id': message_id,
-                            'user_id': self.user.id
-                        }
-                    )
+                    if self.channel_layer:
+                        await self.channel_layer.group_send(
+                            self.room_group_name,
+                            {
+                                'type': 'read_receipt',
+                                'message_id': message_id,
+                                'user_id': self.user.id,
+                            },
+                        )
 
         except json.JSONDecodeError as e:
             error_msg = f"Invalid JSON format: {str(e)}"
@@ -148,6 +219,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'type': 'chat_message',
             'message': event['message']
         }))
+
+    async def chat_message_batch(self, event):
+        """Send multiple messages (gallery) to WebSocket"""
+        await self.send(
+            text_data=json.dumps(
+                {
+                    'type': 'chat_message_batch',
+                    'messages': event.get('messages') or [],
+                }
+            )
+        )
 
     async def typing_indicator(self, event):
         """Send typing indicator"""
@@ -187,16 +269,73 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def save_message(self, data):
-        """Save message to DB"""
+        """Save message(s) to DB. Returns a list of ChatMessage."""
+        from django.conf import settings
+        from django.core.files.base import ContentFile
+
+        def _max_bytes() -> int:
+            return int(getattr(settings, 'CHAT_WS_MAX_UPLOAD_BYTES', 5 * 1024 * 1024))
+
+        def _b64_to_content(raw: str, *, filename: str) -> ContentFile:
+            if not isinstance(raw, str) or not raw.strip():
+                raise ValueError('empty_base64')
+            s = raw.strip()
+            # Allow "data:<mime>;base64,<payload>"
+            if ',' in s and s.lower().startswith('data:'):
+                s = s.split(',', 1)[1].strip()
+            try:
+                blob = base64.b64decode(s, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError('invalid_base64') from exc
+            if len(blob) > _max_bytes():
+                raise ValueError('file_too_large')
+            return ContentFile(blob, name=filename or 'upload.bin')
+
         room = ChatRoom.objects.get(id=self.room_id)
-        message = ChatMessage.objects.create(
-            room=room,
-            sender=self.user,
-            message_type=data.get('message_type', 'text'),
-            text=data.get('text', '')
-        )
+        mtype = (data.get('message_type') or 'text').strip()
+        text = data.get('text', '') or ''
+
+        # WS-native uploads:
+        # - For single attachment: <field>_base64 + <field>_name
+        # - For multiple images: images = [{base64,name}, ...]
+        created = []
+        if mtype == 'image' and isinstance(data.get('images'), list):
+            for item in data.get('images', [])[:20]:
+                if not isinstance(item, dict):
+                    continue
+                raw = item.get('base64') or item.get('data')
+                name = (item.get('name') or item.get('filename') or 'image.jpg').strip()
+                cf = _b64_to_content(raw, filename=name)
+                created.append(
+                    ChatMessage.objects.create(
+                        room=room,
+                        sender=self.user,
+                        message_type='image',
+                        text=text,
+                        image=cf,
+                    )
+                )
+        else:
+            kwargs = {
+                'room': room,
+                'sender': self.user,
+                'message_type': mtype,
+                'text': text,
+            }
+            if mtype == 'image' and data.get('image_base64'):
+                name = (data.get('image_name') or data.get('filename') or 'image.jpg').strip()
+                kwargs['image'] = _b64_to_content(data.get('image_base64'), filename=name)
+            elif mtype == 'file' and data.get('file_base64'):
+                name = (data.get('file_name') or data.get('filename') or 'file.bin').strip()
+                kwargs['file'] = _b64_to_content(data.get('file_base64'), filename=name)
+            elif mtype == 'audio' and data.get('audio_base64'):
+                name = (data.get('audio_name') or data.get('filename') or 'audio.m4a').strip()
+                kwargs['audio'] = _b64_to_content(data.get('audio_base64'), filename=name)
+
+            created.append(ChatMessage.objects.create(**kwargs))
+
         room.save()
-        return message
+        return created
 
     @database_sync_to_async
     def get_message_if_allowed(self, message_id):
@@ -237,14 +376,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # Keep push body short
             body = ''
             if message.message_type == 'text':
-                body = (message.text or '').strip()[:120] or 'New message'
+                body = (message.text or '').strip()[:120] or 'You have a new message'
             else:
-                body = f'New {message.message_type} message'
+                body = f'You received a new {message.message_type} message'
 
             send_fcm_to_user_devices(
                 user_id=other_user_id,
                 firebase_kind=other_kind,
-                title='New message',
+                title='New chat message',
                 body=body,
                 data={
                     'kind': 'chat_message',
@@ -259,6 +398,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def message_to_dict(self, message):
         """Convert message to dict"""
+        from django.conf import settings
+
+        def _abs(url: str | None) -> str | None:
+            if not url:
+                return None
+            if url.startswith('http://') or url.startswith('https://'):
+                return url
+            base = (getattr(settings, 'API_PUBLIC_BASE_URL', '') or '').strip().rstrip('/')
+            if not base:
+                return url
+            path = url if url.startswith('/') else f'/{url}'
+            return f'{base}{path}'
+
         return {
             'id': message.id,
             'room_id': message.room.id,
@@ -266,14 +418,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 'id': message.sender.id,
                 'full_name': message.sender.get_full_name() or message.sender.email,
                 'email': message.sender.email,
-                'avatar': message.sender.avatar.url if message.sender.avatar else None
+                'avatar': _abs(message.sender.avatar.url) if message.sender.avatar else None
             },
+            # Mobile clients expect this field; keep it stable for now.
             'sender_type': 'initiator',
             'message_type': message.message_type,
             'text': message.text,
-            'file': message.file.url if message.file else None,
-            'image': message.image.url if message.image else None,
-            'audio': message.audio.url if message.audio else None,
+            'file': _abs(message.file.url) if message.file else None,
+            'image': _abs(message.image.url) if message.image else None,
+            'image_name': os.path.basename(message.image.name) if message.image else None,
+            'audio': _abs(message.audio.url) if message.audio else None,
             'is_read': message.is_read,
             'created_at': message.created_at.isoformat()
         }

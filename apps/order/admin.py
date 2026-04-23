@@ -288,7 +288,6 @@ class OrderAdmin(BaseOrderAdmin):
 @admin.register(StandardOrder)
 class StandardOrderAdmin(BaseOrderAdmin):
     list_display = [
-        'id',
         'user_link',
         'assigned_master',
         'location_short',
@@ -364,7 +363,6 @@ class StandardOrderAdmin(BaseOrderAdmin):
 @admin.register(SOSOrder)
 class SOSOrderAdmin(BaseOrderAdmin):
     list_display = [
-        'id',
         'user_link',
         'assigned_master',
         'location_short',
@@ -454,7 +452,6 @@ class CustomRequestOrderAdmin(BaseOrderAdmin):
     inlines = [CustomRequestOfferInline, OrderImageInline, OrderWorkCompletionImageInline, OrderServiceInline]
 
     list_display = [
-        'id',
         'user_link',
         'assigned_master',
         'offers_count',
@@ -542,7 +539,7 @@ class CustomRequestOrderAdmin(BaseOrderAdmin):
 
 @admin.register(OrderService)
 class OrderServiceAdmin(admin.ModelAdmin):
-    list_display = ['id', 'order_link', 'service_name', 'service_price', 'created_at']
+    list_display = ['order_link', 'service_name', 'service_price', 'created_at']
     list_filter = ['created_at', 'order__status', 'order__order_type']
     search_fields = [
         'order__id',
@@ -593,7 +590,7 @@ class OrderServiceAdmin(admin.ModelAdmin):
 
 @admin.register(Review)
 class ReviewAdmin(admin.ModelAdmin):
-    list_display = ['id', 'order_link', 'reviewer_link', 'rating_stars', 'tags_short', 'created_at']
+    list_display = ['order_link', 'reviewer_link', 'rating_stars', 'tags_short', 'created_at']
     list_filter = ['rating', ('created_at', admin.DateFieldListFilter)]
     search_fields = ['order__id', 'reviewer__email', 'reviewer__phone_number', 'comment']
     readonly_fields = ['id', 'created_at', 'updated_at']
@@ -645,7 +642,7 @@ class ReviewAdmin(admin.ModelAdmin):
 
 @admin.register(UserRating)
 class UserRatingAdmin(admin.ModelAdmin):
-    list_display = ['id', 'user_link', 'average_rating', 'updated_at']
+    list_display = ['user_link', 'average_rating', 'updated_at']
     list_filter = [('updated_at', admin.DateFieldListFilter)]
     search_fields = ['user__email', 'user__phone_number', 'user__first_name', 'user__last_name']
     readonly_fields = ['id', 'user', 'average_rating', 'updated_at']
@@ -667,7 +664,7 @@ class UserRatingAdmin(admin.ModelAdmin):
 
 @admin.register(Rating)
 class RatingAdmin(admin.ModelAdmin):
-    list_display = ['id', 'order_id', 'user', 'master', 'rating', 'created_at']
+    list_display = ['order_id', 'user', 'master', 'rating', 'created_at']
     list_filter = ['rating', ('created_at', admin.DateFieldListFilter)]
     search_fields = ['order__id', 'user__email', 'comment']
     raw_id_fields = ['order', 'user', 'master']
@@ -677,7 +674,7 @@ class RatingAdmin(admin.ModelAdmin):
 
 @admin.register(MasterOrderCancellation)
 class MasterOrderCancellationAdmin(admin.ModelAdmin):
-    list_display = ['id', 'order_id', 'master_id', 'reason', 'created_at']
+    list_display = ['order_id', 'master_id', 'reason', 'created_at']
     list_filter = ['reason', ('created_at', admin.DateFieldListFilter)]
     raw_id_fields = ['master', 'order']
     readonly_fields = ['created_at']

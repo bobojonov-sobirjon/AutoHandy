@@ -162,7 +162,7 @@ class CarOwnerAdmin(UserAdmin):
 
 @admin.register(UserDevice)
 class UserDeviceAdmin(admin.ModelAdmin):
-    list_display = ('id', 'user', 'device_type', 'device_token_short', 'updated_at', 'created_at')
+    list_display = ('user', 'device_type', 'device_token_short', 'updated_at', 'created_at')
     list_filter = ('device_type', 'updated_at')
     search_fields = ('device_token', 'user__email', 'user__phone_number', 'user__private_id')
     readonly_fields = ('created_at', 'updated_at')
