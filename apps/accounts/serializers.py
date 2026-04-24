@@ -95,33 +95,6 @@ class SMSVerificationSerializer(serializers.Serializer):
         required=True,
         help_text="User role: Driver, Master or Owner (required)."
     )
-    device_token = serializers.CharField(
-        max_length=512,
-        required=False,
-        allow_blank=False,
-        write_only=True,
-        help_text='Optional. Send together with device_type (e.g. FCM token). Only used on check-sms-code.',
-    )
-    device_type = serializers.CharField(
-        max_length=32,
-        required=False,
-        allow_blank=False,
-        write_only=True,
-        help_text='Optional. e.g. ios, android, web. Must be sent with device_token.',
-    )
-
-    def validate(self, attrs):
-        token = attrs.get('device_token')
-        dtype = attrs.get('device_type')
-        if (token and not dtype) or (dtype and not token):
-            raise serializers.ValidationError(
-                'device_token and device_type must both be sent together, or omit both.'
-            )
-        if token:
-            attrs['device_token'] = token.strip()
-        if dtype:
-            attrs['device_type'] = dtype.strip()
-        return attrs
 
     def validate_identifier(self, value):
         """Validate and determine identifier type"""
@@ -461,6 +434,28 @@ class UserLocationUpdateSerializer(serializers.ModelSerializer):
         if v < -90 or v > 90:
             raise serializers.ValidationError('Latitude must be between -90 and 90.')
         return value
+
+
+class UserDeviceSerializer(serializers.Serializer):
+    device_token = serializers.CharField()
+    device_type = serializers.CharField()
+    is_active = serializers.BooleanField()
+    updated_at = serializers.DateTimeField()
+
+
+class UserDeviceUpsertSerializer(serializers.Serializer):
+    device_token = serializers.CharField(max_length=512, allow_blank=False)
+    device_type = serializers.CharField(max_length=32, allow_blank=False)
+
+    def validate_device_token(self, value):
+        return (value or '').strip()
+
+    def validate_device_type(self, value):
+        return (value or '').strip()
+
+
+class UserDeviceActivePatchSerializer(serializers.Serializer):
+    is_active = serializers.BooleanField()
 
     def validate_longitude(self, value):
         if value is None:

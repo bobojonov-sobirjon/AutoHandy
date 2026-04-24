@@ -12,6 +12,7 @@ from .views import (
     HealthCheckView,
     AppVersionView,
     AppVersionDetailView,
+    UserDeviceMeView,
 )
 
 urlpatterns = [
@@ -23,6 +24,9 @@ urlpatterns = [
     
     # SMS kod tekshirish va token berish
     path('check-sms-code/', CheckSMSCodeView.as_view(), name='check_sms_code'),
+
+    # Device registration (push notifications)
+    path('device/', UserDeviceMeView.as_view(), name='user_device_me'),
     
     # SMS servis statusini tekshirish
     path('sms-status/', SMSServiceStatusView.as_view(), name='sms_status'),

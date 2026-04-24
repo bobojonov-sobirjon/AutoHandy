@@ -24,6 +24,9 @@ from .serializers import (
     FAQSerializer,
     AppVersionSerializer,
     TelegramChatIdSerializer,
+    UserDeviceSerializer,
+    UserDeviceUpsertSerializer,
+    UserDeviceActivePatchSerializer,
 )
 from .services import SMSService
 from .models import AppVersion, CustomUser, FAQ, EmailVerificationToken
@@ -169,8 +172,7 @@ class CheckSMSCodeView(APIView):
         summary="Проверка SMS кода",
         description=(
             "Проверка SMS кода и получение JWT токена. Параметр 'role' (Driver, Master или Owner) обязателен. "
-            "Опционально: **device_token** и **device_type** (например ios/android/web) — только в этом endpoint; "
-            "создают или обновляют запись устройства для пользователя."
+            "Device registration is handled by a separate endpoint: **POST /api/auth/device/**."
         ),
         request=SMSVerificationSerializer,
         responses={
@@ -213,13 +215,6 @@ class CheckSMSCodeView(APIView):
         result = SMSService.verify_sms_code(identifier, sms_code, identifier_type, role)
         
         if result['success']:
-            device_token = serializer.validated_data.get('device_token')
-            device_type = serializer.validated_data.get('device_type')
-            if device_token and device_type:
-                from apps.accounts.services import upsert_user_device_for_login
-
-                upsert_user_device_for_login(result['user'], device_token, device_type)
-
             # Сериализация данных пользователя
             user_serializer = UserSerializer(result['user'], context={'request': request})
             
@@ -237,6 +232,126 @@ class CheckSMSCodeView(APIView):
                 'success': False,
                 'error': result['error']
             }, status=result['status_code'])
+
+
+class UserDeviceMeView(APIView):
+    """
+    Device registration for push notifications (one device per user).
+    Operates only on request.user (no ids in URL).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Get current user's device",
+        tags=['User Device'],
+        responses={200: UserDeviceSerializer, 404: {'description': 'No device registered'}},
+    )
+    def get(self, request):
+        from .models import UserDevice
+
+        row = UserDevice.objects.filter(user=request.user).first()
+        if not row:
+            return Response({'detail': 'No device registered'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            UserDeviceSerializer(
+                {
+                    'device_token': row.device_token,
+                    'device_type': row.device_type,
+                    'is_active': row.is_active,
+                    'updated_at': row.updated_at,
+                }
+            ).data
+        )
+
+    @extend_schema(
+        summary="Register device (one-time)",
+        tags=['User Device'],
+        request=UserDeviceUpsertSerializer,
+        responses={201: UserDeviceSerializer, 400: {'description': 'Already exists / validation'}},
+    )
+    def post(self, request):
+        from .models import UserDevice
+
+        ser = UserDeviceUpsertSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        if UserDevice.objects.filter(user=request.user).exists():
+            return Response({'detail': 'Device already registered'}, status=status.HTTP_400_BAD_REQUEST)
+        row = UserDevice.objects.create(
+            user=request.user,
+            device_token=ser.validated_data['device_token'],
+            device_type=ser.validated_data['device_type'],
+            is_active=True,
+        )
+        return Response(
+            UserDeviceSerializer(
+                {
+                    'device_token': row.device_token,
+                    'device_type': row.device_type,
+                    'is_active': row.is_active,
+                    'updated_at': row.updated_at,
+                }
+            ).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(
+        summary="Update device token/type",
+        tags=['User Device'],
+        request=UserDeviceUpsertSerializer,
+        responses={200: UserDeviceSerializer, 404: {'description': 'No device registered'}},
+    )
+    def put(self, request):
+        from .models import UserDevice
+
+        ser = UserDeviceUpsertSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        row = UserDevice.objects.filter(user=request.user).first()
+        if not row:
+            return Response({'detail': 'No device registered'}, status=status.HTTP_404_NOT_FOUND)
+        row.device_token = ser.validated_data['device_token']
+        row.device_type = ser.validated_data['device_type']
+        row.save(update_fields=['device_token', 'device_type', 'updated_at'])
+        return Response(
+            UserDeviceSerializer(
+                {
+                    'device_token': row.device_token,
+                    'device_type': row.device_type,
+                    'is_active': row.is_active,
+                    'updated_at': row.updated_at,
+                }
+            ).data
+        )
+
+    @extend_schema(
+        summary="Activate/deactivate push for this device",
+        tags=['User Device'],
+        request=UserDeviceActivePatchSerializer,
+        responses={200: UserDeviceSerializer, 404: {'description': 'No device registered'}},
+    )
+    def patch(self, request):
+        from .models import UserDevice
+
+        ser = UserDeviceActivePatchSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        row = UserDevice.objects.filter(user=request.user).first()
+        if not row:
+            return Response({'detail': 'No device registered'}, status=status.HTTP_404_NOT_FOUND)
+        row.is_active = ser.validated_data['is_active']
+        row.save(update_fields=['is_active', 'updated_at'])
+        return Response(
+            UserDeviceSerializer(
+                {
+                    'device_token': row.device_token,
+                    'device_type': row.device_type,
+                    'is_active': row.is_active,
+                    'updated_at': row.updated_at,
+                }
+            ).data
+        )
 
 
 class SMSServiceStatusView(APIView):

@@ -340,7 +340,7 @@ class EmailVerificationToken(models.Model):
 
 
 class UserDevice(models.Model):
-    """Push / device registration: updated on each successful check-sms-code when client sends token."""
+    """Push / device registration: one active device per user (see /api/auth/device/)."""
 
     user = models.ForeignKey(
         CustomUser,
@@ -359,6 +359,11 @@ class UserDevice(models.Model):
         verbose_name='Device type',
         help_text='e.g. ios, android, web',
     )
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name='Active',
+        help_text='If false, this device will not receive push notifications.',
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
 
@@ -368,6 +373,9 @@ class UserDevice(models.Model):
         ordering = ['-updated_at']
         indexes = [
             models.Index(fields=['user', '-updated_at']),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=['user'], name='uniq_userdevice_per_user'),
         ]
 
     def __str__(self):

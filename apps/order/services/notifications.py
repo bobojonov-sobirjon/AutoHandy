@@ -92,7 +92,7 @@ def _device_tokens_for_user(user_id: int) -> list[str]:
     from apps.accounts.models import UserDevice
 
     tokens = list(
-        UserDevice.objects.filter(user_id=user_id)
+        UserDevice.objects.filter(user_id=user_id, is_active=True)
         .order_by('-updated_at')
         .values_list('device_token', flat=True)
     )
