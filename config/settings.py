@@ -388,9 +388,9 @@ SMSC_API_URL = 'https://smsc.ru/sys/send.php'
 # Master must accept/decline assigned order within this window (minutes); then auto-decline.
 MASTER_OFFER_RESPONSE_MINUTES = int(os.environ.get('MASTER_OFFER_RESPONSE_MINUTES', '15'))
 # Legacy sequential SOS ring (unused for broadcast); kept for old clients reading payload fields.
-SOS_OFFER_SECONDS_PER_MASTER = int(os.environ.get('SOS_OFFER_SECONDS_PER_MASTER', '30'))
+SOS_OFFER_SECONDS_PER_MASTER = int(os.environ.get('SOS_OFFER_SECONDS_PER_MASTER', '420'))
 # SOS broadcast: all in-zone masters in queue get the offer; shared countdown until auto-reject.
-SOS_BROADCAST_RESPONSE_SECONDS = int(os.environ.get('SOS_BROADCAST_RESPONSE_SECONDS', '120'))
+SOS_BROADCAST_RESPONSE_SECONDS = int(os.environ.get('SOS_BROADCAST_RESPONSE_SECONDS', '420'))
 # Fallback when Celery countdown/beat is broken (e.g. Windows prefork): while masters stay on SOS WS,
 # run expire_stale_master_offers at most once per this many seconds (per ASGI process). 0 = off.
 SOS_WEBSOCKET_STALE_SWEEP_SEC = int(os.environ.get('SOS_WEBSOCKET_STALE_SWEEP_SEC', '8'))

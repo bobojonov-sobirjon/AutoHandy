@@ -83,6 +83,50 @@ class LenientTimeField(serializers.TimeField):
         return super().to_internal_value(data)
 
 
+class PartsPurchaseRequiredItemSerializer(serializers.Serializer):
+    """
+    One "parts to buy" item (stored inside Order.parts_purchase_required_json).
+
+    Canonical keys:
+    - vehicle_vin: string (0..17)
+    - part_name: string (0..100)
+    - is_address: bool (client knows where to buy / has address)
+
+    Backward/typo-tolerant input aliases:
+    - "vehicle vin" -> vehicle_vin
+    - "part name" -> part_name
+    - "is_addess" -> is_address
+    """
+
+    vehicle_vin = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=17,
+        help_text='Vehicle VIN (0–17 chars).',
+    )
+    part_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=100,
+        help_text='Exact part name (0–100 chars).',
+    )
+    is_address = serializers.BooleanField(
+        required=True,
+        help_text='Whether client knows where to buy this part (has address/place).',
+    )
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            # Accept common mobile typos/labels.
+            if 'vehicle_vin' not in data and 'vehicle vin' in data:
+                data = {**data, 'vehicle_vin': data.get('vehicle vin')}
+            if 'part_name' not in data and 'part name' in data:
+                data = {**data, 'part_name': data.get('part name')}
+            if 'is_address' not in data and 'is_addess' in data:
+                data = {**data, 'is_address': data.get('is_addess')}
+        return super().to_internal_value(data)
+
+
 def _money_fmt(v) -> str:
     return format(
         Decimal(str(v if v is not None else 0)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP),
@@ -195,11 +239,12 @@ class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = [
-            'id', 'user', 'order_type', 'order_type_display',
+            'id', 'order_number', 'user', 'order_type', 'order_type_display',
             'car_data', 'category_data',
             'text', 'status', 'status_display', 'priority', 'priority_display',
             'location', 'latitude', 'longitude', 'location_precision',
             'parts_purchase_required',
+            'parts_purchase_required_json',
             'preferred_date', 'preferred_time_start', 'preferred_time_end',
             'custom_request_date', 'custom_request_time',
             'master',
@@ -539,6 +584,16 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         default=False,
         help_text='If true, master may need to buy parts; client pays outside the app',
     )
+    parts_purchase_required_json = serializers.ListField(
+        child=PartsPurchaseRequiredItemSerializer(),
+        required=False,
+        default=list,
+        help_text=(
+            'Parts to buy list. Example: '
+            '[{ "vehicle_vin": "", "part_name": "", "is_address": true }]. '
+            'Aliases accepted: "vehicle vin", "part name", "is_addess".'
+        ),
+    )
     preferred_date = serializers.DateField(
         required=False,
         allow_null=True,
@@ -559,6 +614,7 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             'master_id',
             'car_list', 'category_list',
             'parts_purchase_required',
+            'parts_purchase_required_json',
             'preferred_date', 'preferred_time_start',
         ]
         extra_kwargs = {
@@ -785,6 +841,16 @@ class CustomRequestCreateSerializer(serializers.Serializer):
         default=list,
     )
     parts_purchase_required = serializers.BooleanField(required=False, default=False)
+    parts_purchase_required_json = serializers.ListField(
+        child=PartsPurchaseRequiredItemSerializer(),
+        required=False,
+        default=list,
+        help_text=(
+            'Parts to buy list. Example: '
+            '[{ "vehicle_vin": "", "part_name": "", "is_address": true }]. '
+            'Aliases accepted: "vehicle vin", "part name", "is_addess".'
+        ),
+    )
 
     def validate_car_list(self, value):
         user = self.context['request'].user
@@ -838,6 +904,7 @@ class CustomRequestCreateSerializer(serializers.Serializer):
             priority=OrderPriority.LOW,
             location_source=LocationSource.GPS_CUSTOM,
             parts_purchase_required=validated_data.get('parts_purchase_required', False),
+            parts_purchase_required_json=validated_data.get('parts_purchase_required_json', []),
             custom_request_date=crd,
             custom_request_time=crt,
         )

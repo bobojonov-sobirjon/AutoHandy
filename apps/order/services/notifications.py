@@ -528,6 +528,7 @@ def build_sos_order_websocket_payload(
         'order_type': order.order_type,
         'discount': str(order.discount) if order.discount is not None else None,
         'parts_purchase_required': order.parts_purchase_required,
+        'parts_purchase_required_json': getattr(order, 'parts_purchase_required_json', None) or [],
         'preferred_date': (
             order.preferred_date.isoformat() if order.preferred_date else None
         ),

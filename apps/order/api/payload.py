@@ -89,6 +89,7 @@ def normalize_order_create_request_data(request) -> dict:
     """
     - ``car_list`` / ``category_list``: JSON string or ``1,2`` or single id → ``list[int]``.
     - ``parts_purchase_required``: form truthy strings → bool.
+    - ``parts_purchase_required_json``: JSON string or list → ``list[dict]``.
     - ``master_id``: empty string (optional form field) → removed so SOS works without master.
     Drops stray ``images`` key from form text fields (files use ``request.FILES``).
     """
@@ -103,6 +104,22 @@ def normalize_order_create_request_data(request) -> dict:
 
     if 'parts_purchase_required' in data:
         data['parts_purchase_required'] = _coerce_bool(data['parts_purchase_required'])
+
+    if 'parts_purchase_required_json' in data:
+        v = data.get('parts_purchase_required_json')
+        if isinstance(v, bytes):
+            v = v.decode('utf-8', errors='replace')
+        if isinstance(v, str):
+            s = v.strip().lstrip('\ufeff').strip()
+            if s:
+                try:
+                    parsed = json.loads(s)
+                    data['parts_purchase_required_json'] = parsed
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    # Keep raw value; serializer will raise a readable validation error.
+                    data['parts_purchase_required_json'] = v
+            else:
+                data['parts_purchase_required_json'] = []
 
     return data
 
@@ -157,6 +174,19 @@ def normalize_custom_request_create_data(request) -> dict:
         data['car_list'] = _coerce_id_list(data.get('car_list'))
     if 'parts_purchase_required' in data:
         data['parts_purchase_required'] = _coerce_bool(data['parts_purchase_required'])
+    if 'parts_purchase_required_json' in data:
+        v = data.get('parts_purchase_required_json')
+        if isinstance(v, bytes):
+            v = v.decode('utf-8', errors='replace')
+        if isinstance(v, str):
+            s = v.strip().lstrip('\ufeff').strip()
+            if s:
+                try:
+                    data['parts_purchase_required_json'] = json.loads(s)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    data['parts_purchase_required_json'] = v
+            else:
+                data['parts_purchase_required_json'] = []
     from datetime import date as date_cls, datetime as datetime_cls, time as time_cls
 
     raw_date = data.pop('custom_request_date', None)

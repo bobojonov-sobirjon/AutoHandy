@@ -530,6 +530,7 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
 
 - **master_id**, **text**, **location**, **latitude**, **longitude**, **car_list**, **category_list**
 - Optional: **preferred_date** + **preferred_time_start** (pair), **parts_purchase_required**, **images** (multipart)
+- Optional: **preferred_date** + **preferred_time_start** (pair), **parts_purchase_required**, **parts_purchase_required_json**, **images** (multipart)
 
 ## Validation
 
@@ -557,6 +558,25 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
                     'preferred_date': {'type': 'string', 'format': 'date', 'description': 'With preferred_time_start only'},
                     'preferred_time_start': {'type': 'string', 'format': 'time', 'description': 'With preferred_date only'},
                     'parts_purchase_required': {'type': 'boolean', 'default': False},
+                    'parts_purchase_required_json': {
+                        'type': 'array',
+                        'description': (
+                            'Parts to buy list. Each item: { "vehicle_vin": "...", "part_name": "...", "is_address": true/false }. '
+                            'Input aliases accepted: "vehicle vin", "part name", "is_addess".'
+                        ),
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'vehicle_vin': {'type': 'string', 'maxLength': 17, 'example': '1HGCM82633A004352'},
+                                'part_name': {'type': 'string', 'maxLength': 100, 'example': 'Oil filter'},
+                                'is_address': {'type': 'boolean', 'example': True},
+                            },
+                            'required': ['is_address'],
+                        },
+                        'example': [
+                            {'vehicle_vin': '', 'part_name': '', 'is_address': True},
+                        ],
+                    },
                 },
             },
             'multipart/form-data': {
@@ -578,6 +598,13 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
                     'preferred_date': {'type': 'string', 'format': 'date'},
                     'preferred_time_start': {'type': 'string', 'format': 'time'},
                     'parts_purchase_required': {'type': 'boolean', 'default': False},
+                    'parts_purchase_required_json': {
+                        'type': 'string',
+                        'description': (
+                            'JSON array as string. Example: '
+                            '[{"vehicle_vin":"","part_name":"","is_address":true}]'
+                        ),
+                    },
                     'images': {'type': 'array', 'items': {'type': 'string', 'format': 'binary'}},
                 },
             },
@@ -679,6 +706,8 @@ Do NOT use for **planned work** (use `/api/order/standard/`).
 
 - **priority** (default **high**)
 - **parts_purchase_required** (boolean, default false)
+- **parts_purchase_required** (boolean, default false)
+- **parts_purchase_required_json** (list of objects; see request body example)
 - **images** (multipart)
 
 ## Validation
@@ -705,6 +734,25 @@ Do NOT use for **planned work** (use `/api/order/standard/`).
                     'car_list': {'type': 'array', 'items': {'type': 'integer'}, 'description': 'List of car IDs', 'example': [2]},
                     'category_list': {'type': 'array', 'items': {'type': 'integer'}, 'description': 'List of category IDs', 'example': [1]},
                     'parts_purchase_required': {'type': 'boolean', 'default': False},
+                    'parts_purchase_required_json': {
+                        'type': 'array',
+                        'description': (
+                            'Parts to buy list. Each item: { "vehicle_vin": "...", "part_name": "...", "is_address": true/false }. '
+                            'Input aliases accepted: "vehicle vin", "part name", "is_addess".'
+                        ),
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'vehicle_vin': {'type': 'string', 'maxLength': 17},
+                                'part_name': {'type': 'string', 'maxLength': 100},
+                                'is_address': {'type': 'boolean'},
+                            },
+                            'required': ['is_address'],
+                        },
+                        'example': [
+                            {'vehicle_vin': '', 'part_name': '', 'is_address': False},
+                        ],
+                    },
                 },
             },
             'multipart/form-data': {
@@ -725,6 +773,13 @@ Do NOT use for **planned work** (use `/api/order/standard/`).
                         'description': 'JSON array as string e.g. [5] or comma-separated (parsed server-side)',
                     },
                     'parts_purchase_required': {'type': 'boolean', 'default': False},
+                    'parts_purchase_required_json': {
+                        'type': 'string',
+                        'description': (
+                            'JSON array as string. Example: '
+                            '[{"vehicle_vin":"","part_name":"","is_address":false}]'
+                        ),
+                    },
                     'images': {'type': 'array', 'items': {'type': 'string', 'format': 'binary'}},
                 },
             },
@@ -861,6 +916,23 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         'default': False,
                         'description': 'Whether spare parts may need to be purchased.',
                     },
+                    'parts_purchase_required_json': {
+                        'type': 'array',
+                        'description': (
+                            'Parts to buy list. Each item: { "vehicle_vin": "...", "part_name": "...", "is_address": true/false }. '
+                            'Input aliases accepted: "vehicle vin", "part name", "is_addess".'
+                        ),
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'vehicle_vin': {'type': 'string', 'maxLength': 17},
+                                'part_name': {'type': 'string', 'maxLength': 100},
+                                'is_address': {'type': 'boolean'},
+                            },
+                            'required': ['is_address'],
+                        },
+                        'example': [{'vehicle_vin': '', 'part_name': '', 'is_address': True}],
+                    },
                 },
             },
             'multipart/form-data': {
@@ -897,6 +969,13 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         'type': 'boolean',
                         'default': False,
                         'description': 'Multipart booleans often sent as string "true"/"false"',
+                    },
+                    'parts_purchase_required_json': {
+                        'type': 'string',
+                        'description': (
+                            'JSON array as string. Example: '
+                            '[{"vehicle_vin":"","part_name":"","is_address":true}]'
+                        ),
                     },
                     'images': {
                         'type': 'array',

@@ -47,6 +47,7 @@ Payload `data` is built by `build_sos_order_websocket_payload()` (`apps/order/se
 | `order_type` | string | e.g. SOS |
 | `discount` | string or null | |
 | `parts_purchase_required` | bool | |
+| `parts_purchase_required_json` | array | List of objects: `{ "vehicle_vin": "...", "part_name": "...", "is_address": true/false }` |
 | `preferred_date` | string or null | ISO date |
 | `preferred_time_start` | string or null | ISO time |
 | `preferred_time_end` | string or null | ISO time |
@@ -81,6 +82,7 @@ Example (illustrative only — values depend on DB):
     "order_type": "sos",
     "discount": null,
     "parts_purchase_required": false,
+    "parts_purchase_required_json": [],
     "preferred_date": null,
     "preferred_time_start": null,
     "preferred_time_end": null,

@@ -1,7 +1,11 @@
 from django.contrib import admin
+from django import forms
 from django.db.models import Count
 from django.utils.html import format_html
 from django.urls import reverse
+from django.utils.safestring import mark_safe
+
+import json
 
 from .models import (
     CustomRequestOffer,
@@ -20,6 +24,161 @@ from .models import (
     SOSOrder,
     UserRating,
 )
+
+
+class PartsPurchaseRequiredJsonWidget(forms.Widget):
+    """
+    Admin UI for Order.parts_purchase_required_json.
+    Renders a small table editor and stores value as JSON in a hidden textarea.
+    """
+
+    def render(self, name, value, attrs=None, renderer=None):
+        attrs = attrs or {}
+        wid = attrs.get('id') or f'id_{name}'
+
+        raw = value
+        if raw in (None, ''):
+            items = []
+        elif isinstance(raw, str):
+            try:
+                items = json.loads(raw)
+            except Exception:
+                items = []
+        else:
+            items = raw
+
+        if not isinstance(items, list):
+            items = []
+
+        canonical: list[dict] = []
+        for x in items:
+            if not isinstance(x, dict):
+                continue
+            canonical.append(
+                {
+                    'vehicle_vin': (x.get('vehicle_vin') or x.get('vehicle vin') or '').strip(),
+                    'part_name': (x.get('part_name') or x.get('part name') or '').strip(),
+                    'is_address': bool(x.get('is_address', x.get('is_addess', False))),
+                }
+            )
+
+        safe_json = json.dumps(canonical, ensure_ascii=False)
+        html = f"""
+<div class="parts-json-editor" data-field-id="{wid}">
+  <textarea id="{wid}" name="{name}" style="display:none;">{safe_json}</textarea>
+  <div style="margin: 4px 0 10px 0; display:flex; gap:10px; align-items:center;">
+    <button type="button" class="button" data-action="add">Add part</button>
+    <span style="color:#666; font-size:12px;">Rows are saved as JSON (hidden).</span>
+  </div>
+  <div style="overflow:auto;">
+    <table class="parts-json-table" style="border-collapse:collapse; width:100%; min-width:720px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:6px; border-bottom:1px solid #ddd;">Vehicle VIN</th>
+          <th style="text-align:left; padding:6px; border-bottom:1px solid #ddd;">Part name</th>
+          <th style="text-align:left; padding:6px; border-bottom:1px solid #ddd;">Knows where to buy (is_address)</th>
+          <th style="padding:6px; border-bottom:1px solid #ddd;">&nbsp;</th>
+        </tr>
+      </thead>
+      <tbody data-role="rows"></tbody>
+    </table>
+  </div>
+</div>
+<script>
+(function() {{
+  const root = document.querySelector('.parts-json-editor[data-field-id="{wid}"]');
+  if (!root) return;
+  const textarea = root.querySelector('textarea#{wid}');
+  const tbody = root.querySelector('tbody[data-role="rows"]');
+  const addBtn = root.querySelector('button[data-action="add"]');
+
+  function parseValue() {{
+    try {{
+      const v = (textarea.value || '[]').trim();
+      const parsed = JSON.parse(v || '[]');
+      return Array.isArray(parsed) ? parsed : [];
+    }} catch (e) {{
+      return [];
+    }}
+  }}
+
+  function serialize() {{
+    const rows = Array.from(tbody.querySelectorAll('tr[data-row="1"]'));
+    const out = rows.map(tr => {{
+      const vin = (tr.querySelector('input[data-k="vehicle_vin"]').value || '').trim();
+      const name = (tr.querySelector('input[data-k="part_name"]').value || '').trim();
+      const isAddr = !!tr.querySelector('input[data-k="is_address"]').checked;
+      return {{ vehicle_vin: vin, part_name: name, is_address: isAddr }};
+    }});
+    textarea.value = JSON.stringify(out);
+  }}
+
+  function escapeAttr(s) {{
+    return String(s || '').replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  }}
+
+  function mkRow(item) {{
+    const vin = (item && (item.vehicle_vin || item['vehicle vin'])) ? String(item.vehicle_vin || item['vehicle vin']) : '';
+    const pn = (item && (item.part_name || item['part name'])) ? String(item.part_name || item['part name']) : '';
+    const ia = !!(item && (item.is_address ?? item.is_addess));
+    const tr = document.createElement('tr');
+    tr.setAttribute('data-row', '1');
+    tr.innerHTML = `
+      <td style="padding:6px; border-bottom:1px solid #eee;">
+        <input type="text" data-k="vehicle_vin" maxlength="17" style="width: 98%;" value="${{escapeAttr(vin)}}">
+      </td>
+      <td style="padding:6px; border-bottom:1px solid #eee;">
+        <input type="text" data-k="part_name" maxlength="100" style="width: 98%;" value="${{escapeAttr(pn)}}">
+      </td>
+      <td style="padding:6px; border-bottom:1px solid #eee;">
+        <label style="display:flex; gap:8px; align-items:center;">
+          <input type="checkbox" data-k="is_address" ${{ia ? 'checked' : ''}}>
+          <span style="color:#444;">Yes</span>
+        </label>
+      </td>
+      <td style="padding:6px; border-bottom:1px solid #eee; text-align:right;">
+        <button type="button" class="button" data-action="del">Remove</button>
+      </td>
+    `;
+    tr.addEventListener('input', serialize, true);
+    tr.addEventListener('change', serialize, true);
+    tr.querySelector('button[data-action="del"]').addEventListener('click', function() {{
+      tr.remove();
+      serialize();
+    }});
+    return tr;
+  }}
+
+  function renderAll() {{
+    tbody.innerHTML = '';
+    const items = parseValue();
+    if (!items.length) {{
+      tbody.appendChild(mkRow({{ vehicle_vin: '', part_name: '', is_address: false }}));
+    }} else {{
+      items.forEach(it => tbody.appendChild(mkRow(it)));
+    }}
+    serialize();
+  }}
+
+  addBtn.addEventListener('click', function() {{
+    tbody.appendChild(mkRow({{ vehicle_vin: '', part_name: '', is_address: false }}));
+    serialize();
+  }});
+
+  renderAll();
+}})();
+</script>
+"""
+        return mark_safe(html)
+
+
+class OrderAdminForm(forms.ModelForm):
+    class Meta:
+        model = Order
+        fields = '__all__'
+        widgets = {
+            'parts_purchase_required_json': PartsPurchaseRequiredJsonWidget(),
+        }
 
 
 class OrderImageInline(admin.TabularInline):
@@ -52,6 +211,7 @@ class CustomRequestOfferInline(admin.TabularInline):
 
 
 class BaseOrderAdmin(admin.ModelAdmin):
+    form = OrderAdminForm
     list_per_page = 25
     list_max_show_all = 200
     save_on_top = True
@@ -70,6 +230,7 @@ class BaseOrderAdmin(admin.ModelAdmin):
     ]
     readonly_fields = [
         'id',
+        'order_number',
         'created_at',
         'updated_at',
         'user_link',
@@ -195,6 +356,7 @@ class BaseOrderAdmin(admin.ModelAdmin):
 class OrderAdmin(BaseOrderAdmin):
     date_hierarchy = 'created_at'
     list_display = [
+        'order_number',
         'order_type',
         'user_link',
         'assigned_master',
@@ -218,6 +380,7 @@ class OrderAdmin(BaseOrderAdmin):
             {
                 'fields': (
                     'id',
+                    'order_number',
                     'order_type',
                     'user',
                     'master',
@@ -272,7 +435,7 @@ class OrderAdmin(BaseOrderAdmin):
         (
             'Other',
             {
-                'fields': ('parts_purchase_required', 'car', 'category'),
+                'fields': ('parts_purchase_required', 'parts_purchase_required_json', 'car', 'category'),
             },
         ),
         (
@@ -288,6 +451,7 @@ class OrderAdmin(BaseOrderAdmin):
 @admin.register(StandardOrder)
 class StandardOrderAdmin(BaseOrderAdmin):
     list_display = [
+        'order_number',
         'user_link',
         'assigned_master',
         'location_short',
@@ -308,6 +472,7 @@ class StandardOrderAdmin(BaseOrderAdmin):
             {
                 'fields': (
                     'id',
+                    'order_number',
                     'order_type',
                     'user',
                     'master',
@@ -351,7 +516,7 @@ class StandardOrderAdmin(BaseOrderAdmin):
         ),
         (
             'Other',
-            {'fields': ('parts_purchase_required', 'car', 'category')},
+            {'fields': ('parts_purchase_required', 'parts_purchase_required_json', 'car', 'category')},
         ),
         (
             'Timestamps',
@@ -363,6 +528,7 @@ class StandardOrderAdmin(BaseOrderAdmin):
 @admin.register(SOSOrder)
 class SOSOrderAdmin(BaseOrderAdmin):
     list_display = [
+        'order_number',
         'user_link',
         'assigned_master',
         'location_short',
@@ -384,6 +550,7 @@ class SOSOrderAdmin(BaseOrderAdmin):
             {
                 'fields': (
                     'id',
+                    'order_number',
                     'order_type',
                     'user',
                     'master',
@@ -424,7 +591,7 @@ class SOSOrderAdmin(BaseOrderAdmin):
         ),
         (
             'Other',
-            {'fields': ('parts_purchase_required', 'discount', 'car', 'category')},
+            {'fields': ('parts_purchase_required', 'parts_purchase_required_json', 'discount', 'car', 'category')},
         ),
         (
             'Timestamps',
@@ -452,6 +619,7 @@ class CustomRequestOrderAdmin(BaseOrderAdmin):
     inlines = [CustomRequestOfferInline, OrderImageInline, OrderWorkCompletionImageInline, OrderServiceInline]
 
     list_display = [
+        'order_number',
         'user_link',
         'assigned_master',
         'offers_count',
@@ -473,6 +641,7 @@ class CustomRequestOrderAdmin(BaseOrderAdmin):
             {
                 'fields': (
                     'id',
+                    'order_number',
                     'order_type',
                     'user',
                     'master',
@@ -516,7 +685,7 @@ class CustomRequestOrderAdmin(BaseOrderAdmin):
         ),
         (
             'Other',
-            {'fields': ('parts_purchase_required', 'car', 'category')},
+            {'fields': ('parts_purchase_required', 'parts_purchase_required_json', 'car', 'category')},
         ),
         (
             'Timestamps',

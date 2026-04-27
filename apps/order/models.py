@@ -3,6 +3,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from datetime import timedelta
+import secrets
 
 from apps.accounts.models import CustomUser
 from apps.car.models import Car
@@ -48,6 +49,16 @@ class OrderType(models.TextChoices):
 class Order(models.Model):
     """Order model"""
 
+    order_number = models.CharField(
+        max_length=8,
+        unique=True,
+        blank=True,
+        null=True,
+        default=None,
+        db_index=True,
+        verbose_name='Order number',
+        help_text='Auto-generated order code like ORD_1234',
+    )
     user = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
@@ -235,6 +246,15 @@ class Order(models.Model):
         verbose_name='Parts purchase required',
         help_text='If true, master buys parts; client pays parts outside the app.',
     )
+    parts_purchase_required_json = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name='Parts purchase required (items)',
+        help_text=(
+            'List of parts the master may need to buy. Each item: '
+            '{ "vehicle_vin": "…", "part_name": "…", "is_address": true/false }.'
+        ),
+    )
     preferred_date = models.DateField(
         null=True,
         blank=True,
@@ -304,8 +324,16 @@ class Order(models.Model):
 
     def save(self, *args, **kwargs):
         # Set expiration time automatically on create
-        if not self.pk and not self.expiration_time:
-            self.expiration_time = timezone.now() + timedelta(days=1)
+        if not self.pk:
+            if not self.expiration_time:
+                self.expiration_time = timezone.now() + timedelta(days=1)
+            if not (self.order_number or '').strip():
+                # Generate a short readable code; loop until unique.
+                while True:
+                    code = f"ORD_{secrets.randbelow(10000):04d}"
+                    if not Order.objects.filter(order_number=code).exists():
+                        self.order_number = code
+                        break
         self.clean()
         super().save(*args, **kwargs)
 
