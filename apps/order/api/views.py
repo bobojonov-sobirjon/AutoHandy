@@ -893,17 +893,11 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         'description': 'GPS longitude (WGS84).',
                         'example': 69.2797,
                     },
-                    'custom_request_date': {
+                    'preferred_date': {
                         'type': 'string',
                         'format': 'date',
-                        'description': 'Preferred calendar day for the service (client local / request date).',
+                        'description': 'Preferred service date for this custom request (YYYY-MM-DD).',
                         'example': '2026-04-18',
-                    },
-                    'custom_request_time': {
-                        'type': 'string',
-                        'format': 'time',
-                        'description': 'Preferred local time for the service (HH:MM or HH:MM:SS).',
-                        'example': '14:30:00',
                     },
                     'car_list': {
                         'type': 'array',
@@ -951,14 +945,10 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         'description': 'Decimal as string (e.g. "69.2797")',
                         'example': '69.2797',
                     },
-                    'custom_request_date': {
+                    'preferred_date': {
                         'type': 'string',
                         'format': 'date',
-                        'description': 'Preferred calendar day (YYYY-MM-DD).',
-                    },
-                    'custom_request_time': {
-                        'type': 'string',
-                        'description': 'Local time, e.g. "14:30" or "14:30:00".',
+                        'description': 'Preferred service date (YYYY-MM-DD).',
                     },
                     'car_list': {
                         'type': 'string',

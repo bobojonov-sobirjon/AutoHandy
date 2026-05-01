@@ -263,7 +263,6 @@ class OrderSerializer(serializers.ModelSerializer):
             'parts_purchase_required',
             'parts_purchase_required_json',
             'preferred_date', 'preferred_time_start', 'preferred_time_end',
-            'custom_request_date', 'custom_request_time',
             'master',
             'pricing', 'services', 'reviews', 'average_rating',
             'workflow', 'eta',
@@ -856,15 +855,10 @@ class CustomRequestCreateSerializer(serializers.Serializer):
     location = serializers.CharField()
     latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
     longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
-    custom_request_date = serializers.DateField(
+    preferred_date = serializers.DateField(
         required=False,
         allow_null=True,
-        help_text='Calendar day for the requested service (client local date / request time).',
-    )
-    custom_request_time = LenientTimeField(
-        required=False,
-        allow_null=True,
-        help_text='Preferred time for the service (client local; use with custom_request_date).',
+        help_text='Preferred service date for this custom request (YYYY-MM-DD).',
     )
     car_list = serializers.ListField(
         child=serializers.IntegerField(),
@@ -921,8 +915,7 @@ class CustomRequestCreateSerializer(serializers.Serializer):
 
         user = self.context['request'].user
         car_list = validated_data.pop('car_list', [])
-        crd = validated_data.pop('custom_request_date', None)
-        crt = validated_data.pop('custom_request_time', None)
+        pd = validated_data.pop('preferred_date', None)
         cat = get_custom_request_catalog_category()
         order = Order.objects.create(
             user=user,
@@ -936,8 +929,7 @@ class CustomRequestCreateSerializer(serializers.Serializer):
             location_source=LocationSource.GPS_CUSTOM,
             parts_purchase_required=validated_data.get('parts_purchase_required', False),
             parts_purchase_required_json=validated_data.get('parts_purchase_required_json', []),
-            custom_request_date=crd,
-            custom_request_time=crt,
+            preferred_date=pd,
         )
         if car_list:
             order.car.set(list(dict.fromkeys(car_list)))

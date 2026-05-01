@@ -712,6 +712,9 @@ def build_custom_request_websocket_payload(
         'location_source': order.location_source,
         'priority': order.priority,
         'order_type': order.order_type,
+        'preferred_date': (
+            order.preferred_date.isoformat() if getattr(order, 'preferred_date', None) else None
+        ),
         'created_at': order.created_at.isoformat() if order.created_at else None,
         'updated_at': order.updated_at.isoformat() if order.updated_at else None,
         'user': user_out,
