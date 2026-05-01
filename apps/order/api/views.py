@@ -2868,6 +2868,17 @@ class AcceptOrderView(APIView):
                         'updated_at',
                     ]
                 )
+                # Acceptance metrics: mark offer accepted.
+                try:
+                    from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
+
+                    MasterOfferEvent.objects.filter(
+                        order_id=order.pk,
+                        master_id=master.id,
+                        status=MasterOfferEventStatus.SENT,
+                    ).update(status=MasterOfferEventStatus.ACCEPTED, responded_at=timezone.now())
+                except Exception:  # noqa: BLE001
+                    pass
                 from apps.order.services.order_category_services import sync_order_services_from_order_categories
 
                 sync_order_services_from_order_categories(order)
@@ -2972,6 +2983,17 @@ class DeclineOrderView(APIView):
                     {'error': 'Could not record SOS decline'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            # Acceptance metrics: mark offer declined.
+            try:
+                from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
+
+                MasterOfferEvent.objects.filter(
+                    order_id=order.pk,
+                    master_id=master.id,
+                    status=MasterOfferEventStatus.SENT,
+                ).update(status=MasterOfferEventStatus.DECLINED, responded_at=timezone.now())
+            except Exception:  # noqa: BLE001
+                pass
             order.refresh_from_db()
             try:
                 from apps.order.services.notifications import notify_user_order_event
@@ -2991,9 +3013,21 @@ class DeclineOrderView(APIView):
             )
 
         order.status = OrderStatus.REJECTED
+        declined_mid = order.master_id
         order.master = None
         order.master_response_deadline = None
         order.save(update_fields=['status', 'master', 'master_response_deadline', 'updated_at'])
+        if declined_mid:
+            try:
+                from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
+
+                MasterOfferEvent.objects.filter(
+                    order_id=order.pk,
+                    master_id=declined_mid,
+                    status=MasterOfferEventStatus.SENT,
+                ).update(status=MasterOfferEventStatus.DECLINED, responded_at=timezone.now())
+            except Exception:  # noqa: BLE001
+                pass
         try:
             from apps.order.services.notifications import notify_user_order_event
 

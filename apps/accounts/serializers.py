@@ -210,7 +210,8 @@ class UserDetailsSerializer(serializers.ModelSerializer):
     rating = serializers.SerializerMethodField()
     reviews_count = serializers.SerializerMethodField()
     completed_orders = serializers.SerializerMethodField()
-    recommendation_percentage = serializers.SerializerMethodField()
+    acceptance_rate = serializers.SerializerMethodField()
+    completion_rate = serializers.SerializerMethodField()
     
     class Meta:
         model = CustomUser
@@ -218,12 +219,14 @@ class UserDetailsSerializer(serializers.ModelSerializer):
             'id', 'private_id', 'username', 'email', 'phone_number', 'first_name',
             'last_name', 'date_of_birth', 'avatar', 'address',
             'longitude', 'latitude', 'is_verified', 'is_email_verified', 'roles', 'balance',
-            'reviews', 'rating', 'reviews_count', 'completed_orders', 'recommendation_percentage',
+            'reviews', 'rating', 'reviews_count', 'completed_orders',
+            'acceptance_rate', 'completion_rate',
             'created_at', 'updated_at', 'description',
         ]
         read_only_fields = [
             'id', 'private_id', 'email', 'phone_number', 'is_verified', 'is_email_verified', 'roles', 'balance',
-            'reviews', 'rating', 'reviews_count', 'completed_orders', 'recommendation_percentage',
+            'reviews', 'rating', 'reviews_count', 'completed_orders',
+            'acceptance_rate', 'completion_rate',
             'created_at', 'updated_at',
         ]
     
@@ -366,23 +369,30 @@ class UserDetailsSerializer(serializers.ModelSerializer):
             logger.error(f"Error getting completed orders for user {obj.id}: {str(e)}")
             return 0
     
-    def get_recommendation_percentage(self, obj):
-        """Get recommendation percentage (reviews with rating 4-5)"""
+    def get_acceptance_rate(self, obj):
+        """Acceptance rate (%) for masters; drivers get 0."""
         try:
-            from apps.order.models import Review, Order
-            orders_as_main_master = Order.objects.filter(master__user=obj)
-            all_order_ids = set(orders_as_main_master.values_list('id', flat=True))
-            all_reviews = Review.objects.filter(order_id__in=all_order_ids)
-            total_reviews = all_reviews.count()
-            if total_reviews == 0:
+            from apps.master.models import Master
+            from apps.master.services.rates import master_acceptance_rate_percent
+
+            m = Master.objects.filter(user=obj).only('id').first()
+            if not m:
                 return 0
-            positive_reviews = all_reviews.filter(rating__gte=4).count()
-            percentage = round((positive_reviews / total_reviews) * 100)
-            return percentage
-        except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error getting recommendation percentage for user {obj.id}: {str(e)}")
+            return master_acceptance_rate_percent(m)
+        except Exception:
+            return 0
+
+    def get_completion_rate(self, obj):
+        """Completion rate (%) for masters; drivers get 0."""
+        try:
+            from apps.master.models import Master
+            from apps.master.services.rates import master_completion_rate_percent
+
+            m = Master.objects.filter(user=obj).only('id').first()
+            if not m:
+                return 0
+            return master_completion_rate_percent(m)
+        except Exception:
             return 0
 
 

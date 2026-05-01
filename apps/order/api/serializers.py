@@ -146,6 +146,7 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
     discount_applied = serializers.SerializerMethodField()
     total = serializers.SerializerMethodField()
     car_count = serializers.SerializerMethodField()
+    emergency_pricing = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -156,6 +157,7 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
             'discount_applied',
             'total',
             'car_count',
+            'emergency_pricing',
         )
 
     def get_discount_mode(self, obj):
@@ -172,6 +174,21 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
 
     def get_car_count(self, obj):
         return get_cached_order_pricing(obj, self.context).get('car_count', 1)
+
+    def get_emergency_pricing(self, obj):
+        """
+        Emergency (SOS) price metadata:
+        - coefficient: 1.3 (day) / 1.6 (night) / 1.0 (non-SOS)
+        - base prices are not shown here, only per-line in services.
+        """
+        br = get_cached_order_pricing(obj, self.context)
+        em = (br.get('emergency') or {}).copy()
+        coef = em.get('coefficient', Decimal('1.0'))
+        em['coefficient'] = format(Decimal(str(coef)), 'f')
+        # Expose both base subtotal and final subtotal for SOS pricing UI.
+        em['base_subtotal'] = format(Decimal(str(br.get('base_subtotal', br.get('subtotal', 0)))), 'f')
+        em['final_subtotal'] = format(Decimal(str(br.get('subtotal', 0))), 'f')
+        return em
 
 
 class OrderWorkflowNestedSerializer(serializers.ModelSerializer):
@@ -422,6 +439,8 @@ class OrderSerializer(serializers.ModelSerializer):
         )
         groups = {}
         br = get_cached_order_pricing(obj, self.context)
+        em = br.get('emergency') or {}
+        coef = em.get('coefficient', Decimal('1.0'))
         for os_row in order_services:
             item = os_row.master_service_item
             if not item:
@@ -449,10 +468,22 @@ class OrderSerializer(serializers.ModelSerializer):
                 line['discount_allocated'] = format(meta['discount_allocated'], 'f')
                 line['line_total'] = format(meta['line_total'], 'f')
                 line['car_count'] = meta.get('car_count', br.get('car_count', 1))
+                # Emergency: expose base/coefficient/final (unit) prices.
+                base_u = meta.get('base_unit_price')
+                if base_u is not None:
+                    line['base_price'] = format(Decimal(str(base_u)), 'f')
+                else:
+                    line['base_price'] = _money_fmt(line.get('price'))
+                line['emergency_coefficient'] = format(Decimal(str(meta.get('emergency_coefficient', coef))), 'f')
+                # `price` in master_service_item_line_dict is the base price; show final separately.
+                line['final_price'] = format(Decimal(str(meta.get('unit_price'))), 'f')
             else:
                 line['discount_allocated'] = '0.00'
                 line['line_total'] = _money_fmt(line.get('price'))
                 line['car_count'] = br.get('car_count', 1)
+                line['base_price'] = _money_fmt(line.get('price'))
+                line['emergency_coefficient'] = format(Decimal(str(coef)), 'f')
+                line['final_price'] = _money_fmt(line.get('price'))
             groups[gid]['items'].append(line)
         return list(groups.values())
     

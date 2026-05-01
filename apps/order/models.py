@@ -439,6 +439,53 @@ class MasterOrderCancellation(models.Model):
         return f'Master {self.master_id} cancelled order {self.order_id}'
 
 
+class MasterOfferEventStatus(models.TextChoices):
+    SENT = 'sent', 'Sent'
+    ACCEPTED = 'accepted', 'Accepted'
+    DECLINED = 'declined', 'Declined'
+    EXPIRED = 'expired', 'Expired'
+
+
+class MasterOfferEvent(models.Model):
+    """
+    Per-master offer audit trail to compute acceptance rate reliably.
+    Created when the system sends an order offer to a master (standard assignment or SOS broadcast).
+    Updated on accept/decline/expiry.
+    """
+
+    master = models.ForeignKey(
+        'master.Master',
+        on_delete=models.CASCADE,
+        related_name='offer_events',
+        verbose_name='Master',
+    )
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='offer_events',
+        verbose_name='Order',
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=MasterOfferEventStatus.choices,
+        default=MasterOfferEventStatus.SENT,
+        verbose_name='Offer status',
+    )
+    offered_at = models.DateTimeField(auto_now_add=True, verbose_name='Offered at')
+    responded_at = models.DateTimeField(null=True, blank=True, verbose_name='Responded at')
+
+    class Meta:
+        verbose_name = 'Master offer event'
+        verbose_name_plural = 'Master offer events'
+        ordering = ['-offered_at']
+        constraints = [
+            models.UniqueConstraint(fields=('master', 'order'), name='uniq_master_offer_event_master_order'),
+        ]
+
+    def __str__(self):
+        return f'Offer {self.status}: master={self.master_id} order={self.order_id}'
+
+
 class ReviewTag(models.TextChoices):
     """Aspect of the experience (positive or negative); client may pick several."""
 

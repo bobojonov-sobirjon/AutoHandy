@@ -421,6 +421,8 @@ def build_sos_order_websocket_payload(
     Rich SOS offer payload for WebSocket (exact location for emergency).
     """
     from apps.order.models import Order as OrderModel
+    from decimal import Decimal
+    from apps.order.services.order_pricing import compute_order_price_breakdown
 
     oid = order.pk
     order = (
@@ -483,21 +485,84 @@ def build_sos_order_websocket_payload(
         for c in order.category.all()
     ]
 
+    bd = compute_order_price_breakdown(order)
+    em = bd.get('emergency') or {}
+    coef = em.get('coefficient', Decimal('1.0'))
+    coef_s = format(Decimal(str(coef)), 'f')
+
     services_out: list[dict[str, Any]] = []
-    for os_row in order.order_services.all():
-        msi = os_row.master_service_item
-        if not msi:
-            continue
-        cat = msi.category
-        services_out.append(
-            {
-                'id': msi.id,
-                'service_name': cat.name if cat else None,
-                'category_id': cat.id if cat else None,
-                'type_category': cat.type_category if cat else None,
-                'price': str(msi.price) if msi.price is not None else None,
+    # SOS broadcast offers do not assign a master on the order. Prices must be shown per-target master:
+    # use MasterServiceItems (base price set by that master) for the order categories.
+    if offered_master_id and not order.order_services.exists():
+        try:
+            from apps.master.models import MasterServiceItems
+            from apps.categories.models import Category
+
+            car_count = max(1, order.car.count())
+            cat_ids = list(order.category.values_list('id', flat=True))
+            items = (
+                MasterServiceItems.objects.filter(
+                    master_service__master_id=int(offered_master_id),
+                    category_id__in=cat_ids,
+                )
+                .select_related('category')
+            )
+            subtotal = Decimal('0')
+            for it in items:
+                cat = it.category
+                base = Decimal(str(it.price or 0))
+                final = (base * Decimal(str(coef))).quantize(Decimal('0.01'))
+                line_total = (final * Decimal(str(car_count))).quantize(Decimal('0.01'))
+                subtotal += line_total
+                services_out.append(
+                    {
+                        'id': it.id,
+                        'service_name': cat.name if cat else None,
+                        'category_id': cat.id if cat else None,
+                        'type_category': cat.type_category if cat else None,
+                        'base_price': format(base, 'f'),
+                        'emergency_coefficient': coef_s,
+                        'final_price': format(final, 'f'),
+                        'line_total': format(line_total, 'f'),
+                    }
+                )
+            # Replace pricing totals for WS (discount not applied in SOS offer list).
+            bd = {
+                **bd,
+                'subtotal': subtotal,
+                'discount_applied': Decimal('0'),
+                'total': subtotal,
             }
-        )
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        for os_row in order.order_services.all():
+            msi = os_row.master_service_item
+            if not msi:
+                continue
+            cat = msi.category
+            meta = (bd.get('lines_by_order_service_id') or {}).get(os_row.id) or {}
+            final_unit = meta.get('unit_price')
+            services_out.append(
+                {
+                    'id': msi.id,
+                    'service_name': cat.name if cat else None,
+                    'category_id': cat.id if cat else None,
+                    'type_category': cat.type_category if cat else None,
+                    'base_price': str(msi.price) if msi.price is not None else None,
+                    'emergency_coefficient': format(Decimal(str(meta.get('emergency_coefficient', coef_s))), 'f'),
+                    'final_price': (
+                        format(Decimal(str(final_unit)), 'f')
+                        if final_unit is not None
+                        else (str(msi.price) if msi.price is not None else None)
+                    ),
+                    'line_total': (
+                        format(Decimal(str(meta.get('line_total'))), 'f')
+                        if meta.get('line_total') is not None
+                        else None
+                    ),
+                }
+            )
 
     order_images = [
         {
@@ -548,6 +613,15 @@ def build_sos_order_websocket_payload(
         'car_data': car_data,
         'category_data': category_data,
         'services': services_out,
+        'pricing': {
+            'subtotal': format(Decimal(str(bd.get('subtotal', 0))), 'f'),
+            'discount_applied': format(Decimal(str(bd.get('discount_applied', 0))), 'f'),
+            'total': format(Decimal(str(bd.get('total', 0))), 'f'),
+            'emergency_pricing': {
+                **em,
+                'coefficient': coef_s,
+            },
+        },
         'order_images': order_images,
         'master_response_deadline': (
             order.master_response_deadline.isoformat() if order.master_response_deadline else None

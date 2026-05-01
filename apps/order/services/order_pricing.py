@@ -5,6 +5,12 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from django.conf import settings
+from django.utils import timezone
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore[assignment]
 
 
 def _q(x: Any) -> Decimal:
@@ -91,20 +97,75 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
             'total': total,
             'car_count': car_count,
             'lines_by_order_service_id': {},
+            'emergency': {
+                'is_emergency': False,
+                'time_zone': None,
+                'time_bucket': None,
+                'coefficient': _q(Decimal('1.0')),
+                'note': None,
+            },
         }
+
+    # Emergency (SOS) pricing: day/night multipliers in America local time.
+    from apps.order.models import OrderType
+
+    emergency = {
+        'is_emergency': bool(getattr(order, 'order_type', None) == OrderType.SOS),
+        'time_zone': None,
+        'time_bucket': None,
+        'coefficient': Decimal('1.0'),
+        'note': None,
+    }
+    if emergency['is_emergency']:
+        tz_name = str(getattr(settings, 'EMERGENCY_TIME_ZONE', 'America/Los_Angeles') or 'America/Los_Angeles')
+        coef_day = Decimal(str(getattr(settings, 'EMERGENCY_DAY_MULTIPLIER', 1.3)))
+        coef_night = Decimal(str(getattr(settings, 'EMERGENCY_NIGHT_MULTIPLIER', 1.6)))
+        dt = getattr(order, 'created_at', None) or timezone.now()
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.get_current_timezone())
+        local_dt = dt
+        if ZoneInfo is not None:
+            try:
+                local_dt = dt.astimezone(ZoneInfo(tz_name))
+                emergency['time_zone'] = tz_name
+            except Exception:
+                # Fallback: keep dt as-is; still apply multipliers based on its clock time.
+                emergency['time_zone'] = None
+        hhmm = (local_dt.hour, local_dt.minute)
+        # Day: 06:00 (inclusive) → 23:00 (exclusive). Night: 23:00 → 06:00.
+        is_day = (hhmm >= (6, 0)) and (hhmm < (23, 0))
+        emergency['time_bucket'] = 'day' if is_day else 'night'
+        emergency['coefficient'] = coef_day if is_day else coef_night
+        emergency['note'] = 'Higher price due to urgency or time'
 
     car_count = _order_car_count(order)
     rows: list[dict[str, Any]] = []
+    base_subtotal = Decimal('0')
     subtotal = Decimal('0')
 
     for os_row in order.order_services.all().select_related('master_service_item').order_by('id'):
         item = os_row.master_service_item
         if not item:
             continue
-        p = _q(item.price or 0)
-        line_gross = _q(p * car_count)
-        subtotal += line_gross
-        rows.append({'os': os_row, 'unit_price_per_car': p, 'line_gross': line_gross})
+        base_p = _q(item.price or 0)
+        line_base_gross = _q(base_p * car_count)
+        base_subtotal += line_base_gross
+        rows.append(
+            {
+                'os': os_row,
+                'base_unit_price_per_car': base_p,
+                'car_count': car_count,
+                'line_base_gross': line_base_gross,
+            }
+        )
+
+    coef = (
+        Decimal(str(emergency['coefficient'] or Decimal('1.0')))
+        if emergency['is_emergency']
+        else Decimal('1.0')
+    )
+    # Apply SOS multiplier once on the summed base subtotal.
+    subtotal = _q(base_subtotal * _q(coef))
 
     raw = _q(order.discount or 0)
     if raw < 0:
@@ -130,13 +191,17 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
     if not rows or discount_applied == 0:
         for r in rows:
             os_row = r['os']
-            p = r['unit_price_per_car']
-            lg = r['line_gross']
+            base_u = r['base_unit_price_per_car']
+            base_g = r['line_base_gross']
+            unit_final = _q(base_u * _q(coef))
+            lg = _q(base_g * _q(coef))
             lines_out.append(
                 {
                     'order_service_id': os_row.id,
-                    'unit_price': p,
-                    'car_count': car_count,
+                    'unit_price': unit_final,
+                    'base_unit_price': base_u,
+                    'emergency_coefficient': _q(coef),
+                    'car_count': r.get('car_count', car_count),
                     'discount_allocated': Decimal('0'),
                     'line_total': lg,
                 }
@@ -144,8 +209,10 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
     else:
         for i, r in enumerate(rows):
             os_row = r['os']
-            p = r['unit_price_per_car']
-            lg = r['line_gross']
+            base_u = r['base_unit_price_per_car']
+            base_g = r['line_base_gross']
+            unit_final = _q(base_u * _q(coef))
+            lg = _q(base_g * _q(coef))
             if i == n - 1:
                 ld = _q(discount_applied - acc_disc)
             else:
@@ -158,8 +225,10 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
             lines_out.append(
                 {
                     'order_service_id': os_row.id,
-                    'unit_price': p,
-                    'car_count': car_count,
+                    'unit_price': unit_final,
+                    'base_unit_price': base_u,
+                    'emergency_coefficient': _q(coef),
+                    'car_count': r.get('car_count', car_count),
                     'discount_allocated': ld,
                     'line_total': lt,
                 }
@@ -167,6 +236,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
 
     by_id = {x['order_service_id']: x for x in lines_out}
     return {
+        'base_subtotal': base_subtotal,
         'subtotal': subtotal,
         'discount_raw': raw,
         'discount_mode': mode,
@@ -174,6 +244,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
         'total': total,
         'car_count': car_count,
         'lines_by_order_service_id': by_id,
+        'emergency': emergency,
     }
 
 

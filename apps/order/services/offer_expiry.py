@@ -27,11 +27,32 @@ def expire_stale_master_offers(now=None, *, skip_order_ids: Container[int] | Non
     n = 0
     for order in qs.iterator():
         if order.order_type == OrderType.SOS and order.sos_offer_queue:
+            # Mark pending offers as expired for acceptance-rate metrics.
+            try:
+                from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
+
+                MasterOfferEvent.objects.filter(
+                    order_id=order.pk,
+                    status=MasterOfferEventStatus.SENT,
+                ).update(status=MasterOfferEventStatus.EXPIRED, responded_at=now)
+            except Exception:  # noqa: BLE001
+                pass
             advance_sos_ring_after_decline_or_timeout(order)
             n += 1
             continue
         if not order.master_id:
             continue
+        # Standard: offer expired for this assigned master.
+        try:
+            from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
+
+            MasterOfferEvent.objects.filter(
+                order_id=order.pk,
+                master_id=order.master_id,
+                status=MasterOfferEventStatus.SENT,
+            ).update(status=MasterOfferEventStatus.EXPIRED, responded_at=now)
+        except Exception:  # noqa: BLE001
+            pass
         old_master_id = order.master_id
         order.status = OrderStatus.REJECTED
         order.master = None

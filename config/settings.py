@@ -391,6 +391,17 @@ MASTER_OFFER_RESPONSE_MINUTES = int(os.environ.get('MASTER_OFFER_RESPONSE_MINUTE
 SOS_OFFER_SECONDS_PER_MASTER = int(os.environ.get('SOS_OFFER_SECONDS_PER_MASTER', '420'))
 # SOS broadcast: all in-zone masters in queue get the offer; shared countdown until auto-reject.
 SOS_BROADCAST_RESPONSE_SECONDS = int(os.environ.get('SOS_BROADCAST_RESPONSE_SECONDS', '420'))
+# Emergency pricing timezone (America local time for day/night multipliers).
+EMERGENCY_TIME_ZONE = os.environ.get('EMERGENCY_TIME_ZONE', 'America/Los_Angeles')
+# Emergency (SOS) multipliers.
+EMERGENCY_DAY_MULTIPLIER = float(os.environ.get('EMERGENCY_DAY_MULTIPLIER', '1.3'))
+EMERGENCY_NIGHT_MULTIPLIER = float(os.environ.get('EMERGENCY_NIGHT_MULTIPLIER', '1.6'))
+
+# Emergency dispatch gating by master rates.
+MASTER_RATE_WINDOW_DAYS = int(os.environ.get('MASTER_RATE_WINDOW_DAYS', '30'))
+EMERGENCY_ACCEPTANCE_RATE_MIN = int(os.environ.get('EMERGENCY_ACCEPTANCE_RATE_MIN', '90'))
+EMERGENCY_COMPLETION_RATE_MIN = int(os.environ.get('EMERGENCY_COMPLETION_RATE_MIN', '80'))
+EMERGENCY_LOW_TIER_DELAY_SECONDS = int(os.environ.get('EMERGENCY_LOW_TIER_DELAY_SECONDS', '120'))
 # Fallback when Celery countdown/beat is broken (e.g. Windows prefork): while masters stay on SOS WS,
 # run expire_stale_master_offers at most once per this many seconds (per ASGI process). 0 = off.
 SOS_WEBSOCKET_STALE_SWEEP_SEC = int(os.environ.get('SOS_WEBSOCKET_STALE_SWEEP_SEC', '8'))

@@ -9,6 +9,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.order.models import Order, OrderStatus, OrderType
+from apps.master.models import Master
 from apps.order.services.master_service_zone import order_within_master_acceptance_zone
 
 if TYPE_CHECKING:
@@ -165,9 +166,72 @@ def broadcast_sos_offers(order: Order, request: 'HttpRequest | None' = None) -> 
         fields=['master_response_deadline', 'sos_offer_index', 'sos_declined_master_ids']
     )
 
+    # Prioritize SOS offers by master Acceptance/Completion rates (high tier first).
+    try:
+        from apps.master.services.rates import master_acceptance_rate_percent, master_completion_rate_percent
+
+        min_acc = int(getattr(settings, 'EMERGENCY_ACCEPTANCE_RATE_MIN', 90))
+        min_comp = int(getattr(settings, 'EMERGENCY_COMPLETION_RATE_MIN', 80))
+        delay_sec = int(getattr(settings, 'EMERGENCY_LOW_TIER_DELAY_SECONDS', 120))
+    except Exception:
+        min_acc, min_comp, delay_sec = 90, 80, 120
+
+    high: list[int] = []
+    low: list[int] = []
+    # Fetch masters in one query.
+    masters = {m.id: m for m in Master.objects.filter(id__in=eligible).only('id', 'user_id')}
     for mid in eligible:
+        m = masters.get(mid)
+        if not m:
+            continue
+        try:
+            acc = master_acceptance_rate_percent(m)
+            comp = master_completion_rate_percent(m)
+        except Exception:
+            acc, comp = 0, 0
+        if acc >= min_acc and comp >= min_comp:
+            high.append(mid)
+        else:
+            low.append(mid)
+
+    send_now = high if high else low
+    send_later = low if high else []
+
+    for mid in send_now:
         notify_master_new_order(order, target_master_id=mid)
         push_sos_order_to_master_websocket(order, request=request, target_master_id=mid)
+        # Track offer event for acceptance-rate metrics.
+        try:
+            from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
+
+            MasterOfferEvent.objects.get_or_create(
+                master_id=mid,
+                order_id=order.pk,
+                defaults={'status': MasterOfferEventStatus.SENT},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    if send_later:
+        try:
+            from apps.order.tasks import push_sos_offer_to_masters_task
+
+            push_sos_offer_to_masters_task.apply_async(args=[order.pk, send_later], countdown=delay_sec)
+        except Exception:  # noqa: BLE001
+            # If Celery is unavailable, fall back to immediate delivery (best effort).
+            for mid in send_later:
+                notify_master_new_order(order, target_master_id=mid)
+                push_sos_order_to_master_websocket(order, request=request, target_master_id=mid)
+                try:
+                    from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
+
+                    MasterOfferEvent.objects.get_or_create(
+                        master_id=mid,
+                        order_id=order.pk,
+                        defaults={'status': MasterOfferEventStatus.SENT},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
     schedule_master_offer_expiry(order.pk, deadline)
 

@@ -18,6 +18,91 @@ from apps.order.services.offer_expiry import (
 
 
 @shared_task(ignore_result=True)
+def push_sos_offer_to_masters_task(order_id: int, master_ids: list[int]) -> int:
+    """
+    Low-tier SOS fallback: deliver offers after a delay if the order is still pending.
+    """
+    from apps.master.models import Master
+    from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
+    from apps.order.services.notifications import notify_master_new_order, push_sos_order_to_master_websocket
+    from apps.order.services.sos_rotation import master_eligible_for_pending_sos_offer
+
+    try:
+        order = Order.objects.get(pk=order_id)
+    except Order.DoesNotExist:
+        return 0
+    if order.status != OrderStatus.PENDING or order.order_type != OrderType.SOS:
+        return 0
+    if not order.sos_offer_queue:
+        return 0
+    if order.master_response_deadline and timezone.now() > order.master_response_deadline:
+        return 0
+
+    sent = 0
+    mids = [int(x) for x in master_ids if x is not None]
+    masters = {m.id: m for m in Master.objects.filter(id__in=mids).only('id', 'user_id')}
+    for mid in mids:
+        if mid not in masters:
+            continue
+        if not master_eligible_for_pending_sos_offer(order, mid):
+            continue
+        notify_master_new_order(order, target_master_id=mid)
+        push_sos_order_to_master_websocket(order, request=None, target_master_id=mid)
+        try:
+            MasterOfferEvent.objects.get_or_create(
+                master_id=mid,
+                order_id=order.pk,
+                defaults={'status': MasterOfferEventStatus.SENT},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        sent += 1
+    return sent
+
+
+# ---------------------------------------------------------------------------
+# Compatibility tasks (old names still present in Redis queue).
+# These no-op or delegate to current task names so the worker won't error.
+# ---------------------------------------------------------------------------
+
+
+@shared_task(ignore_result=True, name='apps.order.tasks.expire_master_offer_for_order')
+def expire_master_offer_for_order_compat(order_id: int) -> bool:
+    """Legacy task name kept for old queued messages."""
+    return bool(expire_master_offer_for_order(order_id))
+
+
+@shared_task(ignore_result=True, name='apps.order.tasks.offer_deadline_reminder')
+def offer_deadline_reminder_compat(order_id: int) -> None:
+    """Legacy reminder task name; current reminders are handled by beat sweep task."""
+    try:
+        logger.info('Compat task offer_deadline_reminder called for order_id=%s (ignored)', order_id)
+    except Exception:
+        pass
+
+
+@shared_task(ignore_result=True, name='apps.order.tasks.assign_driver_to_order_async')
+def assign_driver_to_order_async_compat(order_id: int) -> None:
+    """Legacy taxi/ride task name from another project; ignore safely."""
+    try:
+        logger.info('Compat task assign_driver_to_order_async called for order_id=%s (ignored)', order_id)
+    except Exception:
+        pass
+
+
+@shared_task(ignore_result=True, name='apps.notification.tasks.send_push_notification_async')
+def send_push_notification_async_compat(*args, **kwargs) -> None:
+    """
+    Legacy task name from another module/app not present in this repo.
+    We keep a stub so Celery can consume old messages without crashing.
+    """
+    try:
+        logger.info('Compat task send_push_notification_async called (ignored)')
+    except Exception:
+        pass
+
+
+@shared_task(ignore_result=True)
 def expire_stale_master_offers_task() -> int:
     """
     Celery Beat (every minute): pending orders whose master_response_deadline passed.
