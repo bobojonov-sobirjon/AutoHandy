@@ -496,6 +496,7 @@ MASTER_SCHEDULE_MIN_COVERAGE_DAYS_DEFAULT = int(os.getenv('MASTER_SCHEDULE_MIN_C
 # Logging — barcha ilova loglari bitta faylga (serverda real-time: tail -f yo‘li)
 # Server: odatda DJANGO_LOG_FILE=/var/www/AutoHandy/logs/django.log (.env da yozing).
 # Windows: DJANGO_LOG_FILE berilmasa, BASE_DIR / logs / django.log ishlatiladi.
+# Agar tanlangan yo‘lga yozib bo‘lmasa, BASE_DIR/logs ga tushadi yoki faqat console (502 oldini olish).
 if os.name == 'nt' and not os.environ.get('DJANGO_LOG_FILE'):
     _DJANGO_LOG_FILE = str(BASE_DIR / 'logs' / 'django.log')
 else:
@@ -503,15 +504,54 @@ else:
         'DJANGO_LOG_FILE',
         '/var/www/AutoHandy/logs/django.log',
     )
-try:
-    Path(_DJANGO_LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
-except OSError:
-    pass
+
+
+def _log_file_is_writable(path: str) -> bool:
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'a', encoding='utf-8'):
+            pass
+        return True
+    except OSError:
+        return False
+
 
 _DJANGO_LOG_LEVEL = os.environ.get(
     'DJANGO_LOG_LEVEL',
     'DEBUG' if DEBUG else 'INFO',
 )
+
+_LOG_FALLBACK_FILE = str(BASE_DIR / 'logs' / 'django.log')
+_DJANGO_LOG_EFFECTIVE = _DJANGO_LOG_FILE
+if not _log_file_is_writable(_DJANGO_LOG_EFFECTIVE):
+    if _LOG_FALLBACK_FILE != _DJANGO_LOG_EFFECTIVE and _log_file_is_writable(_LOG_FALLBACK_FILE):
+        _DJANGO_LOG_EFFECTIVE = _LOG_FALLBACK_FILE
+        _use_file_handler = True
+    else:
+        _DJANGO_LOG_EFFECTIVE = _DJANGO_LOG_FILE
+        _use_file_handler = False
+else:
+    _use_file_handler = True
+
+_LOG_HANDLERS: dict[str, dict] = {
+    'console': {
+        'level': _DJANGO_LOG_LEVEL,
+        'class': 'logging.StreamHandler',
+        'formatter': 'verbose',
+    },
+}
+_ROOT_HANDLER_NAMES = ['console']
+if _use_file_handler:
+    _LOG_HANDLERS['file'] = {
+        'level': 'DEBUG',
+        'class': 'logging.handlers.RotatingFileHandler',
+        'filename': _DJANGO_LOG_EFFECTIVE,
+        'maxBytes': int(os.environ.get('DJANGO_LOG_MAX_BYTES', str(50 * 1024 * 1024))),
+        'backupCount': int(os.environ.get('DJANGO_LOG_BACKUP_COUNT', '10')),
+        'formatter': 'verbose',
+    }
+    _ROOT_HANDLER_NAMES = ['file', 'console']
 
 LOGGING = {
     'version': 1,
@@ -523,23 +563,9 @@ LOGGING = {
             'datefmt': '%Y-%m-%d %H:%M:%S',
         },
     },
-    'handlers': {
-        'file': {
-            'level': 'DEBUG',
-            'class': 'logging.handlers.RotatingFileHandler',
-            'filename': _DJANGO_LOG_FILE,
-            'maxBytes': int(os.environ.get('DJANGO_LOG_MAX_BYTES', str(50 * 1024 * 1024))),
-            'backupCount': int(os.environ.get('DJANGO_LOG_BACKUP_COUNT', '10')),
-            'formatter': 'verbose',
-        },
-        'console': {
-            'level': _DJANGO_LOG_LEVEL,
-            'class': 'logging.StreamHandler',
-            'formatter': 'verbose',
-        },
-    },
+    'handlers': _LOG_HANDLERS,
     'root': {
-        'handlers': ['file', 'console'],
+        'handlers': _ROOT_HANDLER_NAMES,
         'level': _DJANGO_LOG_LEVEL,
     },
 }
