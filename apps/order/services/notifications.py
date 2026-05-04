@@ -36,6 +36,35 @@ def _fcm_dbg(msg: str) -> None:
             return
 
 
+def _fcm_error_means_invalid_token(err: Any) -> bool:
+    """True when FCM says this registration token must be dropped (stale app, reinstall, wrong project)."""
+    if err is None:
+        return False
+    try:
+        import firebase_admin.exceptions as fb_exc
+
+        if isinstance(err, fb_exc.NotFoundError):
+            return True
+        if isinstance(err, fb_exc.InvalidArgumentError):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    code = str(getattr(err, 'code', '') or '')
+    msg = str(err).lower()
+    code_l = code.lower()
+    if 'not_found' in code_l or code_l == 'not_found':
+        return True
+    if 'registration-token-not-registered' in code_l:
+        return True
+    if 'invalid-argument' in code_l:
+        return True
+    if 'notregistered' in msg or 'not registered' in msg or 'requested entity was not found' in msg:
+        return True
+    if 'invalid registration' in msg:
+        return True
+    return False
+
+
 def _firebase_service_account_from_env(prefix: str) -> dict[str, str]:
     pk = _env(f'{prefix}PRIVATE_KEY')
     if '\\n' in pk:
@@ -217,18 +246,26 @@ def send_fcm_to_user_devices(
                 code,
                 (msg_txt or '')[:200],
             )
-        if 'registration-token-not-registered' in str(code) or 'invalid-argument' in str(code):
+        _fcm_dbg(
+            f'failure_detail kind={firebase_kind} user_id={user_id} token_idx={i} '
+            f'code={code} err={(msg_txt or "")[:200]} invalid_token={_fcm_error_means_invalid_token(err)}'
+        )
+        if _fcm_error_means_invalid_token(err):
             invalid_tokens.append(tokens[i])
     if invalid_tokens:
         try:
             from apps.accounts.models import UserDevice
 
-            UserDevice.objects.filter(device_token__in=invalid_tokens).delete()
+            deleted, _ = UserDevice.objects.filter(device_token__in=invalid_tokens).delete()
             logger.warning(
-                'FCM cleaned invalid tokens (kind=%s user_id=%s removed=%s)',
+                'FCM cleaned invalid tokens (kind=%s user_id=%s removed_rows=%s)',
                 firebase_kind,
                 user_id,
-                len(invalid_tokens),
+                deleted,
+            )
+            _fcm_dbg(
+                f'token_cleanup kind={firebase_kind} user_id={user_id} removed_rows={deleted} '
+                f'(client must re-register via POST /api/auth/device/)'
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning('FCM token cleanup failed: %s', exc)
@@ -891,6 +928,16 @@ def notify_master_new_order(order: 'Order', *, target_master_id: int | None = No
         extra_data={'order_type': str(getattr(order, 'order_type', '') or '')},
         fallback_title='New order received',
         fallback_body=f'A new order is waiting for you. Tap to view — #{order.id}',
+    )
+    logger.warning(
+        'notify_master_new_order order_id=%s master_id=%s master_user_id=%s (FCM target user_id=%s)',
+        order.id,
+        mid,
+        master.user_id,
+        master.user_id,
+    )
+    _fcm_dbg(
+        f'notify_master_new_order order_id={order.id} master_id={mid} master_user_id={master.user_id}'
     )
     send_fcm_to_user_devices(
         user_id=master.user_id,

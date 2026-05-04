@@ -493,6 +493,57 @@ MASTER_FREE_CANCELLATIONS_PER_MONTH = int(os.getenv('MASTER_FREE_CANCELLATIONS_P
 # When the master is under no cancellation-policy cap, bulk schedule must cover this many days from today.
 MASTER_SCHEDULE_MIN_COVERAGE_DAYS_DEFAULT = int(os.getenv('MASTER_SCHEDULE_MIN_COVERAGE_DAYS_DEFAULT', '14'))
 
+# Logging — barcha ilova loglari bitta faylga (serverda real-time: tail -f yo‘li)
+# Server: odatda DJANGO_LOG_FILE=/var/www/AutoHandy/logs/django.log (.env da yozing).
+# Windows: DJANGO_LOG_FILE berilmasa, BASE_DIR / logs / django.log ishlatiladi.
+if os.name == 'nt' and not os.environ.get('DJANGO_LOG_FILE'):
+    _DJANGO_LOG_FILE = str(BASE_DIR / 'logs' / 'django.log')
+else:
+    _DJANGO_LOG_FILE = os.environ.get(
+        'DJANGO_LOG_FILE',
+        '/var/www/AutoHandy/logs/django.log',
+    )
+try:
+    Path(_DJANGO_LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
+
+_DJANGO_LOG_LEVEL = os.environ.get(
+    'DJANGO_LOG_LEVEL',
+    'DEBUG' if DEBUG else 'INFO',
+)
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {name} {message}',
+            'style': '{',
+            'datefmt': '%Y-%m-%d %H:%M:%S',
+        },
+    },
+    'handlers': {
+        'file': {
+            'level': 'DEBUG',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': _DJANGO_LOG_FILE,
+            'maxBytes': int(os.environ.get('DJANGO_LOG_MAX_BYTES', str(50 * 1024 * 1024))),
+            'backupCount': int(os.environ.get('DJANGO_LOG_BACKUP_COUNT', '10')),
+            'formatter': 'verbose',
+        },
+        'console': {
+            'level': _DJANGO_LOG_LEVEL,
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['file', 'console'],
+        'level': _DJANGO_LOG_LEVEL,
+    },
+}
+
 # DRF Spectacular Configuration
 SPECTACULAR_SETTINGS = {
     'TITLE': 'AutoHandy APIs',
