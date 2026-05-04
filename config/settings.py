@@ -24,7 +24,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-698=9lt4($dou4__kd&*tor4j5kp9g#g2mh8bp37v334-c$8h^'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Server: .env da DEBUG=false yoki DJANGO_DEBUG=0 (aks holda log fayl Celery asyncio DEBUG bilan to‘lib ketadi).
+DEBUG = os.getenv('DJANGO_DEBUG', os.getenv('DEBUG', 'true')).lower() in (
+    '1',
+    'true',
+    'yes',
+)
 
 ALLOWED_HOSTS = ["*"]
 
@@ -564,6 +569,17 @@ LOGGING = {
         },
     },
     'handlers': _LOG_HANDLERS,
+    # Shu loglar root DEBUG bo‘lsa ham ichki “shovqin”ni bosadi (Celery task stub chop etish va asyncio selector).
+    'loggers': {
+        'celery.utils.functional': {
+            'level': 'WARNING',
+            'propagate': True,
+        },
+        'asyncio': {
+            'level': 'WARNING',
+            'propagate': True,
+        },
+    },
     'root': {
         'handlers': _ROOT_HANDLER_NAMES,
         'level': _DJANGO_LOG_LEVEL,
