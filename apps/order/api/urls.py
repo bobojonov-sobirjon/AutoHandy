@@ -19,6 +19,16 @@ urlpatterns = [
     ),
     path('available-slots/', views.AvailableTimeSlotsView.as_view(), name='available-time-slots'),
     path('add-services/', views.AddServicesToOrderView.as_view(), name='add-services-to-order'),
+    path(
+        'order-service/<int:order_service_id>/count/',
+        views.OrderServiceCountPatchView.as_view(),
+        name='order-service-count',
+    ),
+    path(
+        '<int:order_id>/extra-money/',
+        views.OrderExtraMoneyPatchView.as_view(),
+        name='order-extra-money',
+    ),
     path('services-list/', views.MasterServicesListView.as_view(), name='master-services-list'),
     path('add-master/', views.AddMasterToOrderView.as_view(), name='add-master-to-order'),
     path('', views.OrderListCreateView.as_view(), name='order-list-create'),

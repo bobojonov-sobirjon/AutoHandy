@@ -879,6 +879,7 @@ def push_sos_order_to_master_websocket(
     mid = target_master_id if target_master_id is not None else order.master_id
     if not mid:
         return
+    _fcm_dbg(f'push_sos_order_to_master_websocket order_id={getattr(order,"id",None)} target_master_id={mid}')
     if order.order_type == OrderType.SOS and not order_within_master_acceptance_zone(order, mid):
         logger.warning(
             'push_sos_order_to_master_websocket skipped: order %s not in master %s acceptance zone',
@@ -962,6 +963,11 @@ def notify_user_order_event(
 ) -> None:
     if not getattr(order, 'user_id', None):
         return
+    _fcm_dbg(
+        'notify_user_order_event '
+        f'order_id={getattr(order,"id",None)} user_id={getattr(order,"user_id",None)} kind={kind} '
+        f'title={(title or "")[:60]} extra_keys={list((extra_data or {}).keys())}'
+    )
     title_out, body_out = _pro_push_copy(
         kind=kind,
         order_id=order.id,
@@ -991,6 +997,11 @@ def notify_master_order_event(
     kind: str,
     extra_data: dict[str, str] | None = None,
 ) -> None:
+    _fcm_dbg(
+        'notify_master_order_event '
+        f'order_id={order_id} master_user_id={master_user_id} kind={kind} '
+        f'title={(title or "")[:60]} extra_keys={list((extra_data or {}).keys())}'
+    )
     title_out, body_out = _pro_push_copy(
         kind=kind,
         order_id=order_id,

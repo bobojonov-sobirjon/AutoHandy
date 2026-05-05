@@ -189,17 +189,19 @@ def normalize_custom_request_create_data(request) -> dict:
                 data['parts_purchase_required_json'] = []
     from datetime import date as date_cls, datetime as datetime_cls, time as time_cls
 
+    # Back-compat aliases: older clients send custom_request_date/custom_request_time.
+    # New API fields: preferred_date/preferred_time_start.
     raw_date = data.pop('custom_request_date', None)
     if raw_date is not None and raw_date != '':
         if isinstance(raw_date, datetime_cls):
-            data['custom_request_date'] = raw_date.date()
+            data.setdefault('preferred_date', raw_date.date())
         elif isinstance(raw_date, date_cls):
-            data['custom_request_date'] = raw_date
+            data.setdefault('preferred_date', raw_date)
         else:
             s = str(raw_date).strip()
             for fmt in ('%Y-%m-%d', '%d.%m.%Y', '%d/%m/%Y'):
                 try:
-                    data['custom_request_date'] = datetime_cls.strptime(s, fmt).date()
+                    data.setdefault('preferred_date', datetime_cls.strptime(s, fmt).date())
                     break
                 except ValueError:
                     continue
@@ -207,14 +209,14 @@ def normalize_custom_request_create_data(request) -> dict:
     raw_time = data.pop('custom_request_time', None)
     if raw_time is not None and raw_time != '':
         if isinstance(raw_time, time_cls):
-            data['custom_request_time'] = raw_time
+            data.setdefault('preferred_time_start', raw_time)
         else:
             s = str(raw_time).strip()
             if s.endswith('Z') or s.endswith('z'):
                 s = s[:-1]
             for fmt in ('%H:%M:%S.%f', '%H:%M:%S', '%H:%M'):
                 try:
-                    data['custom_request_time'] = datetime_cls.strptime(s, fmt).time()
+                    data.setdefault('preferred_time_start', datetime_cls.strptime(s, fmt).time())
                     break
                 except ValueError:
                     continue

@@ -145,6 +145,13 @@ class Order(models.Model):
         verbose_name='Discount',
         help_text='Order discount (percentage or amount)',
     )
+    extra_money = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0.00,
+        verbose_name='Extra money',
+        help_text='Additional charges added after service selection (e.g. extra work/parts).',
+    )
     created_at = models.DateTimeField(
         auto_now_add=True,
         verbose_name='Created at',
@@ -711,6 +718,11 @@ class OrderService(models.Model):
         on_delete=models.CASCADE,
         related_name='order_services',
         verbose_name='Master service',
+    )
+    count = models.PositiveIntegerField(
+        default=1,
+        verbose_name='Count',
+        help_text='How many times this service is applied within the order (per service item).',
     )
     created_at = models.DateTimeField(
         auto_now_add=True,

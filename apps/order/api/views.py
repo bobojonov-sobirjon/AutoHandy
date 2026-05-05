@@ -86,6 +86,8 @@ from apps.order.api.serializers import (
     ReviewSerializer,
     ReviewCreateSerializer,
     CancelOrderRequestSerializer,
+    OrderExtraMoneyPatchSerializer,
+    OrderServiceCountPatchSerializer,
 )
 from apps.order.services.order_pricing import estimate_cancellation_penalty_amount, order_payable_total_str
 from apps.order.permissions import IsOrderOwnerOrMaster, IsOrderOwner, IsMaster
@@ -901,6 +903,11 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         'description': 'Preferred service date for this custom request (YYYY-MM-DD).',
                         'example': '2026-04-18',
                     },
+                    'preferred_time_start': {
+                        'type': 'string',
+                        'description': 'Preferred time start (send together with preferred_date).',
+                        'example': '10:30',
+                    },
                     'car_list': {
                         'type': 'array',
                         'items': {'type': 'integer'},
@@ -951,6 +958,11 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         'type': 'string',
                         'format': 'date',
                         'description': 'Preferred service date (YYYY-MM-DD).',
+                    },
+                    'preferred_time_start': {
+                        'type': 'string',
+                        'description': 'Preferred time start (HH:MM). Send together with preferred_date.',
+                        'example': '10:30',
                     },
                     'car_list': {
                         'type': 'string',
@@ -4231,7 +4243,10 @@ class AddServicesToOrderView(APIView):
         from apps.master.models import MasterServiceItems
         created_services = []
         
-        for service_id in services_list:
+        from collections import Counter
+
+        counts = Counter(int(x) for x in services_list)
+        for service_id, add_n in counts.items():
             try:
                 service_item = MasterServiceItems.objects.get(id=service_id)
                 # Используем get_or_create чтобы избежать дубликатов
@@ -4239,6 +4254,18 @@ class AddServicesToOrderView(APIView):
                     order=order,
                     master_service_item=service_item
                 )
+                if created:
+                    # Default = 1; if the client sent duplicates, apply them.
+                    if add_n > 1:
+                        order_service.count = add_n
+                        order_service.save(update_fields=['count'])
+                else:
+                    # If it already exists, increase by number of times requested.
+                    try:
+                        order_service.count = int(getattr(order_service, 'count', 1) or 1) + int(add_n or 1)
+                    except Exception:
+                        order_service.count = 1 + int(add_n or 1)
+                    order_service.save(update_fields=['count'])
                 created_services.append(order_service)
             except MasterServiceItems.DoesNotExist:
                 continue
@@ -4265,6 +4292,109 @@ class AddServicesToOrderView(APIView):
         # Сериализуем результат
         result_serializer = OrderServiceSerializer(created_services, many=True)
         return Response(result_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class OrderServiceCountPatchView(APIView):
+    """
+    Patch one OrderService row count.
+    Path param: order_service_id
+    Body: { "count": <int>=1.. }
+    """
+
+    permission_classes = [IsAuthenticated, IsOrderOwnerOrMaster]
+
+    @extend_schema(
+        summary='Update order service count',
+        description='Set quantity for one OrderService row (per service item).',
+        tags=[STAG_ORDER_DETAILS],
+        parameters=[
+            OpenApiParameter(
+                name='order_service_id',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.PATH,
+                description='OrderService ID',
+                required=True,
+            ),
+        ],
+        request={'application/json': {'type': 'object', 'properties': {'count': {'type': 'integer', 'minimum': 1}}, 'required': ['count']}},
+        responses={200: OrderServiceSerializer, 400: {'description': 'Validation error'}, 404: {'description': 'Not found'}},
+    )
+    def patch(self, request, order_service_id: int):
+        ser = OrderServiceCountPatchSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            os_row = (
+                OrderService.objects.select_related('order', 'order__master')
+                .only('id', 'order_id', 'count', 'order__user_id', 'order__master_id')
+                .get(pk=order_service_id)
+            )
+        except OrderService.DoesNotExist:
+            return Response({'error': 'Order service item not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Permission check against the parent order.
+        self.check_object_permissions(request, os_row.order)
+
+        # If a master is changing services, require them to be the assigned master.
+        master = request.user.master_profiles.first() if hasattr(request.user, 'master_profiles') else None
+        if master and os_row.order.master_id and os_row.order.master_id != master.id:
+            return Response({'error': 'Order is assigned to another master'}, status=status.HTTP_403_FORBIDDEN)
+
+        os_row.count = int(ser.validated_data['count'])
+        os_row.save(update_fields=['count'])
+        return Response(OrderServiceSerializer(os_row, context={'request': request}).data, status=status.HTTP_200_OK)
+
+
+class OrderExtraMoneyPatchView(APIView):
+    """
+    Increment Order.extra_money.
+    Path param: order_id
+    Body: { "extra_money": "10.00" }  (added to existing extra_money)
+    """
+
+    permission_classes = [IsAuthenticated, IsOrderOwnerOrMaster]
+
+    @extend_schema(
+        summary='Add extra money to order',
+        description='Increment order.extra_money by the given amount (added to existing value).',
+        tags=[STAG_ORDER_DETAILS],
+        parameters=[
+            OpenApiParameter(
+                name='order_id',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.PATH,
+                description='Order ID',
+                required=True,
+            ),
+        ],
+        request={'application/json': {'type': 'object', 'properties': {'extra_money': {'type': 'string', 'example': '10.00'}}, 'required': ['extra_money']}},
+        responses={200: OrderSerializer, 400: {'description': 'Validation error'}, 403: {'description': 'Forbidden'}, 404: {'description': 'Not found'}},
+    )
+    def patch(self, request, order_id: int):
+        ser = OrderExtraMoneyPatchSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            order = Order.objects.only('id', 'user_id', 'master_id', 'extra_money').get(pk=order_id)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        self.check_object_permissions(request, order)
+
+        # Only assigned master can add extra money (typical business rule).
+        master = request.user.master_profiles.first() if hasattr(request.user, 'master_profiles') else None
+        if not master or order.master_id != master.id:
+            return Response({'error': 'Only the assigned master can add extra money'}, status=status.HTTP_403_FORBIDDEN)
+
+        add_amt = ser.validated_data['extra_money']
+        if add_amt is None:
+            return Response({'error': 'extra_money is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        order.extra_money = (order.extra_money or 0) + add_amt
+        order.save(update_fields=['extra_money', 'updated_at'])
+        return Response(OrderSerializer(order, context={'request': request}).data, status=status.HTTP_200_OK)
 
 
 class MasterServicesListView(APIView):

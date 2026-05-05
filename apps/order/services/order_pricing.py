@@ -71,6 +71,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
     - If ``settings.ORDER_DISCOUNT_IS_PERCENT`` is True and discount is in ``0..100``,
       treat as **percent** of subtotal; values ``> 100`` are still treated as fixed amount.
     """
+    extra_money = _q(getattr(order, 'extra_money', 0) or 0)
     offer_subtotal = _custom_request_offer_subtotal(order)
     if offer_subtotal is not None:
         car_count = _order_car_count(order)
@@ -88,9 +89,10 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
         else:
             mode = 'amount'
             discount_applied = _q(min(raw, subtotal))
-        total = _q(max(subtotal - discount_applied, Decimal('0')))
+        total = _q(max(subtotal - discount_applied + extra_money, Decimal('0')))
         return {
             'subtotal': subtotal,
+            'extra_money': extra_money,
             'discount_raw': raw,
             'discount_mode': mode,
             'discount_applied': discount_applied,
@@ -147,14 +149,18 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
         item = os_row.master_service_item
         if not item:
             continue
+        svc_count = int(getattr(os_row, 'count', 1) or 1)
+        if svc_count < 1:
+            svc_count = 1
         base_p = _q(item.price or 0)
-        line_base_gross = _q(base_p * car_count)
+        line_base_gross = _q(base_p * car_count * svc_count)
         base_subtotal += line_base_gross
         rows.append(
             {
                 'os': os_row,
                 'base_unit_price_per_car': base_p,
                 'car_count': car_count,
+                'service_count': svc_count,
                 'line_base_gross': line_base_gross,
             }
         )
@@ -182,7 +188,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
         mode = 'amount'
         discount_applied = _q(min(raw, subtotal))
 
-    total = _q(max(subtotal - discount_applied, Decimal('0')))
+    total = _q(max(subtotal - discount_applied + extra_money, Decimal('0')))
 
     lines_out: list[dict[str, Any]] = []
     n = len(rows)
@@ -202,6 +208,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
                     'base_unit_price': base_u,
                     'emergency_coefficient': _q(coef),
                     'car_count': r.get('car_count', car_count),
+                    'service_count': r.get('service_count', 1),
                     'discount_allocated': Decimal('0'),
                     'line_total': lg,
                 }
@@ -229,6 +236,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
                     'base_unit_price': base_u,
                     'emergency_coefficient': _q(coef),
                     'car_count': r.get('car_count', car_count),
+                    'service_count': r.get('service_count', 1),
                     'discount_allocated': ld,
                     'line_total': lt,
                 }
@@ -238,6 +246,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
     return {
         'base_subtotal': base_subtotal,
         'subtotal': subtotal,
+        'extra_money': extra_money,
         'discount_raw': raw,
         'discount_mode': mode,
         'discount_applied': discount_applied,

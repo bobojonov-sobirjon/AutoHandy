@@ -144,6 +144,7 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
     discount_mode = serializers.SerializerMethodField()
     subtotal = serializers.SerializerMethodField()
     discount_applied = serializers.SerializerMethodField()
+    extra_money = serializers.SerializerMethodField()
     total = serializers.SerializerMethodField()
     car_count = serializers.SerializerMethodField()
     emergency_pricing = serializers.SerializerMethodField()
@@ -155,6 +156,7 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
             'discount_mode',
             'subtotal',
             'discount_applied',
+            'extra_money',
             'total',
             'car_count',
             'emergency_pricing',
@@ -168,6 +170,9 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
 
     def get_discount_applied(self, obj):
         return format(get_cached_order_pricing(obj, self.context)['discount_applied'], 'f')
+
+    def get_extra_money(self, obj):
+        return format(get_cached_order_pricing(obj, self.context).get('extra_money', Decimal('0')), 'f')
 
     def get_total(self, obj):
         return format(get_cached_order_pricing(obj, self.context)['total'], 'f')
@@ -462,11 +467,13 @@ class OrderSerializer(serializers.ModelSerializer):
             line = master_service_item_line_dict(item, request)
             line['order_service_id'] = os_row.id
             line['added_at'] = os_row.created_at
+            line['count'] = int(getattr(os_row, 'count', 1) or 1)
             meta = br['lines_by_order_service_id'].get(os_row.id)
             if meta:
                 line['discount_allocated'] = format(meta['discount_allocated'], 'f')
                 line['line_total'] = format(meta['line_total'], 'f')
                 line['car_count'] = meta.get('car_count', br.get('car_count', 1))
+                line['count'] = int(meta.get('service_count', line.get('count', 1)) or 1)
                 # Emergency: expose base/coefficient/final (unit) prices.
                 base_u = meta.get('base_unit_price')
                 if base_u is not None:
@@ -860,6 +867,11 @@ class CustomRequestCreateSerializer(serializers.Serializer):
         allow_null=True,
         help_text='Preferred service date for this custom request (YYYY-MM-DD).',
     )
+    preferred_time_start = LenientTimeField(
+        required=False,
+        allow_null=True,
+        help_text='Preferred time start for this custom request (HH:MM). Optional; send together with preferred_date.',
+    )
     car_list = serializers.ListField(
         child=serializers.IntegerField(),
         required=False,
@@ -908,6 +920,12 @@ class CustomRequestCreateSerializer(serializers.Serializer):
                 'Custom request is not configured. Add a main by_order category with '
                 'is_custom_request_entry in the admin.'
             )
+        pd = attrs.get('preferred_date')
+        ps = attrs.get('preferred_time_start')
+        if (pd is None) ^ (ps is None):
+            raise serializers.ValidationError(
+                'preferred_date and preferred_time_start must both be sent together, or omit both.'
+            )
         return attrs
 
     def create(self, validated_data):
@@ -916,6 +934,7 @@ class CustomRequestCreateSerializer(serializers.Serializer):
         user = self.context['request'].user
         car_list = validated_data.pop('car_list', [])
         pd = validated_data.pop('preferred_date', None)
+        ps = validated_data.pop('preferred_time_start', None)
         cat = get_custom_request_catalog_category()
         order = Order.objects.create(
             user=user,
@@ -930,6 +949,7 @@ class CustomRequestCreateSerializer(serializers.Serializer):
             parts_purchase_required=validated_data.get('parts_purchase_required', False),
             parts_purchase_required_json=validated_data.get('parts_purchase_required_json', []),
             preferred_date=pd,
+            preferred_time_start=ps,
         )
         if car_list:
             order.car.set(list(dict.fromkeys(car_list)))
@@ -1081,7 +1101,7 @@ class OrderServiceSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OrderService
-        fields = ['id', 'order', 'master_service_item', 'service_details', 'created_at']
+        fields = ['id', 'order', 'master_service_item', 'count', 'service_details', 'created_at']
         read_only_fields = ['id', 'created_at']
 
     def get_service_details(self, obj):
@@ -1148,6 +1168,18 @@ class AddMasterToOrderSerializer(serializers.Serializer):
         except Order.DoesNotExist:
             raise serializers.ValidationError(f'Order with ID {value} not found')
         return value
+
+
+class OrderServiceCountPatchSerializer(serializers.Serializer):
+    """Set quantity for one OrderService row (per service item)."""
+
+    count = serializers.IntegerField(min_value=1)
+
+
+class OrderExtraMoneyPatchSerializer(serializers.Serializer):
+    """Increment order.extra_money by given amount."""
+
+    extra_money = serializers.DecimalField(max_digits=12, decimal_places=2)
 
     def validate_master_id(self, value):
         try:

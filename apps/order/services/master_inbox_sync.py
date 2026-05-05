@@ -28,11 +28,25 @@ def pending_custom_request_order_ids_for_master(master: Master, *, now=None) -> 
             longitude__isnull=False,
         )
         .filter(Q(expiration_time__isnull=True) | Q(expiration_time__gt=now))
-        .only('id', 'latitude', 'longitude')
+        .only('id', 'latitude', 'longitude', 'preferred_date', 'preferred_time_start')
     )
     out: list[int] = []
     for order in qs.iterator(chunk_size=200):
         if master_within_custom_request_radius(master, float(order.latitude), float(order.longitude)):
+            pd = getattr(order, 'preferred_date', None)
+            ps = getattr(order, 'preferred_time_start', None)
+            if pd is not None and ps is not None:
+                try:
+                    from apps.order.services.standard_booking_availability import preferred_slot_blocked_message
+
+                    if preferred_slot_blocked_message(
+                        master_id=master.id,
+                        preferred_date=pd,
+                        preferred_time_start=ps,
+                    ):
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
             out.append(order.pk)
     return out
 
