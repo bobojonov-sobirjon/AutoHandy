@@ -15,6 +15,8 @@ from apps.order.models import (
     ReviewTag,
     UserRating,
     LocationSource,
+    OrderExtraMoneyRequest,
+    ExtraMoneyRequestStatus,
 )
 from apps.car.models import Car
 from apps.categories.models import Category
@@ -1180,6 +1182,127 @@ class OrderExtraMoneyPatchSerializer(serializers.Serializer):
     """Increment order.extra_money by given amount."""
 
     extra_money = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+class OrderExtraMoneyRequestCreateSerializer(serializers.Serializer):
+    """Master creates an extra money request (pending client approval)."""
+
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
+    comment = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class OrderExtraMoneyRequestDecisionSerializer(serializers.Serializer):
+    """Client approves/rejects a request. Reject requires comment."""
+
+    comment = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class OrderExtraMoneyRequestSerializer(serializers.ModelSerializer):
+    order_id = serializers.IntegerField(source='order.id', read_only=True)
+    master_id = serializers.IntegerField(source='master.id', read_only=True)
+    master_user_id = serializers.IntegerField(source='master.user_id', read_only=True)
+    master = serializers.SerializerMethodField()
+    order = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OrderExtraMoneyRequest
+        fields = [
+            'id',
+            'order_id',
+            'master_id',
+            'master_user_id',
+            'master',
+            'order',
+            'amount',
+            'master_comment',
+            'status',
+            'client_comment',
+            'decided_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_master(self, obj):
+        m = getattr(obj, 'master', None)
+        if not m:
+            return None
+        u = getattr(m, 'user', None)
+        full_name = None
+        avatar = None
+        if u is not None:
+            try:
+                full_name = u.get_full_name() or getattr(u, 'email', None) or getattr(u, 'phone_number', None)
+            except Exception:  # noqa: BLE001
+                full_name = getattr(u, 'email', None) or getattr(u, 'phone_number', None)
+            avatar = _media_url(self.context.get('request') if isinstance(self.context, dict) else None, getattr(u, 'avatar', None))
+        return {
+            'id': getattr(m, 'id', None),
+            'user_id': getattr(m, 'user_id', None),
+            'full_name': full_name,
+            'avatar': avatar,
+        }
+
+    def get_order(self, obj):
+        o = getattr(obj, 'order', None)
+        if not o:
+            return None
+        return {
+            'id': getattr(o, 'id', None),
+            'order_number': getattr(o, 'order_number', None),
+            'order_type': getattr(o, 'order_type', None),
+            'status': getattr(o, 'status', None),
+        }
+
+
+class EmergencyPriceEstimateRequestSerializer(serializers.Serializer):
+    """
+    Estimate SOS (emergency) price before order creation.
+    Client sends GPS + selected service categories.
+    """
+
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    address = serializers.CharField(required=False, allow_blank=True, default='')
+    category_list = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=True,
+        allow_empty=False,
+        help_text='List of by_order category IDs selected by the client',
+    )
+    radius_miles = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        max_value=200,
+        default=10,
+        help_text='Search radius around client location (miles). Default 10.',
+    )
+
+
+class EmergencyPriceEstimateResponseSerializer(serializers.Serializer):
+    """
+    Estimated price range (avg/min/max) from nearby masters' configured prices,
+    plus emergency coefficient (day/night) and the estimated emergency totals.
+    """
+
+    radius_miles = serializers.IntegerField()
+    master_count = serializers.IntegerField()
+    matched_master_count = serializers.IntegerField()
+    category_count = serializers.IntegerField()
+
+    coefficient = serializers.CharField()
+    time_bucket = serializers.CharField(allow_null=True)
+    time_zone = serializers.CharField(allow_null=True)
+
+    base_min = serializers.CharField(allow_null=True)
+    base_avg = serializers.CharField(allow_null=True)
+    base_max = serializers.CharField(allow_null=True)
+
+    emergency_min = serializers.CharField(allow_null=True)
+    emergency_avg = serializers.CharField(allow_null=True)
+    emergency_max = serializers.CharField(allow_null=True)
+
+    note = serializers.CharField(allow_blank=True, required=False, default='')
 
     def validate_master_id(self, value):
         try:

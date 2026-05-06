@@ -354,6 +354,61 @@ class UserDeviceMeView(APIView):
         )
 
 
+class TestPushMeView(APIView):
+    """
+    Debug endpoint: send a test push to request.user registered devices.
+    Useful to distinguish backend delivery vs phone/channel issues.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Send test push to current user",
+        description=(
+            "Sends an FCM notification to the device tokens registered via POST /api/auth/device/. "
+            "This is a debug tool for verifying push delivery on the phone."
+        ),
+        tags=['User Device'],
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'firebase_kind': {
+                        'type': 'string',
+                        'enum': ['user', 'master'],
+                        'example': 'master',
+                        'description': 'Which Firebase project/app to use.',
+                    },
+                    'title': {'type': 'string', 'example': 'Test push'},
+                    'body': {'type': 'string', 'example': 'Hello from backend'},
+                },
+            }
+        },
+        responses={200: {'description': 'OK'}},
+    )
+    def post(self, request):
+        firebase_kind = str((request.data or {}).get('firebase_kind') or '').strip().lower() or 'user'
+        if firebase_kind not in ('user', 'master'):
+            return Response({'error': 'firebase_kind must be "user" or "master".'}, status=status.HTTP_400_BAD_REQUEST)
+        title = str((request.data or {}).get('title') or 'Test push')
+        body = str((request.data or {}).get('body') or 'Hello from AutoHandy backend')
+
+        try:
+            from apps.order.services.notifications import send_fcm_to_user_devices
+
+            send_fcm_to_user_devices(
+                user_id=request.user.id,
+                firebase_kind=firebase_kind,
+                title=title,
+                body=body,
+                data={'kind': 'test_push', 'user_id': str(request.user.id)},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({'ok': True, 'firebase_kind': firebase_kind, 'user_id': request.user.id}, status=status.HTTP_200_OK)
+
+
 class SMSServiceStatusView(APIView):
     """SMS service status (Twilio primary)."""
     permission_classes = [AllowAny]

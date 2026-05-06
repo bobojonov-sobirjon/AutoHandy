@@ -363,6 +363,82 @@ class Order(models.Model):
         return False
 
 
+class ExtraMoneyRequestStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    APPROVED = 'approved', 'Approved'
+    REJECTED = 'rejected', 'Rejected'
+
+
+class OrderExtraMoneyRequest(models.Model):
+    """
+    Extra money increment requested by assigned master, pending client approval.
+    This creates an audit trail and avoids silent price changes for the client.
+    """
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='extra_money_requests',
+        verbose_name='Order',
+    )
+    master = models.ForeignKey(
+        'master.Master',
+        on_delete=models.CASCADE,
+        related_name='extra_money_requests',
+        verbose_name='Master',
+    )
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        verbose_name='Amount',
+        help_text='Requested extra money increment (positive).',
+    )
+    master_comment = models.TextField(
+        blank=True,
+        default='',
+        verbose_name='Master comment',
+        help_text='Reason/description for the extra money request.',
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=ExtraMoneyRequestStatus.choices,
+        default=ExtraMoneyRequestStatus.PENDING,
+        db_index=True,
+        verbose_name='Status',
+    )
+    client_comment = models.TextField(
+        blank=True,
+        default='',
+        verbose_name='Client comment',
+        help_text='Required when rejecting (reason).',
+    )
+    decided_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Decided at',
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name='Created at',
+    )
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name='Updated at',
+    )
+
+    class Meta:
+        verbose_name = 'Order extra money request'
+        verbose_name_plural = 'Order extra money requests'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['order', 'status']),
+            models.Index(fields=['master', 'status']),
+        ]
+
+    def __str__(self):
+        return f'ExtraMoneyRequest#{self.pk} order={self.order_id} amount={self.amount} status={self.status}'
+
+
 class OrderImage(models.Model):
     """Photos attached to an order by the client (visible to master before accept)."""
 

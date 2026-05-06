@@ -18,6 +18,34 @@ from apps.order.services.offer_expiry import (
 
 
 @shared_task(ignore_result=True)
+def rebroadcast_sos_if_master_not_departed_task(order_id: int) -> bool:
+    """
+    ETA task: if SOS order is still ACCEPTED and master did not mark ON_THE_WAY in time,
+    unassign and re-broadcast to other masters.
+    """
+    try:
+        from apps.order.services.offer_expiry import rebroadcast_stale_accepted_sos_no_departure
+
+        return bool(rebroadcast_stale_accepted_sos_no_departure(now=timezone.now(), order_id=order_id))
+    except Exception:
+        return False
+
+
+@shared_task(ignore_result=True)
+def master_no_departure_action_task(order_id: int) -> bool:
+    """
+    ETA task: after accept, if master did not move order to ON_THE_WAY in time,
+    take action depending on order_type.
+    """
+    try:
+        from apps.order.services.offer_expiry import handle_accepted_no_departure_for_order
+
+        return bool(handle_accepted_no_departure_for_order(order_id=order_id, now=timezone.now()))
+    except Exception:
+        return False
+
+
+@shared_task(ignore_result=True)
 def push_sos_offer_to_masters_task(order_id: int, master_ids: list[int]) -> int:
     """
     Low-tier SOS fallback: deliver offers after a delay if the order is still pending.

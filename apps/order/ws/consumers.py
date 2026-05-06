@@ -191,3 +191,105 @@ class RiderCustomRequestConsumer(AsyncWebsocketConsumer):
                 cls=DjangoJSONEncoder,
             )
         )
+
+
+class OrderUserEventsConsumer(AsyncWebsocketConsumer):
+    """
+    Order-related realtime events for order owners (drivers/users).
+    ws/wss://host/ws/order/user/?token=<JWT>
+    """
+
+    async def connect(self):
+        user = self.scope.get('user')
+        if not user or not user.is_authenticated:
+            await self.close(code=4001)
+            return
+        self.group_name = f'order_user_{user.id}'
+        await self.channel_layer.group_add(self.group_name, self.channel_name)
+        await self.accept()
+        await self.send(
+            text_data=json.dumps({'type': 'connected', 'channel': 'order_user_events'})
+        )
+
+    async def disconnect(self, close_code):
+        if hasattr(self, 'group_name'):
+            await self.channel_layer.group_discard(self.group_name, self.channel_name)
+
+    async def receive(self, text_data=None, bytes_data=None):
+        # client-to-server messages not required; keep ping/pong only
+        if not text_data:
+            return
+        try:
+            data = json.loads(text_data)
+            if data.get('type') == 'ping':
+                await self.send(text_data=json.dumps({'type': 'pong'}))
+        except json.JSONDecodeError:
+            return
+
+    async def order_user_event(self, event):
+        await self.send(
+            text_data=json.dumps(
+                {
+                    'type': str(event.get('event_type') or 'event'),
+                    'data': event.get('payload') or {},
+                },
+                cls=DjangoJSONEncoder,
+            )
+        )
+
+
+class OrderMasterEventsConsumer(AsyncWebsocketConsumer):
+    """
+    Order-related realtime events for masters.
+    ws/wss://host/ws/order/master/?token=<JWT>
+    """
+
+    async def connect(self):
+        user = self.scope.get('user')
+        if not user or not user.is_authenticated:
+            await self.close(code=4001)
+            return
+        if not await self._user_in_master_role_group(user.id):
+            await self.close(code=4003)
+            return
+        self.group_name = f'order_master_{user.id}'
+        await self.channel_layer.group_add(self.group_name, self.channel_name)
+        await self.accept()
+        await self.send(
+            text_data=json.dumps({'type': 'connected', 'channel': 'order_master_events'})
+        )
+
+    async def disconnect(self, close_code):
+        if hasattr(self, 'group_name'):
+            await self.channel_layer.group_discard(self.group_name, self.channel_name)
+
+    async def receive(self, text_data=None, bytes_data=None):
+        if not text_data:
+            return
+        try:
+            data = json.loads(text_data)
+            if data.get('type') == 'ping':
+                await self.send(text_data=json.dumps({'type': 'pong'}))
+        except json.JSONDecodeError:
+            return
+
+    async def order_master_event(self, event):
+        await self.send(
+            text_data=json.dumps(
+                {
+                    'type': str(event.get('event_type') or 'event'),
+                    'data': event.get('payload') or {},
+                },
+                cls=DjangoJSONEncoder,
+            )
+        )
+
+    @database_sync_to_async
+    def _user_in_master_role_group(self, user_id: int) -> bool:
+        from django.contrib.auth import get_user_model
+
+        return (
+            get_user_model()
+            .objects.filter(pk=user_id, groups__name='Master')
+            .exists()
+        )

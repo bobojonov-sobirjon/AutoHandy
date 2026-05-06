@@ -31,6 +31,8 @@ from apps.order.services.status_workflow import (
 from apps.order.services.celery_schedule import (
     schedule_client_penalty_free_unlock,
     schedule_master_no_show_autocancel,
+    schedule_sos_master_no_departure_rebroadcast,
+    schedule_master_no_departure_action,
 )
 from apps.order.services.master_inbox_sync import (
     pending_assigned_standard_order_ids_for_master,
@@ -58,6 +60,8 @@ from apps.order.models import (
     Order,
     OrderStatus,
     OrderType,
+    OrderExtraMoneyRequest,
+    ExtraMoneyRequestStatus,
     OrderWorkCompletionImage,
     Rating,
     OrderService,
@@ -87,6 +91,11 @@ from apps.order.api.serializers import (
     ReviewCreateSerializer,
     CancelOrderRequestSerializer,
     OrderExtraMoneyPatchSerializer,
+    OrderExtraMoneyRequestCreateSerializer,
+    OrderExtraMoneyRequestDecisionSerializer,
+    OrderExtraMoneyRequestSerializer,
+    EmergencyPriceEstimateRequestSerializer,
+    EmergencyPriceEstimateResponseSerializer,
     OrderServiceCountPatchSerializer,
 )
 from apps.order.services.order_pricing import estimate_cancellation_penalty_amount, order_payable_total_str
@@ -3048,6 +3057,16 @@ class AcceptOrderView(APIView):
 
             order.refresh_from_db()
             serializer = OrderSerializer(order, context={'request': request})
+            # If the master does not depart ("on the way") in time, take action (by order type).
+            try:
+                if order.accepted_at and not order.on_the_way_at:
+                    # Generic watchdog (standard + custom-request + SOS).
+                    schedule_master_no_departure_action(order.pk, order.accepted_at)
+                    # Keep SOS-specific task too (legacy/backward compatibility).
+                    if order.order_type == OrderType.SOS:
+                        schedule_sos_master_no_departure_rebroadcast(order.pk, order.accepted_at)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 from apps.order.services.notifications import notify_user_order_event
 
@@ -4395,6 +4414,424 @@ class OrderExtraMoneyPatchView(APIView):
         order.extra_money = (order.extra_money or 0) + add_amt
         order.save(update_fields=['extra_money', 'updated_at'])
         return Response(OrderSerializer(order, context={'request': request}).data, status=status.HTTP_200_OK)
+
+
+class OrderExtraMoneyRequestCreateView(APIView):
+    """
+    Master creates an extra money request (pending). Client must approve/reject.
+    """
+
+    permission_classes = [IsAuthenticated, IsOrderOwnerOrMaster]
+
+    @extend_schema(
+        summary='Create extra money request (requires client approval)',
+        description='Creates a pending extra money request; does NOT change order.extra_money until approved.',
+        tags=[STAG_ORDER_DETAILS],
+        parameters=[
+            OpenApiParameter(
+                name='order_id',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.PATH,
+                description='Order ID',
+                required=True,
+            ),
+        ],
+        request=OrderExtraMoneyRequestCreateSerializer,
+        responses={201: OrderExtraMoneyRequestSerializer, 400: {'description': 'Validation error'}, 403: {'description': 'Forbidden'}, 404: {'description': 'Not found'}},
+    )
+    def post(self, request, order_id: int):
+        ser = OrderExtraMoneyRequestCreateSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            order = Order.objects.select_related('master').only('id', 'user_id', 'master_id').get(pk=order_id)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        self.check_object_permissions(request, order)
+
+        master = request.user.master_profiles.first() if hasattr(request.user, 'master_profiles') else None
+        if not master or order.master_id != master.id:
+            return Response({'error': 'Only the assigned master can request extra money'}, status=status.HTTP_403_FORBIDDEN)
+
+        req = OrderExtraMoneyRequest.objects.create(
+            order=order,
+            master=master,
+            amount=ser.validated_data['amount'],
+            master_comment=(ser.validated_data.get('comment') or '').strip(),
+            status=ExtraMoneyRequestStatus.PENDING,
+        )
+
+        payload = OrderExtraMoneyRequestSerializer(req).data
+
+        # Realtime + push to client (best-effort)
+        try:
+            from apps.order.services.notifications import notify_user_order_event, push_order_event_to_user_websocket
+
+            push_order_event_to_user_websocket(
+                user_id=order.user_id,
+                event_type='extra_money_request',
+                payload=payload,
+            )
+            notify_user_order_event(
+                order,
+                title='Extra money requested',
+                body=f'The master requested +{req.amount} extra. Approve or reject in the app.',
+                kind='extra_money_request',
+                extra_data={
+                    'request_id': str(req.id),
+                    'amount': str(req.amount),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class OrderExtraMoneyRequestApproveView(APIView):
+    """Client approves pending extra money request."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Approve extra money request',
+        tags=[STAG_ORDER_DETAILS],
+        request=OrderExtraMoneyRequestDecisionSerializer,
+        responses={200: OrderExtraMoneyRequestSerializer, 400: {'description': 'Validation error'}, 403: {'description': 'Forbidden'}, 404: {'description': 'Not found'}},
+    )
+    def post(self, request, request_id: int):
+        ser = OrderExtraMoneyRequestDecisionSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        from django.db import transaction
+        from django.utils import timezone
+
+        try:
+            with transaction.atomic():
+                req = (
+                    OrderExtraMoneyRequest.objects.select_for_update()
+                    .select_related('order', 'master')
+                    .get(pk=request_id)
+                )
+                if req.order.user_id != request.user.id:
+                    return Response({'error': 'Only the order owner can approve'}, status=status.HTTP_403_FORBIDDEN)
+                if req.status != ExtraMoneyRequestStatus.PENDING:
+                    return Response({'error': 'Request is not pending'}, status=status.HTTP_400_BAD_REQUEST)
+
+                # Apply increment
+                o = req.order
+                o.extra_money = (o.extra_money or 0) + (req.amount or 0)
+                o.save(update_fields=['extra_money', 'updated_at'])
+
+                req.status = ExtraMoneyRequestStatus.APPROVED
+                req.client_comment = (ser.validated_data.get('comment') or '').strip()
+                req.decided_at = timezone.now()
+                req.save(update_fields=['status', 'client_comment', 'decided_at', 'updated_at'])
+        except OrderExtraMoneyRequest.DoesNotExist:
+            return Response({'error': 'Request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        payload = OrderExtraMoneyRequestSerializer(req).data
+
+        # Notify master (best-effort)
+        try:
+            from apps.order.services.notifications import notify_master_order_event, push_order_event_to_master_websocket
+
+            push_order_event_to_master_websocket(
+                master_user_id=req.master.user_id,
+                event_type='extra_money_decision',
+                payload=payload,
+            )
+            notify_master_order_event(
+                master_user_id=req.master.user_id,
+                order_id=req.order_id,
+                title='Extra money approved',
+                body=f'Client approved +{req.amount} extra.',
+                kind='extra_money_approved',
+                extra_data={
+                    'request_id': str(req.id),
+                    'amount': str(req.amount),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class OrderExtraMoneyRequestRejectView(APIView):
+    """Client rejects pending extra money request. Reject comment is required."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Reject extra money request',
+        tags=[STAG_ORDER_DETAILS],
+        request=OrderExtraMoneyRequestDecisionSerializer,
+        responses={200: OrderExtraMoneyRequestSerializer, 400: {'description': 'Validation error'}, 403: {'description': 'Forbidden'}, 404: {'description': 'Not found'}},
+    )
+    def post(self, request, request_id: int):
+        ser = OrderExtraMoneyRequestDecisionSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        comment = (ser.validated_data.get('comment') or '').strip()
+        if not comment:
+            return Response({'comment': 'Comment is required when rejecting.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from django.db import transaction
+        from django.utils import timezone
+
+        try:
+            with transaction.atomic():
+                req = (
+                    OrderExtraMoneyRequest.objects.select_for_update()
+                    .select_related('order', 'master')
+                    .get(pk=request_id)
+                )
+                if req.order.user_id != request.user.id:
+                    return Response({'error': 'Only the order owner can reject'}, status=status.HTTP_403_FORBIDDEN)
+                if req.status != ExtraMoneyRequestStatus.PENDING:
+                    return Response({'error': 'Request is not pending'}, status=status.HTTP_400_BAD_REQUEST)
+
+                req.status = ExtraMoneyRequestStatus.REJECTED
+                req.client_comment = comment
+                req.decided_at = timezone.now()
+                req.save(update_fields=['status', 'client_comment', 'decided_at', 'updated_at'])
+        except OrderExtraMoneyRequest.DoesNotExist:
+            return Response({'error': 'Request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        payload = OrderExtraMoneyRequestSerializer(req).data
+
+        # Notify master (best-effort)
+        try:
+            from apps.order.services.notifications import notify_master_order_event, push_order_event_to_master_websocket
+
+            push_order_event_to_master_websocket(
+                master_user_id=req.master.user_id,
+                event_type='extra_money_decision',
+                payload=payload,
+            )
+            notify_master_order_event(
+                master_user_id=req.master.user_id,
+                order_id=req.order_id,
+                title='Extra money rejected',
+                body=f'Client rejected +{req.amount} extra: {comment[:140]}',
+                kind='extra_money_rejected',
+                extra_data={
+                    'request_id': str(req.id),
+                    'amount': str(req.amount),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class PendingExtraMoneyRequestsForClientView(APIView):
+    """
+    Client fetches all pending extra money requests across orders.
+    Useful when WS was disconnected; only pending items are returned.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='List pending extra money requests (client)',
+        tags=[STAG_ORDER_DETAILS],
+        responses={200: OrderExtraMoneyRequestSerializer(many=True)},
+    )
+    def get(self, request):
+        qs = (
+            OrderExtraMoneyRequest.objects.filter(
+                order__user_id=request.user.id,
+                status=ExtraMoneyRequestStatus.PENDING,
+            )
+            .select_related('order', 'master')
+            .order_by('-created_at')
+        )
+        return Response(OrderExtraMoneyRequestSerializer(qs, many=True).data, status=status.HTTP_200_OK)
+
+
+class EmergencyPriceEstimateView(APIView):
+    """
+    Estimate SOS emergency price BEFORE order creation based on nearby masters' configured prices.
+
+    Idea:
+    - Find masters within radius (default 10 miles) from (lat,lon)
+    - Keep only masters that have priced services for ALL requested by_order categories
+    - For each matched master: subtotal = sum(prices for requested categories)
+    - Then compute min/avg/max across masters
+    - Apply emergency coefficient (day/night) using same config as order_pricing
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Estimate emergency (SOS) price before creating order',
+        description=(
+            'Returns an estimated price range using nearby masters service prices and the SOS '
+            'day/night coefficient. This is only an estimate; the assigned master may differ.'
+        ),
+        tags=[STAG_ORDER_DRIVER_CREATE],
+        request=EmergencyPriceEstimateRequestSerializer,
+        responses={200: EmergencyPriceEstimateResponseSerializer},
+    )
+    def post(self, request):
+        from decimal import Decimal, ROUND_HALF_UP
+        from django.conf import settings
+        from django.utils import timezone
+
+        ser = EmergencyPriceEstimateRequestSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        lat = float(ser.validated_data['latitude'])
+        lon = float(ser.validated_data['longitude'])
+        radius_miles = int(ser.validated_data.get('radius_miles') or 10)
+        category_ids = [int(x) for x in (ser.validated_data.get('category_list') or [])]
+
+        # Determine SOS coefficient (same logic as compute_order_price_breakdown)
+        try:
+            from zoneinfo import ZoneInfo
+        except Exception:
+            ZoneInfo = None  # type: ignore[assignment]
+
+        tz_name = str(getattr(settings, 'EMERGENCY_TIME_ZONE', 'America/Los_Angeles') or 'America/Los_Angeles')
+        coef_day = Decimal(str(getattr(settings, 'EMERGENCY_DAY_MULTIPLIER', 1.3)))
+        coef_night = Decimal(str(getattr(settings, 'EMERGENCY_NIGHT_MULTIPLIER', 1.6)))
+        dt = timezone.now()
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.get_current_timezone())
+        local_dt = dt
+        tz_out = None
+        if ZoneInfo is not None:
+            try:
+                local_dt = dt.astimezone(ZoneInfo(tz_name))
+                tz_out = tz_name
+            except Exception:
+                tz_out = None
+        hhmm = (local_dt.hour, local_dt.minute)
+        is_day = (hhmm >= (6, 0)) and (hhmm < (23, 0))
+        time_bucket = 'day' if is_day else 'night'
+        coef = coef_day if is_day else coef_night
+
+        # Nearby masters within radius
+        from apps.master.models import Master, MasterServiceItems
+        from apps.master.services.geo import haversine_distance_km, MILES_TO_KM
+
+        max_km = float(radius_miles) * float(MILES_TO_KM)
+        masters = (
+            Master.objects.filter(latitude__isnull=False, longitude__isnull=False)
+            .only('id', 'user_id', 'latitude', 'longitude', 'service_area_radius_miles')
+        )
+
+        nearby_ids: list[int] = []
+        for m in masters.iterator(chunk_size=200):
+            wlat, wlon = m.get_work_location_for_distance()
+            if wlat is None or wlon is None:
+                continue
+            dist_km = haversine_distance_km(lat, lon, wlat, wlon)
+            if dist_km <= max_km:
+                nearby_ids.append(int(m.id))
+
+        master_count = len(nearby_ids)
+        if master_count == 0:
+            out = {
+                'radius_miles': radius_miles,
+                'master_count': 0,
+                'matched_master_count': 0,
+                'category_count': len(category_ids),
+                'coefficient': format(coef.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), 'f'),
+                'time_bucket': time_bucket,
+                'time_zone': tz_out,
+                'base_min': None,
+                'base_avg': None,
+                'base_max': None,
+                'emergency_min': None,
+                'emergency_avg': None,
+                'emergency_max': None,
+                'note': 'No masters found within the radius for estimation.',
+            }
+            return Response(out, status=status.HTTP_200_OK)
+
+        # Collect per-master totals, requiring all categories present.
+        # Fetch all items in one query.
+        items = (
+            MasterServiceItems.objects.filter(master_service__master_id__in=nearby_ids, category_id__in=category_ids)
+            .values_list('master_service__master_id', 'category_id', 'price')
+        )
+        price_map: dict[int, dict[int, Decimal]] = {}
+        for mid, cid, price in items:
+            mid_i = int(mid)
+            cid_i = int(cid)
+            price_map.setdefault(mid_i, {})[cid_i] = Decimal(str(price or 0))
+
+        per_master: list[Decimal] = []
+        required = set(category_ids)
+        for mid in nearby_ids:
+            got = price_map.get(int(mid)) or {}
+            if required and not required.issubset(set(got.keys())):
+                continue
+            s = sum((got.get(cid, Decimal('0')) for cid in category_ids), Decimal('0'))
+            if s > 0:
+                per_master.append(s)
+
+        matched = len(per_master)
+        if matched == 0:
+            out = {
+                'radius_miles': radius_miles,
+                'master_count': master_count,
+                'matched_master_count': 0,
+                'category_count': len(category_ids),
+                'coefficient': format(coef.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), 'f'),
+                'time_bucket': time_bucket,
+                'time_zone': tz_out,
+                'base_min': None,
+                'base_avg': None,
+                'base_max': None,
+                'emergency_min': None,
+                'emergency_avg': None,
+                'emergency_max': None,
+                'note': 'No nearby masters have prices for all selected categories.',
+            }
+            return Response(out, status=status.HTTP_200_OK)
+
+        per_master.sort()
+        base_min = per_master[0]
+        base_max = per_master[-1]
+        base_avg = (sum(per_master, Decimal('0')) / Decimal(str(matched))).quantize(
+            Decimal('0.01'), rounding=ROUND_HALF_UP
+        )
+
+        def _fmt(x: Decimal | None) -> str | None:
+            if x is None:
+                return None
+            return format(Decimal(str(x)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), 'f')
+
+        def _mul(x: Decimal) -> Decimal:
+            return (x * coef).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        out = {
+            'radius_miles': radius_miles,
+            'master_count': master_count,
+            'matched_master_count': matched,
+            'category_count': len(category_ids),
+            'coefficient': _fmt(coef),
+            'time_bucket': time_bucket,
+            'time_zone': tz_out,
+            'base_min': _fmt(base_min),
+            'base_avg': _fmt(base_avg),
+            'base_max': _fmt(base_max),
+            'emergency_min': _fmt(_mul(base_min)),
+            'emergency_avg': _fmt(_mul(base_avg)),
+            'emergency_max': _fmt(_mul(base_max)),
+            'note': 'Estimated from nearby masters; final price may differ based on assigned master and services.',
+        }
+        return Response(out, status=status.HTTP_200_OK)
 
 
 class MasterServicesListView(APIView):

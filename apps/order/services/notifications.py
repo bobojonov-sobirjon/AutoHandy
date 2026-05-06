@@ -1020,3 +1020,39 @@ def notify_master_order_event(
         body=body_out,
         data=data,
     )
+
+
+def push_order_event_to_user_websocket(*, user_id: int, event_type: str, payload: dict) -> None:
+    """
+    Generic order-related real-time event to the order owner's websocket group.
+    WS connect: ws://.../ws/order/user/?token=<JWT>
+    """
+    try:
+        layer = get_channel_layer()
+        if not layer:
+            return
+        group = f'order_user_{int(user_id)}'
+        async_to_sync(layer.group_send)(
+            group,
+            {'type': 'order_user_event', 'event_type': str(event_type), 'payload': _ws_json_safe(payload)},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('push_order_event_to_user_websocket failed: %s', exc)
+
+
+def push_order_event_to_master_websocket(*, master_user_id: int, event_type: str, payload: dict) -> None:
+    """
+    Generic order-related real-time event to the assigned master's websocket group.
+    WS connect: ws://.../ws/order/master/?token=<JWT>
+    """
+    try:
+        layer = get_channel_layer()
+        if not layer:
+            return
+        group = f'order_master_{int(master_user_id)}'
+        async_to_sync(layer.group_send)(
+            group,
+            {'type': 'order_master_event', 'event_type': str(event_type), 'payload': _ws_json_safe(payload)},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('push_order_event_to_master_websocket failed: %s', exc)

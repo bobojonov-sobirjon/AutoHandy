@@ -392,6 +392,11 @@ SMSC_API_URL = 'https://smsc.ru/sys/send.php'
 
 # Master must accept/decline assigned order within this window (minutes); then auto-decline.
 MASTER_OFFER_RESPONSE_MINUTES = int(os.environ.get('MASTER_OFFER_RESPONSE_MINUTES', '15'))
+# After a master accepts an order, they must mark "on the way" within this window (minutes).
+# If they don't, the system takes action:
+# - SOS/custom-request: unassign + re-broadcast to other masters
+# - Standard: auto-cancel (client can choose another master)
+MASTER_NO_DEPARTURE_MINUTES = int(os.environ.get('MASTER_NO_DEPARTURE_MINUTES', '30'))
 # Legacy sequential SOS ring (unused for broadcast); kept for old clients reading payload fields.
 SOS_OFFER_SECONDS_PER_MASTER = int(os.environ.get('SOS_OFFER_SECONDS_PER_MASTER', '420'))
 # SOS broadcast: all in-zone masters in queue get the offer; shared countdown until auto-reject.

@@ -13,6 +13,7 @@ from .views import (
     AppVersionView,
     AppVersionDetailView,
     UserDeviceMeView,
+    TestPushMeView,
 )
 
 urlpatterns = [
@@ -27,6 +28,7 @@ urlpatterns = [
 
     # Device registration (push notifications)
     path('device/', UserDeviceMeView.as_view(), name='user_device_me'),
+    path('device/test-push/', TestPushMeView.as_view(), name='test_push_me'),
     
     # SMS servis statusini tekshirish
     path('sms-status/', SMSServiceStatusView.as_view(), name='sms_status'),

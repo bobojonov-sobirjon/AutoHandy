@@ -45,3 +45,33 @@ def schedule_master_no_show_autocancel(order_id: int, arrival_deadline_at: datet
         auto_cancel_master_no_show_task.apply_async(args=[order_id], eta=arrival_deadline_at)
     except Exception:
         pass
+
+
+def schedule_sos_master_no_departure_rebroadcast(order_id: int, accepted_at: datetime) -> None:
+    """
+    If a master accepts an SOS order but does not start the trip ("on_the_way") within N minutes,
+    the order should be re-broadcast to other masters.
+    """
+    minutes = int(getattr(settings, 'SOS_MASTER_NO_DEPARTURE_MINUTES', 30))
+    eta = accepted_at + timedelta(minutes=minutes)
+    try:
+        from apps.order.tasks import rebroadcast_sos_if_master_not_departed_task
+
+        rebroadcast_sos_if_master_not_departed_task.apply_async(args=[order_id], eta=eta)
+    except Exception:
+        pass
+
+
+def schedule_master_no_departure_action(order_id: int, accepted_at: datetime) -> None:
+    """
+    Generic "no departure" watchdog after accept (all order types):
+    if the master does not mark ON_THE_WAY within N minutes, the system takes action.
+    """
+    minutes = int(getattr(settings, 'MASTER_NO_DEPARTURE_MINUTES', 30))
+    eta = accepted_at + timedelta(minutes=minutes)
+    try:
+        from apps.order.tasks import master_no_departure_action_task
+
+        master_no_departure_action_task.apply_async(args=[order_id], eta=eta)
+    except Exception:
+        pass

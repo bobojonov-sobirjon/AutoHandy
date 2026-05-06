@@ -8,6 +8,11 @@ urlpatterns = [
     path('sos/', views.SOSOrderCreateView.as_view(), name='sos-order-create'),
     path('custom-request/', views.CustomRequestCreateView.as_view(), name='custom-request-create'),
     path(
+        'emergency/estimate-price/',
+        views.EmergencyPriceEstimateView.as_view(),
+        name='emergency-estimate-price',
+    ),
+    path(
         'custom-request/<int:order_id>/offers/',
         views.CustomRequestOfferListCreateView.as_view(),
         name='custom-request-offers',
@@ -28,6 +33,26 @@ urlpatterns = [
         '<int:order_id>/extra-money/',
         views.OrderExtraMoneyPatchView.as_view(),
         name='order-extra-money',
+    ),
+    path(
+        '<int:order_id>/extra-money/requests/',
+        views.OrderExtraMoneyRequestCreateView.as_view(),
+        name='order-extra-money-requests-create',
+    ),
+    path(
+        'extra-money/requests/<int:request_id>/approve/',
+        views.OrderExtraMoneyRequestApproveView.as_view(),
+        name='order-extra-money-requests-approve',
+    ),
+    path(
+        'extra-money/requests/<int:request_id>/reject/',
+        views.OrderExtraMoneyRequestRejectView.as_view(),
+        name='order-extra-money-requests-reject',
+    ),
+    path(
+        'extra-money/requests/pending/',
+        views.PendingExtraMoneyRequestsForClientView.as_view(),
+        name='order-extra-money-requests-pending',
     ),
     path('services-list/', views.MasterServicesListView.as_view(), name='master-services-list'),
     path('add-master/', views.AddMasterToOrderView.as_view(), name='add-master-to-order'),
