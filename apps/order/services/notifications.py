@@ -86,9 +86,16 @@ def _firebase_service_account_from_env(prefix: str) -> dict[str, str]:
     }
 
 
-def _get_firebase_app(kind: str):
-    if kind in _FIREBASE_APPS:
-        return _FIREBASE_APPS[kind]
+def _get_firebase_app(_kind: str):
+    """
+    Firebase Admin app init.
+
+    This backend is configured to use a single Firebase project/credential for *all* pushes
+    (both customer + provider apps). Therefore we keep a single cached app instance.
+    """
+    cache_key = 'default'
+    if cache_key in _FIREBASE_APPS:
+        return _FIREBASE_APPS[cache_key]
 
     try:
         import firebase_admin
@@ -97,23 +104,21 @@ def _get_firebase_app(kind: str):
         raise RuntimeError('firebase-admin is not installed') from exc
 
     # Project selection:
-    # - In production we may use a single Firebase project for both customer + provider apps.
-    # - This project currently uses FIREBASE_MASTER_* for both kinds to avoid token/project mismatch.
+    # - Use FIREBASE_MASTER_* for all pushes (single Firebase project).
     prefix = 'FIREBASE_MASTER_'
     sa = _firebase_service_account_from_env(prefix)
     if not sa.get('project_id') or not sa.get('private_key') or not sa.get('client_email'):
-        raise RuntimeError(f'Firebase env missing for kind={kind} (prefix {prefix})')
+        raise RuntimeError(f'Firebase env missing (prefix {prefix})')
 
     cred = credentials.Certificate(sa)
     logger.warning(
-        'FCM init app (kind=%s project_id=%s client_email=%s)',
-        kind,
+        'FCM init app (project_id=%s client_email=%s)',
         sa.get('project_id'),
         (sa.get('client_email') or '').split('@')[0] + '@…',
     )
-    _fcm_dbg(f'init app kind={kind} project_id={sa.get("project_id")}')
-    app = firebase_admin.initialize_app(cred, name=f'autohandy_{kind}')
-    _FIREBASE_APPS[kind] = app
+    _fcm_dbg(f'init app project_id={sa.get("project_id")}')
+    app = firebase_admin.initialize_app(cred, name='autohandy_default')
+    _FIREBASE_APPS[cache_key] = app
     return app
 
 
@@ -190,10 +195,27 @@ def send_fcm_to_user_devices(
     )
 
     payload_data = {str(k): str(v) for k, v in (data or {}).items()}
+    # Ensure devices wake promptly and play sound consistently (iOS + Android).
+    channel_id = str(getattr(settings, 'PUSH_ANDROID_CHANNEL_ID', '') or '').strip() or 'high_importance_channel'
     msg = messaging.MulticastMessage(
         tokens=tokens,
         notification=messaging.Notification(title=title, body=body),
         data=payload_data,
+        android=messaging.AndroidConfig(
+            priority='high',
+            notification=messaging.AndroidNotification(
+                sound='default',
+                channel_id=channel_id,
+            ),
+        ),
+        apns=messaging.APNSConfig(
+            headers={'apns-priority': '10'},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    sound='default',
+                )
+            ),
+        ),
     )
     try:
         # firebase-admin 7.x removed send_multicast in favor of send_each_for_multicast.

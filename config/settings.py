@@ -463,6 +463,10 @@ CELERY_BEAT_SCHEDULE = {
 # Push warnings before automatic deadlines (minutes).
 ORDER_DEADLINE_WARN_MINUTES = int(os.getenv('ORDER_DEADLINE_WARN_MINUTES', '3'))
 
+# Push notification defaults
+# Android: channel_id must exist in the app (Flutter creates it on startup).
+PUSH_ANDROID_CHANNEL_ID = os.getenv('PUSH_ANDROID_CHANNEL_ID', 'high_importance_channel')
+
 # WebSocket chat upload limit (base64 decoded bytes).
 CHAT_WS_MAX_UPLOAD_BYTES = int(os.getenv('CHAT_WS_MAX_UPLOAD_BYTES', str(5 * 1024 * 1024)))
 
