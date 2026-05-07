@@ -152,23 +152,14 @@ class Order(models.Model):
         verbose_name='Extra money',
         help_text='Additional charges added after service selection (e.g. extra work/parts).',
     )
-    average_min_price = models.DecimalField(
+    average_price = models.DecimalField(
         max_digits=12,
         decimal_places=2,
         null=True,
         blank=True,
         default=None,
-        verbose_name='Average min price',
-        help_text='Optional: average/min price estimate range for the order (shown to client).',
-    )
-    average_max_price = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        null=True,
-        blank=True,
-        default=None,
-        verbose_name='Average max price',
-        help_text='Optional: average/max price estimate range for the order (shown to client).',
+        verbose_name='Average price',
+        help_text='Optional: average price estimate for the order (shown to client).',
     )
     created_at = models.DateTimeField(
         auto_now_add=True,

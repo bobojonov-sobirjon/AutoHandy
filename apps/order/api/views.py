@@ -590,15 +590,10 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
                             {'vehicle_vin': '', 'part_name': '', 'is_address': True},
                         ],
                     },
-                    'average_min_price': {
+                    'average_price': {
                         'type': 'number',
-                        'description': 'Optional: average/min price estimate range for this order.',
-                        'example': 120000,
-                    },
-                    'average_max_price': {
-                        'type': 'number',
-                        'description': 'Optional: average/max price estimate range for this order.',
-                        'example': 220000,
+                        'description': 'Optional: average price estimate for this order.',
+                        'example': 170000,
                     },
                 },
             },
@@ -628,13 +623,9 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
                             '[{"vehicle_vin":"","part_name":"","is_address":true}]'
                         ),
                     },
-                    'average_min_price': {
+                    'average_price': {
                         'type': 'string',
-                        'description': 'Optional decimal as string, e.g. "120000.00".',
-                    },
-                    'average_max_price': {
-                        'type': 'string',
-                        'description': 'Optional decimal as string, e.g. "220000.00".',
+                        'description': 'Optional decimal as string, e.g. "170000.00".',
                     },
                     'images': {'type': 'array', 'items': {'type': 'string', 'format': 'binary'}},
                 },
@@ -784,15 +775,10 @@ Do NOT use for **planned work** (use `/api/order/standard/`).
                             {'vehicle_vin': '', 'part_name': '', 'is_address': False},
                         ],
                     },
-                    'average_min_price': {
+                    'average_price': {
                         'type': 'number',
-                        'description': 'Optional: average/min price estimate range for this order.',
-                        'example': 120000,
-                    },
-                    'average_max_price': {
-                        'type': 'number',
-                        'description': 'Optional: average/max price estimate range for this order.',
-                        'example': 220000,
+                        'description': 'Optional: average price estimate for this order.',
+                        'example': 170000,
                     },
                 },
             },
@@ -821,13 +807,9 @@ Do NOT use for **planned work** (use `/api/order/standard/`).
                             '[{"vehicle_vin":"","part_name":"","is_address":false}]'
                         ),
                     },
-                    'average_min_price': {
+                    'average_price': {
                         'type': 'string',
-                        'description': 'Optional decimal as string, e.g. "120000.00".',
-                    },
-                    'average_max_price': {
-                        'type': 'string',
-                        'description': 'Optional decimal as string, e.g. "220000.00".',
+                        'description': 'Optional decimal as string, e.g. "170000.00".',
                     },
                     'images': {'type': 'array', 'items': {'type': 'string', 'format': 'binary'}},
                 },
@@ -981,15 +963,10 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         },
                         'example': [{'vehicle_vin': '', 'part_name': '', 'is_address': True}],
                     },
-                    'average_min_price': {
+                    'average_price': {
                         'type': 'number',
-                        'description': 'Optional: average/min price estimate range for this order.',
-                        'example': 120000,
-                    },
-                    'average_max_price': {
-                        'type': 'number',
-                        'description': 'Optional: average/max price estimate range for this order.',
-                        'example': 220000,
+                        'description': 'Optional: average price estimate for this order.',
+                        'example': 170000,
                     },
                 },
             },
@@ -1036,13 +1013,9 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                             '[{"vehicle_vin":"","part_name":"","is_address":true}]'
                         ),
                     },
-                    'average_min_price': {
+                    'average_price': {
                         'type': 'string',
-                        'description': 'Optional decimal as string, e.g. "120000.00".',
-                    },
-                    'average_max_price': {
-                        'type': 'string',
-                        'description': 'Optional decimal as string, e.g. "220000.00".',
+                        'description': 'Optional decimal as string, e.g. "170000.00".',
                     },
                     'images': {
                         'type': 'array',
