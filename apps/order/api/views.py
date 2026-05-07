@@ -595,6 +595,11 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
                         'description': 'Optional: average price estimate for this order.',
                         'example': 170000,
                     },
+                    'average_service_name': {
+                        'type': 'string',
+                        'description': 'Optional: service name/label associated with average_price.',
+                        'example': 'Oil change',
+                    },
                 },
             },
             'multipart/form-data': {
@@ -626,6 +631,10 @@ Do NOT use for **emergencies** (use `/api/order/sos/`).
                     'average_price': {
                         'type': 'string',
                         'description': 'Optional decimal as string, e.g. "170000.00".',
+                    },
+                    'average_service_name': {
+                        'type': 'string',
+                        'description': 'Optional service name/label associated with average_price.',
                     },
                     'images': {'type': 'array', 'items': {'type': 'string', 'format': 'binary'}},
                 },
@@ -780,6 +789,11 @@ Do NOT use for **planned work** (use `/api/order/standard/`).
                         'description': 'Optional: average price estimate for this order.',
                         'example': 170000,
                     },
+                    'average_service_name': {
+                        'type': 'string',
+                        'description': 'Optional: service name/label associated with average_price.',
+                        'example': 'Tire change',
+                    },
                 },
             },
             'multipart/form-data': {
@@ -810,6 +824,10 @@ Do NOT use for **planned work** (use `/api/order/standard/`).
                     'average_price': {
                         'type': 'string',
                         'description': 'Optional decimal as string, e.g. "170000.00".',
+                    },
+                    'average_service_name': {
+                        'type': 'string',
+                        'description': 'Optional service name/label associated with average_price.',
                     },
                     'images': {'type': 'array', 'items': {'type': 'string', 'format': 'binary'}},
                 },
@@ -968,6 +986,11 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                         'description': 'Optional: average price estimate for this order.',
                         'example': 170000,
                     },
+                    'average_service_name': {
+                        'type': 'string',
+                        'description': 'Optional: service name/label associated with average_price.',
+                        'example': 'Diagnostics',
+                    },
                 },
             },
             'multipart/form-data': {
@@ -1016,6 +1039,10 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
                     'average_price': {
                         'type': 'string',
                         'description': 'Optional decimal as string, e.g. "170000.00".',
+                    },
+                    'average_service_name': {
+                        'type': 'string',
+                        'description': 'Optional service name/label associated with average_price.',
                     },
                     'images': {
                         'type': 'array',

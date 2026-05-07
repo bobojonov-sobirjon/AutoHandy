@@ -272,6 +272,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'preferred_date', 'preferred_time_start', 'preferred_time_end',
             'master',
             'average_price',
+            'average_service_name',
             'pricing', 'services', 'reviews', 'average_rating',
             'workflow', 'eta',
             'order_images', 'work_completion_images',
@@ -653,12 +654,20 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         allow_null=True,
         help_text='Optional: average price estimate for this order.',
     )
+    average_service_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        max_length=255,
+        help_text='Optional: service name/label associated with average_price.',
+    )
 
     class Meta:
         model = Order
         fields = [
             'order_type', 'text', 'priority', 'location', 'latitude', 'longitude',
             'average_price',
+            'average_service_name',
             'master_id',
             'car_list', 'category_list',
             'parts_purchase_required',
@@ -880,6 +889,13 @@ class CustomRequestCreateSerializer(serializers.Serializer):
         allow_null=True,
         help_text='Optional: average price estimate for this order.',
     )
+    average_service_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        max_length=255,
+        help_text='Optional: service name/label associated with average_price.',
+    )
     preferred_date = serializers.DateField(
         required=False,
         allow_null=True,
@@ -961,6 +977,7 @@ class CustomRequestCreateSerializer(serializers.Serializer):
             latitude=validated_data['latitude'],
             longitude=validated_data['longitude'],
             average_price=validated_data.get('average_price'),
+            average_service_name=(validated_data.get('average_service_name') or None),
             order_type=OrderType.CUSTOM_REQUEST,
             status=OrderStatus.PENDING,
             priority=OrderPriority.LOW,

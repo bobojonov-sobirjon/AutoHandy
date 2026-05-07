@@ -161,6 +161,14 @@ class Order(models.Model):
         verbose_name='Average price',
         help_text='Optional: average price estimate for the order (shown to client).',
     )
+    average_service_name = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        default=None,
+        verbose_name='Average service name',
+        help_text='Optional: service name/label associated with average_price (shown to client).',
+    )
     created_at = models.DateTimeField(
         auto_now_add=True,
         verbose_name='Created at',
