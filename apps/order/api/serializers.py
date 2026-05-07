@@ -271,6 +271,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'parts_purchase_required_json',
             'preferred_date', 'preferred_time_start', 'preferred_time_end',
             'master',
+            'average_min_price', 'average_max_price',
             'pricing', 'services', 'reviews', 'average_rating',
             'workflow', 'eta',
             'order_images', 'work_completion_images',
@@ -645,11 +646,26 @@ class OrderCreateSerializer(serializers.ModelSerializer):
     )
     latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
     longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    average_min_price = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        help_text='Optional: average/min price estimate for this order.',
+    )
+    average_max_price = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        help_text='Optional: average/max price estimate for this order.',
+    )
 
     class Meta:
         model = Order
         fields = [
             'order_type', 'text', 'priority', 'location', 'latitude', 'longitude',
+            'average_min_price', 'average_max_price',
             'master_id',
             'car_list', 'category_list',
             'parts_purchase_required',
@@ -864,6 +880,20 @@ class CustomRequestCreateSerializer(serializers.Serializer):
     location = serializers.CharField()
     latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
     longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    average_min_price = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        help_text='Optional: average/min price estimate for this order.',
+    )
+    average_max_price = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        help_text='Optional: average/max price estimate for this order.',
+    )
     preferred_date = serializers.DateField(
         required=False,
         allow_null=True,
@@ -944,6 +974,8 @@ class CustomRequestCreateSerializer(serializers.Serializer):
             location=validated_data['location'],
             latitude=validated_data['latitude'],
             longitude=validated_data['longitude'],
+            average_min_price=validated_data.get('average_min_price'),
+            average_max_price=validated_data.get('average_max_price'),
             order_type=OrderType.CUSTOM_REQUEST,
             status=OrderStatus.PENDING,
             priority=OrderPriority.LOW,
