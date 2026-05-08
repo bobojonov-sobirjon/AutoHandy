@@ -375,6 +375,31 @@ class ChatConsumer(AsyncWebsocketConsumer):
             is_master = False
         return other.id, ('master' if is_master else 'user')
 
+    @database_sync_to_async
+    def _send_chat_push_sync(
+        self,
+        *,
+        other_user_id: int,
+        other_kind: str,
+        title: str,
+        body: str,
+        data: dict[str, str],
+    ) -> None:
+        """
+        Run FCM send in a sync thread.
+        FCM helper uses Django ORM internally (device token lookup), so it must not run
+        directly inside the async event loop.
+        """
+        from apps.order.services.notifications import send_fcm_to_user_devices
+
+        send_fcm_to_user_devices(
+            user_id=other_user_id,
+            firebase_kind=other_kind,
+            title=title,
+            body=body,
+            data=data,
+        )
+
     async def push_other_participant(self, message):
         logger = logging.getLogger(__name__)
         try:
@@ -386,7 +411,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     getattr(message, 'id', None),
                 )
                 return
-            from apps.order.services.notifications import send_fcm_to_user_devices
 
             # Keep push body short
             body = ''
@@ -402,9 +426,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 other_user_id,
                 other_kind,
             )
-            send_fcm_to_user_devices(
-                user_id=other_user_id,
-                firebase_kind=other_kind,
+            await self._send_chat_push_sync(
+                other_user_id=other_user_id,
+                other_kind=other_kind,
                 title='New chat message',
                 body=body,
                 data={
