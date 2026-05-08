@@ -4273,7 +4273,7 @@ class AddServicesToOrderView(APIView):
         tags=[STAG_ORDER_DRIVER_LEGACY],
         request=AddServicesToOrderSerializer,
         responses={
-            201: OrderServiceSerializer(many=True),
+            201: OrderSerializer,
             400: {
                 'type': 'object',
                 'properties': {
@@ -4362,9 +4362,12 @@ class AddServicesToOrderView(APIView):
             except Exception:  # noqa: BLE001
                 pass
         
-        # Сериализуем результат
-        result_serializer = OrderServiceSerializer(created_services, many=True)
-        return Response(result_serializer.data, status=status.HTTP_201_CREATED)
+        # Return updated order snapshot so pricing reflects added services and extra_money.
+        order.refresh_from_db()
+        return Response(
+            OrderSerializer(order, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class OrderServiceCountPatchView(APIView):

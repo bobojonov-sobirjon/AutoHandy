@@ -72,13 +72,42 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
       treat as **percent** of subtotal; values ``> 100`` are still treated as fixed amount.
     """
     extra_money = _q(getattr(order, 'extra_money', 0) or 0)
-    offer_subtotal = _custom_request_offer_subtotal(order)
-    if offer_subtotal is not None:
+    offer_price = _custom_request_offer_subtotal(order)
+    if offer_price is not None:
+        # Custom-request pricing:
+        # - offer_price is the base agreed amount (not multiplied by car_count)
+        # - plus any added services (multiplied by car_count like standard orders)
+        # - discount applies to the combined subtotal; discount is allocated proportionally across
+        #   (offer + services) so totals stay consistent even though offer is not a service line.
         car_count = _order_car_count(order)
-        subtotal = offer_subtotal
+        rows: list[dict[str, Any]] = []
+        services_subtotal = Decimal('0')
+
+        for os_row in order.order_services.all().select_related('master_service_item').order_by('id'):
+            item = os_row.master_service_item
+            if not item:
+                continue
+            svc_count = int(getattr(os_row, 'count', 1) or 1)
+            if svc_count < 1:
+                svc_count = 1
+            base_u = _q(item.price or 0)
+            line_gross = _q(base_u * car_count * svc_count)
+            services_subtotal += line_gross
+            rows.append(
+                {
+                    'os': os_row,
+                    'base_unit_price_per_car': base_u,
+                    'car_count': car_count,
+                    'service_count': svc_count,
+                    'line_gross': line_gross,
+                }
+            )
+
+        subtotal = _q(offer_price + services_subtotal)
         raw = _q(order.discount or 0)
         if raw < 0:
             raw = Decimal('0')
+
         use_percent = bool(getattr(settings, 'ORDER_DISCOUNT_IS_PERCENT', False))
         if raw == 0:
             mode = 'none'
@@ -89,8 +118,67 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
         else:
             mode = 'amount'
             discount_applied = _q(min(raw, subtotal))
-        total = _q(max(subtotal - discount_applied + extra_money, Decimal('0')))
+
+        offer_discount_allocated = Decimal('0')
+        lines_by_id: dict[int, dict[str, Any]] = {}
+
+        if rows:
+            n = len(rows)
+            # Allocate discount proportionally across offer + services.
+            # Offer has no OrderService row, so we store its allocation separately.
+            if discount_applied and subtotal > 0:
+                offer_discount_allocated = _q(discount_applied * offer_price / subtotal)
+            remaining = _q(discount_applied - offer_discount_allocated)
+
+            acc = Decimal('0')
+            if remaining <= 0:
+                remaining = Decimal('0')
+            if services_subtotal <= 0:
+                remaining = Decimal('0')
+
+            for i, r in enumerate(rows):
+                os_row = r['os']
+                base_u = r['base_unit_price_per_car']
+                lg = r['line_gross']
+                if remaining == 0:
+                    ld = Decimal('0')
+                elif i == n - 1:
+                    ld = _q(remaining - acc)
+                else:
+                    if mode == 'percent':
+                        # Percent is based on the combined subtotal, but line allocation follows line gross.
+                        ld = _q(lg / services_subtotal * remaining) if services_subtotal > 0 else Decimal('0')
+                    else:
+                        ld = _q(lg / services_subtotal * remaining) if services_subtotal > 0 else Decimal('0')
+                    acc += ld
+                lt = _q(max(lg - ld, Decimal('0')))
+                lines_by_id[os_row.id] = {
+                    'order_service_id': os_row.id,
+                    'unit_price': base_u,  # custom-request: no emergency multiplier here
+                    'base_unit_price': base_u,
+                    'emergency_coefficient': _q(Decimal('1.0')),
+                    'car_count': r.get('car_count', car_count),
+                    'service_count': r.get('service_count', 1),
+                    'discount_allocated': ld,
+                    'line_total': lt,
+                }
+        else:
+            # No services: discount allocation is fully on offer.
+            offer_discount_allocated = discount_applied
+
+        total = _q(
+            max(
+                (offer_price - offer_discount_allocated)
+                + sum((v.get('line_total', Decimal('0')) for v in lines_by_id.values()), Decimal('0'))
+                + extra_money,
+                Decimal('0'),
+            )
+        )
+
         return {
+            'offer_price': offer_price,
+            'offer_discount_allocated': offer_discount_allocated,
+            'services_subtotal': services_subtotal,
             'subtotal': subtotal,
             'extra_money': extra_money,
             'discount_raw': raw,
@@ -98,7 +186,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
             'discount_applied': discount_applied,
             'total': total,
             'car_count': car_count,
-            'lines_by_order_service_id': {},
+            'lines_by_order_service_id': lines_by_id,
             'emergency': {
                 'is_emergency': False,
                 'time_zone': None,

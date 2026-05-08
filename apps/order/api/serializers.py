@@ -150,11 +150,13 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
     total = serializers.SerializerMethodField()
     car_count = serializers.SerializerMethodField()
     emergency_pricing = serializers.SerializerMethodField()
+    offer_price = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = (
             'discount',
+            'offer_price',
             'discount_mode',
             'subtotal',
             'discount_applied',
@@ -196,6 +198,11 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
         em['base_subtotal'] = format(Decimal(str(br.get('base_subtotal', br.get('subtotal', 0)))), 'f')
         em['final_subtotal'] = format(Decimal(str(br.get('subtotal', 0))), 'f')
         return em
+
+    def get_offer_price(self, obj):
+        br = get_cached_order_pricing(obj, self.context)
+        v = br.get('offer_price')
+        return format(Decimal(str(v)), 'f') if v is not None else None
 
 
 class OrderWorkflowNestedSerializer(serializers.ModelSerializer):
@@ -251,6 +258,7 @@ class OrderSerializer(serializers.ModelSerializer):
     work_completion_images = serializers.SerializerMethodField()
     cancellation = serializers.SerializerMethodField()
     custom_request_selected_offer = serializers.SerializerMethodField()
+    offer_price = serializers.SerializerMethodField()
     chat_room_id = serializers.IntegerField(read_only=True)
     latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
     longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, required=False, allow_null=True)
@@ -273,6 +281,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'master',
             'average_price',
             'average_service_name',
+            'offer_price',
             'pricing', 'services', 'reviews', 'average_rating',
             'workflow', 'eta',
             'order_images', 'work_completion_images',
@@ -317,6 +326,15 @@ class OrderSerializer(serializers.ModelSerializer):
             'created_at': matched.created_at,
             'updated_at': matched.updated_at,
         }
+
+    def get_offer_price(self, obj):
+        """
+        Explicit offer base for custom requests.
+        If there is no matched offer (pending/unassigned), return null.
+        """
+        br = get_cached_order_pricing(obj, self.context)
+        v = br.get('offer_price')
+        return format(Decimal(str(v)), 'f') if v is not None else None
 
     def get_client_completion_pin(self, obj):
         """4-digit code for the order owner while in_progress; master never sees this in API."""
