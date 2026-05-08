@@ -2,6 +2,7 @@ import json
 import base64
 import binascii
 import os
+import logging
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
 from django.contrib.auth import get_user_model
@@ -62,9 +63,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
             self.channel_name
         )
 
-    async def receive(self, text_data):
+    async def receive(self, text_data=None, bytes_data=None):
         """Receive message from client"""
         try:
+            if text_data is None and bytes_data is not None:
+                try:
+                    text_data = bytes_data.decode('utf-8', errors='replace')
+                except Exception:  # noqa: BLE001
+                    text_data = None
+            if text_data is None:
+                return
+
             print(f"[DEBUG] Received data: {text_data[:100]}")  # First 100 chars
 
             if not text_data or not text_data.strip():
@@ -367,9 +376,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
         return other.id, ('master' if is_master else 'user')
 
     async def push_other_participant(self, message):
+        logger = logging.getLogger(__name__)
         try:
             other_user_id, other_kind = await self._other_participant_id_and_kind()
             if not other_user_id or not other_kind:
+                logger.warning(
+                    'chat_push_skip room_id=%s message_id=%s reason=no_other_participant',
+                    getattr(message, 'room_id', None),
+                    getattr(message, 'id', None),
+                )
                 return
             from apps.order.services.notifications import send_fcm_to_user_devices
 
@@ -380,6 +395,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
             else:
                 body = f'You received a new {message.message_type} message'
 
+            logger.warning(
+                'chat_push_attempt room_id=%s message_id=%s to_user_id=%s kind=%s',
+                getattr(message, 'room_id', None),
+                getattr(message, 'id', None),
+                other_user_id,
+                other_kind,
+            )
             send_fcm_to_user_devices(
                 user_id=other_user_id,
                 firebase_kind=other_kind,
@@ -392,7 +414,18 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     'message_type': str(message.message_type),
                 },
             )
+            logger.warning(
+                'chat_push_done room_id=%s message_id=%s to_user_id=%s',
+                getattr(message, 'room_id', None),
+                getattr(message, 'id', None),
+                other_user_id,
+            )
         except Exception:  # noqa: BLE001
+            logger.exception(
+                'chat_push_failed room_id=%s message_id=%s',
+                getattr(message, 'room_id', None),
+                getattr(message, 'id', None),
+            )
             return
 
     @database_sync_to_async
