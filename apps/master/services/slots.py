@@ -388,7 +388,9 @@ def build_master_day_slots_payload(
         working_hours_display = (
             f'{work_start.strftime("%H:%M")}-{work_end.strftime("%H:%M")}'
         )
+        schedule_busy_slot_id = rest_slot.pk
     else:
+        schedule_busy_slot_id = None
         if busy_date_only:
             if not busy_all:
                 return None, 'No busy slots for this date.'
@@ -416,6 +418,7 @@ def build_master_day_slots_payload(
                         'master_name': master_name,
                         'working_hours': '',
                         'schedule_source': 'not_scheduled',
+                        'busy_slot_id': None,
                         'break_data': None,
                         'slots': [],
                     },
@@ -463,6 +466,7 @@ def build_master_day_slots_payload(
             'master_name': master.user.get_full_name() or master.user.phone_number,
             'working_hours': working_hours_display,
             'schedule_source': schedule_source,
+            'busy_slot_id': schedule_busy_slot_id,
             'break_data': break_data,
             'slots': slots,
         },
