@@ -172,6 +172,8 @@ def _build_precise_day_slots(
             continue
         lo, hi = iv
         oid = getattr(b, 'order_id', None)
+        # MasterBusySlot rows have a DB PK; accepted-order synthetic blocks do not.
+        bid = getattr(b, 'pk', None)
         raw_busy.append(
             {
                 'lo': lo,
@@ -179,6 +181,7 @@ def _build_precise_day_slots(
                 'st': b.start_time,
                 'et': b.end_time,
                 'oid': oid,
+                'bid': bid,
             }
         )
 
@@ -193,6 +196,7 @@ def _build_precise_day_slots(
                     'st': item['st'],
                     'et': item['et'],
                     'oids': {item['oid']} if item['oid'] is not None else set(),
+                    'bids': {item['bid']} if item.get('bid') is not None else set(),
                 }
             )
             continue
@@ -203,6 +207,8 @@ def _build_precise_day_slots(
             m['et'] = max(m['et'], item['et'])
             if item['oid'] is not None:
                 m['oids'].add(item['oid'])
+            if item.get('bid') is not None:
+                m['bids'].add(item['bid'])
         else:
             merged.append(
                 {
@@ -211,6 +217,7 @@ def _build_precise_day_slots(
                     'st': item['st'],
                     'et': item['et'],
                     'oids': {item['oid']} if item['oid'] is not None else set(),
+                    'bids': {item['bid']} if item.get('bid') is not None else set(),
                 }
             )
 
@@ -235,6 +242,11 @@ def _build_precise_day_slots(
         oids = m['oids']
         if len(oids) == 1:
             row['order_id'] = next(iter(oids))
+        bids = m.get('bids') or set()
+        if len(bids) == 1:
+            row['busy_slot_id'] = next(iter(bids))
+        elif len(bids) > 1:
+            row['busy_slot_ids'] = sorted(int(x) for x in bids if x is not None)
         busy_rows.append(row)
 
     avail_rows: list[dict] = []
