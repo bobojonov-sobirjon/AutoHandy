@@ -118,7 +118,33 @@ def _finish_sos_broadcast_exhausted(order: Order) -> None:
             'updated_at',
         ]
     )
-    # Push to order owner: SOS window ended with no accept.
+    # Note: notification is handled by the caller (timeout vs all-declined).
+
+
+def finish_sos_broadcast_all_declined(order: Order) -> None:
+    """
+    Finish SOS broadcast because all eligible masters declined.
+    Sends a single user notification (do NOT spam for each decline).
+    """
+    _finish_sos_broadcast_exhausted(order)
+    try:
+        from apps.order.services.notifications import notify_user_order_event
+
+        notify_user_order_event(
+            order,
+            title='Emergency request declined',
+            body='No technicians accepted your request. Please try again.',
+            kind='sos_all_declined',
+            extra_data={'by': 'system'},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def finish_sos_broadcast_on_timeout(order: Order) -> None:
+    """Global broadcast window ended with no accept."""
+    _finish_sos_broadcast_exhausted(order)
+    # Timeout is different from "all declined": keep the existing semantics/message.
     try:
         from apps.order.services.notifications import notify_user_order_event
 
@@ -131,11 +157,6 @@ def _finish_sos_broadcast_exhausted(order: Order) -> None:
         )
     except Exception:  # noqa: BLE001
         pass
-
-
-def finish_sos_broadcast_on_timeout(order: Order) -> None:
-    """Global broadcast window ended with no accept."""
-    _finish_sos_broadcast_exhausted(order)
 
 
 def broadcast_sos_offers(order: Order, request: 'HttpRequest | None' = None) -> None:

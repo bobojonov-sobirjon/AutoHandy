@@ -3231,16 +3231,15 @@ class DeclineOrderView(APIView):
             except Exception:  # noqa: BLE001
                 pass
             order.refresh_from_db()
+            # IMPORTANT: do NOT notify the client for each decline in SOS broadcast.
+            # Notify only when the last eligible master declines (i.e., no one left can accept).
             try:
-                from apps.order.services.notifications import notify_user_order_event
+                from apps.order.services.sos_rotation import eligible_sos_broadcast_master_ids, finish_sos_broadcast_all_declined
 
-                notify_user_order_event(
-                    order,
-                    title='Order declined',
-                    body=f'Order #{order.id} was declined by a master',
-                    kind='order_declined',
-                    extra_data={'master_id': str(master.id), 'order_type': str(order.order_type)},
-                )
+                remaining = eligible_sos_broadcast_master_ids(order)
+                if not remaining:
+                    finish_sos_broadcast_all_declined(order)
+                    order.refresh_from_db()
             except Exception:  # noqa: BLE001
                 pass
             return Response(
