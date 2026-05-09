@@ -18,6 +18,68 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _emergency_rate_thresholds() -> tuple[int, int]:
+    try:
+        min_acc = int(getattr(settings, 'EMERGENCY_ACCEPTANCE_RATE_MIN', 90))
+        min_comp = int(getattr(settings, 'EMERGENCY_COMPLETION_RATE_MIN', 90))
+    except Exception:
+        min_acc, min_comp = 90, 90
+    return min_acc, min_comp
+
+
+def master_meets_emergency_offer_thresholds(master_id: int) -> bool:
+    """
+    True if master's acceptance and completion rates meet global SOS minima
+    (same rule as broadcast push targets).
+    """
+    try:
+        from apps.master.services.rates import master_acceptance_rate_percent, master_completion_rate_percent
+
+        m = Master.objects.filter(pk=int(master_id)).first()
+        if not m:
+            return False
+        min_acc, min_comp = _emergency_rate_thresholds()
+        acc = master_acceptance_rate_percent(m)
+        comp = master_completion_rate_percent(m)
+    except Exception:
+        return False
+    return acc >= min_acc and comp >= min_comp
+
+
+def filter_master_ids_meeting_emergency_thresholds(master_ids: list[int]) -> list[int]:
+    """Keep input order; de-duplicate; drop masters below emergency rate floors."""
+    from apps.master.services.rates import master_acceptance_rate_percent, master_completion_rate_percent
+
+    min_acc, min_comp = _emergency_rate_thresholds()
+    ids = []
+    seen: set[int] = set()
+    for x in master_ids:
+        try:
+            mid = int(x)
+        except (TypeError, ValueError):
+            continue
+        if mid in seen:
+            continue
+        seen.add(mid)
+        ids.append(mid)
+    if not ids:
+        return []
+    masters = {m.id: m for m in Master.objects.filter(id__in=ids).only('id')}
+    out: list[int] = []
+    for mid in ids:
+        m = masters.get(mid)
+        if not m:
+            continue
+        try:
+            acc = master_acceptance_rate_percent(m)
+            comp = master_completion_rate_percent(m)
+        except Exception:
+            acc, comp = 0, 0
+        if acc >= min_acc and comp >= min_comp:
+            out.append(mid)
+    return out
+
+
 def _queue_master_ids(order: Order) -> list[int]:
     q = order.sos_offer_queue or []
     out: list[int] = []
@@ -41,32 +103,37 @@ def sos_declined_master_ids_list(order: Order) -> list[int]:
 
 
 def master_in_sos_broadcast_queue(order: Order, master_id: int) -> bool:
-    """Pending SOS with queue: master appears in broadcast list (for permissions / listings)."""
+    """Pending SOS: master is in the geographic queue and meets emergency rate floors (same as push cohort)."""
     if order.order_type != OrderType.SOS or order.status != OrderStatus.PENDING:
         return False
     if not order.sos_offer_queue:
         return False
-    return master_id in _queue_master_ids(order)
+    if master_id not in _queue_master_ids(order):
+        return False
+    return master_meets_emergency_offer_thresholds(master_id)
 
 
 def master_eligible_for_pending_sos_offer(order: Order, master_id: int) -> bool:
-    """Can this master accept the pending SOS (in queue, not declined, inside acceptance zone)?"""
+    """Can this master accept the pending SOS (in queue, not declined, in zone, emergency rates OK)?"""
     if order.order_type != OrderType.SOS or order.status != OrderStatus.PENDING:
         return False
     if master_id not in _queue_master_ids(order):
         return False
     if master_id in sos_declined_master_ids_list(order):
         return False
-    return order_within_master_acceptance_zone(order, master_id)
+    if not order_within_master_acceptance_zone(order, master_id):
+        return False
+    return master_meets_emergency_offer_thresholds(master_id)
 
 
 def eligible_sos_broadcast_master_ids(order: Order) -> list[int]:
-    """Masters in queue who are in-zone and have not declined."""
+    """Masters in queue who are in-zone, have not declined, and meet emergency rate floors."""
     return [
         mid
         for mid in _queue_master_ids(order)
         if mid not in sos_declined_master_ids_list(order)
         and order_within_master_acceptance_zone(order, mid)
+        and master_meets_emergency_offer_thresholds(mid)
     ]
 
 
@@ -187,29 +254,8 @@ def broadcast_sos_offers(order: Order, request: 'HttpRequest | None' = None) -> 
         fields=['master_response_deadline', 'sos_offer_index', 'sos_declined_master_ids']
     )
 
-    # Prioritize SOS offers by master Acceptance/Completion rates (high tier first).
-    try:
-        from apps.master.services.rates import master_acceptance_rate_percent, master_completion_rate_percent
-
-        min_acc = int(getattr(settings, 'EMERGENCY_ACCEPTANCE_RATE_MIN', 90))
-        min_comp = int(getattr(settings, 'EMERGENCY_COMPLETION_RATE_MIN', 90))
-    except Exception:
-        min_acc, min_comp = 90, 90
-
-    high: list[int] = []
-    # Fetch masters in one query.
-    masters = {m.id: m for m in Master.objects.filter(id__in=eligible).only('id', 'user_id')}
-    for mid in eligible:
-        m = masters.get(mid)
-        if not m:
-            continue
-        try:
-            acc = master_acceptance_rate_percent(m)
-            comp = master_completion_rate_percent(m)
-        except Exception:
-            acc, comp = 0, 0
-        if acc >= min_acc and comp >= min_comp:
-            high.append(mid)
+    min_acc, min_comp = _emergency_rate_thresholds()
+    high = filter_master_ids_meeting_emergency_thresholds(eligible)
 
     # Strict rule: Emergency jobs are sent ONLY to masters meeting both thresholds.
     if not high:

@@ -28,6 +28,10 @@ from apps.accounts.serializers import UserSerializer
 from apps.master.api.serializers import MasterSerializer
 from apps.order.services.master_offer import activate_pending_master_offer
 from apps.order.services.sos_master_queue import build_sos_master_id_queue
+from apps.order.services.sos_rotation import (
+    filter_master_ids_meeting_emergency_thresholds,
+    master_meets_emergency_offer_thresholds,
+)
 from apps.order.services.status_workflow import (
     client_cancellation_snapshot,
     order_master_distance_mi,
@@ -815,11 +819,12 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                     float(order_lon),
                     [int(c) for c in cats],
                 )
+                queue = filter_master_ids_meeting_emergency_thresholds(queue)
                 if not queue:
                     raise serializers.ValidationError({
                         'category_list': (
                             'No masters with this service are available within their acceptance zones '
-                            'for this location.'
+                            'for this location, or none meet emergency acceptance/completion rate requirements.'
                         ),
                     })
                 attrs['_sos_queue'] = queue
@@ -852,6 +857,12 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                             f'({d_mi:.1f} mi; limit {max_mi:.1f} mi). Choose another master.'
                         )
                     raise serializers.ValidationError({'master_id': msg})
+                if order_type == OrderType.SOS and not master_meets_emergency_offer_thresholds(master_id):
+                    raise serializers.ValidationError({
+                        'master_id': (
+                            'This master does not meet emergency order acceptance/completion rate requirements.'
+                        ),
+                    })
 
             except Master.DoesNotExist:
                 pass

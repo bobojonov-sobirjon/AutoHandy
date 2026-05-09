@@ -7,7 +7,10 @@ from typing import Container
 from django.utils import timezone
 
 from apps.order.models import Order, OrderStatus, OrderType
-from apps.order.services.sos_rotation import advance_sos_ring_after_decline_or_timeout
+from apps.order.services.sos_rotation import (
+    advance_sos_ring_after_decline_or_timeout,
+    filter_master_ids_meeting_emergency_thresholds,
+)
 
 
 def expire_stale_master_offers(now=None, *, skip_order_ids: Container[int] | None = None) -> int:
@@ -143,6 +146,7 @@ def sweep_accepted_no_departure(*, now=None, order_id: int | None = None) -> int
                     order.category.filter(type_category=Category.TypeCategory.BY_ORDER).values_list('id', flat=True)
                 )
                 queue = build_sos_master_id_queue(float(order.latitude), float(order.longitude), cat_ids)
+                queue = filter_master_ids_meeting_emergency_thresholds(queue)
             except Exception:
                 queue = []
             if not queue:

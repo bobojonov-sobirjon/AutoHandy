@@ -410,7 +410,7 @@ EMERGENCY_NIGHT_MULTIPLIER = float(os.environ.get('EMERGENCY_NIGHT_MULTIPLIER', 
 # Emergency dispatch gating by master rates.
 MASTER_RATE_WINDOW_DAYS = int(os.environ.get('MASTER_RATE_WINDOW_DAYS', '30'))
 EMERGENCY_ACCEPTANCE_RATE_MIN = int(os.environ.get('EMERGENCY_ACCEPTANCE_RATE_MIN', '90'))
-EMERGENCY_COMPLETION_RATE_MIN = int(os.environ.get('EMERGENCY_COMPLETION_RATE_MIN', '80'))
+EMERGENCY_COMPLETION_RATE_MIN = int(os.environ.get('EMERGENCY_COMPLETION_RATE_MIN', '90'))
 EMERGENCY_LOW_TIER_DELAY_SECONDS = int(os.environ.get('EMERGENCY_LOW_TIER_DELAY_SECONDS', '120'))
 # Fallback when Celery countdown/beat is broken (e.g. Windows prefork): while masters stay on SOS WS,
 # run expire_stale_master_offers at most once per this many seconds (per ASGI process). 0 = off.
