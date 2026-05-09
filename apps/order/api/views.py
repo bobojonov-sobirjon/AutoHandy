@@ -62,6 +62,8 @@ from apps.order.models import (
     OrderType,
     OrderExtraMoneyRequest,
     ExtraMoneyRequestStatus,
+    OrderServiceAddRequest,
+    ServiceAddRequestStatus,
     OrderWorkCompletionImage,
     Rating,
     OrderService,
@@ -94,6 +96,9 @@ from apps.order.api.serializers import (
     OrderExtraMoneyRequestCreateSerializer,
     OrderExtraMoneyRequestDecisionSerializer,
     OrderExtraMoneyRequestSerializer,
+    OrderServiceAddRequestCreateSerializer,
+    OrderServiceAddRequestDecisionSerializer,
+    OrderServiceAddRequestSerializer,
     EmergencyPriceEstimateRequestSerializer,
     EmergencyPriceEstimateResponseSerializer,
     OrderServiceCountPatchSerializer,
@@ -4306,7 +4311,63 @@ class AddServicesToOrderView(APIView):
                 {'error': f'Order with ID {order_id} not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
+
+        # If a master is adding services, require client confirmation (extra-money-like flow).
+        master = None
+        try:
+            master = request.user.master_profiles.first()
+        except Exception:  # noqa: BLE001
+            master = None
+        if master and order.master_id == master.id:
+            from django.db import transaction
+            from collections import Counter
+            from apps.master.models import MasterServiceItems
+            from apps.order.models import OrderServiceAddRequest, ServiceAddRequestStatus
+            from apps.order.api.serializers import OrderServiceAddRequestSerializer
+
+            counts = Counter(int(x) for x in services_list)
+            items = []
+            for service_id, add_n in counts.items():
+                if add_n < 1:
+                    continue
+                # Validate service item exists
+                if not MasterServiceItems.objects.filter(id=service_id).exists():
+                    continue
+                items.append({'master_service_item_id': int(service_id), 'count': int(add_n)})
+            if not items:
+                return Response({'error': 'No valid services to request'}, status=status.HTTP_400_BAD_REQUEST)
+
+            with transaction.atomic():
+                req = OrderServiceAddRequest.objects.create(
+                    order=order,
+                    master=master,
+                    services_json=items,
+                    master_comment=(serializer.validated_data.get('comment') or '').strip(),
+                    status=ServiceAddRequestStatus.PENDING,
+                )
+
+            payload = OrderServiceAddRequestSerializer(req, context={'request': request}).data
+            # Realtime + push to client (best-effort)
+            try:
+                from apps.order.services.notifications import notify_user_order_event, push_order_event_to_user_websocket
+
+                push_order_event_to_user_websocket(
+                    user_id=order.user_id,
+                    event_type='service_add_request',
+                    payload=payload,
+                )
+                notify_user_order_event(
+                    order,
+                    title='Additional services request',
+                    body='The master requested to add additional services. Approve or decline in the app.',
+                    kind='service_add_request',
+                    extra_data={'request_id': str(req.id)},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return Response(payload, status=status.HTTP_201_CREATED)
         
+        # Legacy behavior (non-master callers): apply services immediately.
         # Обновляем скидку в заказе
         order.discount = discount
         order.save()
@@ -4710,6 +4771,267 @@ class PendingExtraMoneyRequestsForClientView(APIView):
             .order_by('-created_at')
         )
         return Response(OrderExtraMoneyRequestSerializer(qs, many=True).data, status=status.HTTP_200_OK)
+
+
+class OrderServiceAddRequestCreateView(APIView):
+    """Master creates a pending service-add request (requires client approval)."""
+
+    permission_classes = [IsAuthenticated, IsOrderOwnerOrMaster]
+
+    @extend_schema(
+        summary='Create service add request',
+        tags=[STAG_ORDER_DETAILS],
+        request=OrderServiceAddRequestCreateSerializer,
+        responses={201: OrderServiceAddRequestSerializer, 400: {'description': 'Validation error'}, 403: {'description': 'Forbidden'}, 404: {'description': 'Not found'}},
+    )
+    def post(self, request, order_id: int):
+        ser = OrderServiceAddRequestCreateSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            order = Order.objects.select_related('master').only('id', 'user_id', 'master_id').get(pk=order_id)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        self.check_object_permissions(request, order)
+
+        master = request.user.master_profiles.first() if hasattr(request.user, 'master_profiles') else None
+        if not master or order.master_id != master.id:
+            return Response({'error': 'Only the assigned master can request adding services'}, status=status.HTTP_403_FORBIDDEN)
+
+        from collections import Counter
+        from apps.master.models import MasterServiceItems
+        from django.db import transaction
+
+        counts = Counter(int(x) for x in (ser.validated_data.get('services_list') or []))
+        items = []
+        valid_ids = set(MasterServiceItems.objects.filter(id__in=list(counts.keys())).values_list('id', flat=True))
+        for sid, cnt in counts.items():
+            if sid in valid_ids and int(cnt) > 0:
+                items.append({'master_service_item_id': int(sid), 'count': int(cnt)})
+        if not items:
+            return Response({'error': 'No valid services to request'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            req = OrderServiceAddRequest.objects.create(
+                order=order,
+                master=master,
+                services_json=items,
+                master_comment=(ser.validated_data.get('comment') or '').strip(),
+                status=ServiceAddRequestStatus.PENDING,
+            )
+
+        payload = OrderServiceAddRequestSerializer(req, context={'request': request}).data
+        try:
+            from apps.order.services.notifications import notify_user_order_event, push_order_event_to_user_websocket
+
+            push_order_event_to_user_websocket(
+                user_id=order.user_id,
+                event_type='service_add_request',
+                payload=payload,
+            )
+            notify_user_order_event(
+                order,
+                title='Additional services request',
+                body='The master requested to add additional services. Approve or decline in the app.',
+                kind='service_add_request',
+                extra_data={'request_id': str(req.id)},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class OrderServiceAddRequestApproveView(APIView):
+    """Client approves pending service-add request (applies services to the order)."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Approve service add request',
+        tags=[STAG_ORDER_DETAILS],
+        request=OrderServiceAddRequestDecisionSerializer,
+        responses={200: OrderServiceAddRequestSerializer, 400: {'description': 'Validation error'}, 403: {'description': 'Forbidden'}, 404: {'description': 'Not found'}},
+    )
+    def post(self, request, request_id: int):
+        ser = OrderServiceAddRequestDecisionSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        from django.db import transaction
+        from django.utils import timezone
+        from collections import Counter
+        from apps.master.models import MasterServiceItems
+
+        try:
+            with transaction.atomic():
+                req = (
+                    OrderServiceAddRequest.objects.select_for_update()
+                    .select_related('order', 'master')
+                    .get(pk=request_id)
+                )
+                if req.order.user_id != request.user.id:
+                    return Response({'error': 'Only the order owner can approve'}, status=status.HTTP_403_FORBIDDEN)
+                if req.status != ServiceAddRequestStatus.PENDING:
+                    return Response({'error': 'Request is not pending'}, status=status.HTTP_400_BAD_REQUEST)
+
+                # Apply services to order
+                order = req.order
+                raw = req.services_json or []
+                counts = Counter()
+                for it in raw:
+                    if not isinstance(it, dict):
+                        continue
+                    sid = it.get('master_service_item_id')
+                    cnt = it.get('count', 1)
+                    try:
+                        sid = int(sid)
+                        cnt = int(cnt or 1)
+                    except Exception:
+                        continue
+                    if sid > 0 and cnt > 0:
+                        counts[sid] += cnt
+                if not counts:
+                    return Response({'error': 'Request has no valid services'}, status=status.HTTP_400_BAD_REQUEST)
+
+                valid_items = {
+                    x.id: x for x in MasterServiceItems.objects.filter(id__in=list(counts.keys()))
+                }
+                for sid, add_n in counts.items():
+                    svc = valid_items.get(sid)
+                    if not svc:
+                        continue
+                    os_row, created = OrderService.objects.get_or_create(
+                        order=order,
+                        master_service_item=svc,
+                    )
+                    if created:
+                        if add_n > 1:
+                            os_row.count = int(add_n)
+                            os_row.save(update_fields=['count'])
+                    else:
+                        os_row.count = int(getattr(os_row, 'count', 1) or 1) + int(add_n or 1)
+                        os_row.save(update_fields=['count'])
+
+                req.status = ServiceAddRequestStatus.APPROVED
+                req.client_comment = (ser.validated_data.get('comment') or '').strip()
+                req.decided_at = timezone.now()
+                req.save(update_fields=['status', 'client_comment', 'decided_at', 'updated_at'])
+        except OrderServiceAddRequest.DoesNotExist:
+            return Response({'error': 'Request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        payload = OrderServiceAddRequestSerializer(req, context={'request': request}).data
+        # Notify master (best-effort)
+        try:
+            from apps.order.services.notifications import notify_master_order_event, push_order_event_to_master_websocket
+
+            push_order_event_to_master_websocket(
+                master_user_id=req.master.user_id,
+                event_type='service_add_decision',
+                payload=payload,
+            )
+            notify_master_order_event(
+                master_user_id=req.master.user_id,
+                order_id=req.order_id,
+                title='Services approved',
+                body='Client approved adding services.',
+                kind='service_add_approved',
+                extra_data={'request_id': str(req.id)},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class OrderServiceAddRequestRejectView(APIView):
+    """Client rejects pending service-add request. Reject comment is required."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Reject service add request',
+        tags=[STAG_ORDER_DETAILS],
+        request=OrderServiceAddRequestDecisionSerializer,
+        responses={200: OrderServiceAddRequestSerializer, 400: {'description': 'Validation error'}, 403: {'description': 'Forbidden'}, 404: {'description': 'Not found'}},
+    )
+    def post(self, request, request_id: int):
+        ser = OrderServiceAddRequestDecisionSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        comment = (ser.validated_data.get('comment') or '').strip()
+        if not comment:
+            return Response({'comment': 'Comment is required when rejecting.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from django.db import transaction
+        from django.utils import timezone
+
+        try:
+            with transaction.atomic():
+                req = (
+                    OrderServiceAddRequest.objects.select_for_update()
+                    .select_related('order', 'master')
+                    .get(pk=request_id)
+                )
+                if req.order.user_id != request.user.id:
+                    return Response({'error': 'Only the order owner can reject'}, status=status.HTTP_403_FORBIDDEN)
+                if req.status != ServiceAddRequestStatus.PENDING:
+                    return Response({'error': 'Request is not pending'}, status=status.HTTP_400_BAD_REQUEST)
+
+                req.status = ServiceAddRequestStatus.REJECTED
+                req.client_comment = comment
+                req.decided_at = timezone.now()
+                req.save(update_fields=['status', 'client_comment', 'decided_at', 'updated_at'])
+        except OrderServiceAddRequest.DoesNotExist:
+            return Response({'error': 'Request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        payload = OrderServiceAddRequestSerializer(req, context={'request': request}).data
+        # Notify master (best-effort)
+        try:
+            from apps.order.services.notifications import notify_master_order_event, push_order_event_to_master_websocket
+
+            push_order_event_to_master_websocket(
+                master_user_id=req.master.user_id,
+                event_type='service_add_decision',
+                payload=payload,
+            )
+            notify_master_order_event(
+                master_user_id=req.master.user_id,
+                order_id=req.order_id,
+                title='Services rejected',
+                body=f'Client rejected adding services: {comment[:140]}',
+                kind='service_add_rejected',
+                extra_data={'request_id': str(req.id)},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class PendingServiceAddRequestsForClientView(APIView):
+    """Client fetches all pending service-add requests across orders."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='List pending service add requests (client)',
+        tags=[STAG_ORDER_DETAILS],
+        responses={200: OrderServiceAddRequestSerializer(many=True)},
+    )
+    def get(self, request):
+        qs = (
+            OrderServiceAddRequest.objects.filter(
+                order__user_id=request.user.id,
+                status=ServiceAddRequestStatus.PENDING,
+            )
+            .select_related('order', 'master', 'master__user')
+            .order_by('-created_at')
+        )
+        return Response(OrderServiceAddRequestSerializer(qs, many=True, context={'request': request}).data, status=status.HTTP_200_OK)
 
 
 class EmergencyPriceEstimateView(APIView):

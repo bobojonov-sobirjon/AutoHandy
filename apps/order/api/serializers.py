@@ -17,6 +17,8 @@ from apps.order.models import (
     LocationSource,
     OrderExtraMoneyRequest,
     ExtraMoneyRequestStatus,
+    OrderServiceAddRequest,
+    ServiceAddRequestStatus,
 )
 from apps.car.models import Car
 from apps.categories.models import Category
@@ -1177,6 +1179,12 @@ class AddServicesToOrderSerializer(serializers.Serializer):
         allow_empty=False,
         help_text='List of master service item IDs (MasterServiceItems)'
     )
+    comment = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default='',
+        help_text='Optional comment/reason for adding services (for client confirmation).',
+    )
     discount = serializers.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -1305,6 +1313,143 @@ class OrderExtraMoneyRequestSerializer(serializers.ModelSerializer):
             'order_type': getattr(o, 'order_type', None),
             'status': getattr(o, 'status', None),
         }
+
+
+class OrderServiceAddRequestCreateSerializer(serializers.Serializer):
+    """Master creates a pending request to add extra services (requires client approval)."""
+
+    services_list = serializers.ListField(
+        child=serializers.IntegerField(),
+        allow_empty=False,
+        help_text='List of MasterServiceItems IDs to add (duplicates increase count).',
+    )
+    comment = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class OrderServiceAddRequestDecisionSerializer(serializers.Serializer):
+    """Client approves/rejects a pending service-add request."""
+
+    comment = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class OrderServiceAddRequestSerializer(serializers.ModelSerializer):
+    order_id = serializers.IntegerField(source='order.id', read_only=True)
+    master_id = serializers.IntegerField(source='master.id', read_only=True)
+    master_user_id = serializers.IntegerField(source='master.user_id', read_only=True)
+    master = serializers.SerializerMethodField()
+    order = serializers.SerializerMethodField()
+    services_preview = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OrderServiceAddRequest
+        fields = [
+            'id',
+            'order_id',
+            'master_id',
+            'master_user_id',
+            'master',
+            'order',
+            'services_json',
+            'services_preview',
+            'master_comment',
+            'status',
+            'client_comment',
+            'decided_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_master(self, obj):
+        m = getattr(obj, 'master', None)
+        if not m:
+            return None
+        u = getattr(m, 'user', None)
+        full_name = None
+        avatar = None
+        if u is not None:
+            try:
+                full_name = u.get_full_name() or getattr(u, 'email', None) or getattr(u, 'phone_number', None)
+            except Exception:  # noqa: BLE001
+                full_name = getattr(u, 'email', None) or getattr(u, 'phone_number', None)
+            avatar = _media_url(self.context.get('request') if isinstance(self.context, dict) else None, getattr(u, 'avatar', None))
+        return {
+            'id': getattr(m, 'id', None),
+            'user_id': getattr(m, 'user_id', None),
+            'full_name': full_name,
+            'avatar': avatar,
+        }
+
+    def get_order(self, obj):
+        o = getattr(obj, 'order', None)
+        if not o:
+            return None
+        return {
+            'id': getattr(o, 'id', None),
+            'order_number': getattr(o, 'order_number', None),
+            'order_type': getattr(o, 'order_type', None),
+            'status': getattr(o, 'status', None),
+        }
+
+    def get_services_preview(self, obj):
+        """
+        Lightweight preview for client popup:
+        [{ master_service_item_id, name, unit_price, count, line_total }, ...] + subtotal
+        """
+        try:
+            from decimal import Decimal
+            from collections import defaultdict
+            from apps.master.models import MasterServiceItems
+
+            raw = getattr(obj, 'services_json', None) or []
+            counts = defaultdict(int)
+            for it in raw:
+                if not isinstance(it, dict):
+                    continue
+                mid = it.get('master_service_item_id')
+                cnt = it.get('count', 1)
+                try:
+                    mid = int(mid)
+                    cnt = int(cnt or 1)
+                except Exception:
+                    continue
+                if mid <= 0 or cnt <= 0:
+                    continue
+                counts[mid] += cnt
+
+            if not counts:
+                return {'items': [], 'subtotal': '0.00'}
+
+            # Car multiplier matches pricing rules.
+            try:
+                car_count = max(1, int(obj.order.car.count()))
+            except Exception:
+                car_count = 1
+            items_by_id = {
+                x.id: x for x in MasterServiceItems.objects.filter(id__in=list(counts.keys())).select_related('category').only('id', 'price', 'category__name')
+            }
+            out_items = []
+            subtotal = Decimal('0')
+            for mid, cnt in counts.items():
+                svc = items_by_id.get(mid)
+                if not svc:
+                    continue
+                unit = Decimal(str(getattr(svc, 'price', 0) or 0)).quantize(Decimal('0.01'))
+                line = (unit * Decimal(car_count) * Decimal(cnt)).quantize(Decimal('0.01'))
+                subtotal += line
+                out_items.append(
+                    {
+                        'master_service_item_id': mid,
+                        'name': getattr(getattr(svc, 'category', None), 'name', None),
+                        'unit_price': format(unit, 'f'),
+                        'car_count': car_count,
+                        'count': int(cnt),
+                        'line_total': format(line, 'f'),
+                    }
+                )
+            return {'items': out_items, 'subtotal': format(subtotal, 'f')}
+        except Exception:  # noqa: BLE001
+            return {'items': [], 'subtotal': '0.00'}
 
 
 class EmergencyPriceEstimateRequestSerializer(serializers.Serializer):

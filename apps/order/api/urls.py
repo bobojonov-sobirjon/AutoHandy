@@ -54,6 +54,26 @@ urlpatterns = [
         views.PendingExtraMoneyRequestsForClientView.as_view(),
         name='order-extra-money-requests-pending',
     ),
+    path(
+        '<int:order_id>/service-add/requests/',
+        views.OrderServiceAddRequestCreateView.as_view(),
+        name='order-service-add-requests-create',
+    ),
+    path(
+        'service-add/requests/<int:request_id>/approve/',
+        views.OrderServiceAddRequestApproveView.as_view(),
+        name='order-service-add-requests-approve',
+    ),
+    path(
+        'service-add/requests/<int:request_id>/reject/',
+        views.OrderServiceAddRequestRejectView.as_view(),
+        name='order-service-add-requests-reject',
+    ),
+    path(
+        'service-add/requests/pending/',
+        views.PendingServiceAddRequestsForClientView.as_view(),
+        name='order-service-add-requests-pending',
+    ),
     path('services-list/', views.MasterServicesListView.as_view(), name='master-services-list'),
     path('add-master/', views.AddMasterToOrderView.as_view(), name='add-master-to-order'),
     path('', views.OrderListCreateView.as_view(), name='order-list-create'),

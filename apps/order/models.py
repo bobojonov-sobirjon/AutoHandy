@@ -456,6 +456,85 @@ class OrderExtraMoneyRequest(models.Model):
         return f'ExtraMoneyRequest#{self.pk} order={self.order_id} amount={self.amount} status={self.status}'
 
 
+class ServiceAddRequestStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    APPROVED = 'approved', 'Approved'
+    REJECTED = 'rejected', 'Rejected'
+
+
+class OrderServiceAddRequest(models.Model):
+    """
+    Pending request from assigned master to add one or more extra services to an order.
+    Services are applied to the order ONLY after client approval.
+
+    `services_json` shape:
+      [{ "master_service_item_id": 123, "count": 1 }, ...]
+    """
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='service_add_requests',
+        verbose_name='Order',
+    )
+    master = models.ForeignKey(
+        'master.Master',
+        on_delete=models.CASCADE,
+        related_name='service_add_requests',
+        verbose_name='Master',
+    )
+    services_json = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name='Requested services (items)',
+        help_text='List of items: { "master_service_item_id": <int>, "count": <int>=1.. }',
+    )
+    master_comment = models.TextField(
+        blank=True,
+        default='',
+        verbose_name='Master comment',
+        help_text='Reason/description for adding services.',
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=ServiceAddRequestStatus.choices,
+        default=ServiceAddRequestStatus.PENDING,
+        db_index=True,
+        verbose_name='Status',
+    )
+    client_comment = models.TextField(
+        blank=True,
+        default='',
+        verbose_name='Client comment',
+        help_text='Required when rejecting (reason).',
+    )
+    decided_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Decided at',
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name='Created at',
+    )
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name='Updated at',
+    )
+
+    class Meta:
+        verbose_name = 'Order service add request'
+        verbose_name_plural = 'Order service add requests'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['order', 'status']),
+            models.Index(fields=['master', 'status']),
+        ]
+
+    def __str__(self):
+        return f'ServiceAddRequest#{self.pk} order={self.order_id} status={self.status}'
+
+
 class OrderImage(models.Model):
     """Photos attached to an order by the client (visible to master before accept)."""
 
