@@ -121,6 +121,14 @@ class MasterSosConsumer(AsyncWebsocketConsumer):
             )
         )
 
+    async def incoming_job_closed(self, event):
+        """Another master accepted — remove this ``order_id`` from local SOS/custom_request UI."""
+        await self.send(
+            text_data=json.dumps(
+                {'type': 'broadcast_order_closed', 'data': event['payload']},
+            )
+        )
+
     async def _stale_sweep_loop(self):
         """Wake periodically; throttled sweep advances SOS ring when master_response_deadline passed."""
         from django.conf import settings

@@ -298,8 +298,7 @@ def run_broadcast_custom_request(order_id: int) -> int:
     """
     Core logic for custom-request geo push (used by Celery task and inline fallback when Redis is down).
     """
-    from apps.order.services.custom_request_broadcast import master_ids_within_custom_request_radius
-    from apps.order.services.standard_booking_availability import preferred_slot_blocked_message
+    from apps.order.services.custom_request_broadcast import custom_request_broadcast_recipient_master_ids
     from apps.order.services.notifications import (
         notify_master_order_event,
         push_custom_request_to_master_websocket,
@@ -313,24 +312,8 @@ def run_broadcast_custom_request(order_id: int) -> int:
         return 0
     if order.latitude is None or order.longitude is None:
         return 0
-    mids = master_ids_within_custom_request_radius(float(order.latitude), float(order.longitude))
-    pd = getattr(order, 'preferred_date', None)
-    ps = getattr(order, 'preferred_time_start', None)
-    out_mids: list[int] = []
-    for mid in mids:
-        # If the driver chose a preferred slot, do not notify masters who are busy at that time.
-        if pd is not None and ps is not None:
-            try:
-                blocked = preferred_slot_blocked_message(
-                    master_id=mid,
-                    preferred_date=pd,
-                    preferred_time_start=ps,
-                )
-            except Exception:  # noqa: BLE001
-                blocked = None
-            if blocked:
-                continue
-        out_mids.append(mid)
+    out_mids = custom_request_broadcast_recipient_master_ids(order)
+    for mid in out_mids:
         try:
             from apps.master.models import Master
 

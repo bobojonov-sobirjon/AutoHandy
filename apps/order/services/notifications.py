@@ -10,6 +10,7 @@ from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
+from django.utils import timezone as django_timezone
 if TYPE_CHECKING:
     from django.http import HttpRequest
 
@@ -781,6 +782,58 @@ def build_custom_request_websocket_payload(
         'category_data': category_data,
         'order_images': order_images,
     }
+
+
+def notify_masters_broadcast_order_closed_websocket(
+    *,
+    order_id: int,
+    order_type_value: str,
+    recipient_master_ids: list[int],
+    accepted_by_master_pk: int,
+) -> None:
+    """
+    SOS / custom_request: tell other masters (same ``ws/sos/master/`` group) that the job is taken.
+    Clients should drop ``order_id`` from local incoming-job lists without waiting for deadline.
+    """
+    layer = get_channel_layer()
+    if not layer:
+        return
+    seen: set[int] = set()
+    payload = _ws_json_safe(
+        {
+            'order_id': int(order_id),
+            'order_type': str(order_type_value),
+            'reason': 'accepted_elsewhere',
+            'accepted_by_master_id': int(accepted_by_master_pk),
+            'closed_at': django_timezone.now().isoformat(),
+        }
+    )
+    message = {'type': 'incoming_job_closed', 'payload': payload}
+    try:
+        from apps.master.models import Master
+
+        for raw_mid in recipient_master_ids:
+            try:
+                mid = int(raw_mid)
+            except (TypeError, ValueError):
+                continue
+            if mid == int(accepted_by_master_pk):
+                continue
+            if mid in seen:
+                continue
+            seen.add(mid)
+            try:
+                mu = Master.objects.only('user_id').get(pk=mid)
+            except Master.DoesNotExist:
+                continue
+            uid = int(mu.user_id)
+            group = f'master_sos_{uid}'
+            try:
+                async_to_sync(layer.group_send)(group, message)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning('incoming_job_closed group_send failed user_id=%s order_id=%s: %s', uid, order_id, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('notify_masters_broadcast_order_closed_websocket failed order_id=%s: %s', order_id, exc)
 
 
 def push_custom_request_to_master_websocket(

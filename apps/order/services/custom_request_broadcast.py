@@ -1,11 +1,16 @@
 """Geographic broadcast list for custom-request orders (fixed radius in miles)."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from django.conf import settings
 
 from apps.categories.models import Category
 from apps.master.models import Master
 from apps.master.services.geo import MILES_TO_KM, haversine_distance_km
+
+if TYPE_CHECKING:
+    from apps.order.models import Order
 
 
 def get_custom_request_catalog_category() -> Category | None:
@@ -70,3 +75,37 @@ def master_within_custom_request_radius(
     )
     limit_km = miles * MILES_TO_KM
     return haversine_distance_km(latitude, longitude, float(mlat), float(mlon)) <= limit_km
+
+
+def custom_request_broadcast_recipient_master_ids(order: 'Order') -> list[int]:
+    """
+    Master PKs that receive the same Celery/geo WebSocket broadcast as ``run_broadcast_custom_request``.
+    Call while the order is still **pending** with coordinates (before status changes on accept).
+    """
+    from apps.order.models import OrderStatus, OrderType
+
+    if order.order_type != OrderType.CUSTOM_REQUEST or order.status != OrderStatus.PENDING:
+        return []
+    if order.latitude is None or order.longitude is None:
+        return []
+
+    mids = master_ids_within_custom_request_radius(float(order.latitude), float(order.longitude))
+    pd = getattr(order, 'preferred_date', None)
+    ps = getattr(order, 'preferred_time_start', None)
+    out: list[int] = []
+    for mid in mids:
+        if pd is not None and ps is not None:
+            try:
+                from apps.order.services.standard_booking_availability import preferred_slot_blocked_message
+
+                blocked = preferred_slot_blocked_message(
+                    master_id=mid,
+                    preferred_date=pd,
+                    preferred_time_start=ps,
+                )
+            except Exception:  # noqa: BLE001
+                blocked = None
+            if blocked:
+                continue
+        out.append(mid)
+    return out

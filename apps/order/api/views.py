@@ -3036,6 +3036,7 @@ class AcceptOrderView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        broadcast_close_recipients: list[int] = []
         try:
             with transaction.atomic():
                 order = Order.objects.select_for_update().get(id=oid)
@@ -3080,6 +3081,17 @@ class AcceptOrderView(APIView):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
+                if order.order_type == OrderType.SOS and order.sos_offer_queue:
+                    from apps.order.services.sos_rotation import sos_offer_recipient_master_ids
+
+                    broadcast_close_recipients = sos_offer_recipient_master_ids(order)
+                elif order.order_type == OrderType.CUSTOM_REQUEST:
+                    from apps.order.services.custom_request_broadcast import (
+                        custom_request_broadcast_recipient_master_ids,
+                    )
+
+                    broadcast_close_recipients = custom_request_broadcast_recipient_master_ids(order)
+
                 order.master = master
                 order.status = OrderStatus.ACCEPTED
                 order.accepted_at = timezone.now()
@@ -3116,6 +3128,18 @@ class AcceptOrderView(APIView):
 
             order.refresh_from_db()
             serializer = OrderSerializer(order, context={'request': request})
+            if broadcast_close_recipients and order.order_type in (OrderType.SOS, OrderType.CUSTOM_REQUEST):
+                try:
+                    from apps.order.services.notifications import notify_masters_broadcast_order_closed_websocket
+
+                    notify_masters_broadcast_order_closed_websocket(
+                        order_id=order.id,
+                        order_type_value=str(order.order_type),
+                        recipient_master_ids=broadcast_close_recipients,
+                        accepted_by_master_pk=master.id,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             # If the master does not depart ("on the way") in time, take action (by order type).
             try:
                 if order.accepted_at and not order.on_the_way_at:

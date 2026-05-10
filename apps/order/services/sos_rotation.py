@@ -91,6 +91,11 @@ def _queue_master_ids(order: Order) -> list[int]:
     return out
 
 
+def sos_offer_recipient_master_ids(order: Order) -> list[int]:
+    """Master PKs in ``sos_offer_queue`` — snapshot **before** clearing on accept/broadcast end."""
+    return _queue_master_ids(order)
+
+
 def sos_declined_master_ids_list(order: Order) -> list[int]:
     raw = order.sos_declined_master_ids or []
     out: list[int] = []
