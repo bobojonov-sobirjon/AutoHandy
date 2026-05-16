@@ -1,4 +1,8 @@
 from django.urls import path
+from apps.master.api.checkout_history_view import MasterCheckoutHistoryView
+from apps.master.api.stripe_balance_view import MasterStripeBalanceView
+from apps.master.api.stripe_connect_link_view import MasterStripeConnectLinkView
+from apps.master.api.stripe_connect_onboarding_view import MasterStripeConnectOnboardingView
 from apps.master.api.views import (
     MasterProfileView, MasterDetailsView, MasterListView,
     MasterFilterChoicesView, MastersByUserView,
@@ -11,6 +15,14 @@ from apps.master.api.views import (
 )
 
 urlpatterns = [
+    path(
+        'stripe-connect/onboarding/',
+        MasterStripeConnectOnboardingView.as_view(),
+        name='master-stripe-connect-onboarding',
+    ),
+    path('stripe-connect/', MasterStripeConnectLinkView.as_view(), name='master-stripe-connect'),
+    path('stripe-balance/', MasterStripeBalanceView.as_view(), name='master-stripe-balance'),
+    path('checkout-history/', MasterCheckoutHistoryView.as_view(), name='master-checkout-history'),
     path('masters/', MasterProfileView.as_view(), name='master-profile'),
     path('masters/list/', MasterListView.as_view(), name='master-list'),
     # path('masters/by-user/', MastersByUserView.as_view(), name='masters-by-user'),

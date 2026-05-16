@@ -13,6 +13,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from django.conf import settings
 from datetime import timedelta
+from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
 import secrets
@@ -113,8 +114,6 @@ from apps.accounts.models import UserBalance
 logger = logging.getLogger(__name__)
 
 User = get_user_model()
-
-logger = logging.getLogger(__name__)
 
 # Swagger: order endpoints grouped by role/flow (see SPECTACULAR_SETTINGS['TAGS'])
 STAG_ORDER_DRIVER_CREATE = 'Order (Driver) — Create'
@@ -2422,10 +2421,14 @@ class UpdateOrderStatusView(APIView):
                     )
                 extra_response['cancellation_penalty_applies'] = snap['penalty_applies']
                 extra_response['cancellation_penalty_percent'] = snap['penalty_percent']
-                extra_response['order_total'] = order_payable_total_str(order)
                 extra_response['penalty_amount_estimate'] = estimate_cancellation_penalty_amount(
                     order, snap['penalty_percent'] if snap['penalty_applies'] else 0
                 )
+                if snap['penalty_applies'] and snap['penalty_percent'] > 0:
+                    fee = Decimal(extra_response['penalty_amount_estimate'])
+                    prev = getattr(order, 'order_penalty_total', None) or Decimal('0')
+                    order.order_penalty_total = (prev + fee).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                extra_response['order_total'] = order_payable_total_str(order)
                 order.status = OrderStatus.CANCELLED
                 order.auto_cancel_reason = ''
                 order.client_penalty_free_cancel_unlocked = False
@@ -2883,6 +2886,13 @@ class CancelOrderView(APIView):
                     {'error': snap['summary'], 'cancellation': snap},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            est = estimate_cancellation_penalty_amount(
+                order, snap['penalty_percent'] if snap['penalty_applies'] else 0
+            )
+            if snap['penalty_applies'] and snap['penalty_percent'] > 0:
+                fee = Decimal(est)
+                prev = getattr(order, 'order_penalty_total', None) or Decimal('0')
+                order.order_penalty_total = (prev + fee).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
             order.status = OrderStatus.CANCELLED
             order.auto_cancel_reason = ''
             order.client_penalty_free_cancel_unlocked = False
@@ -2946,9 +2956,7 @@ class CancelOrderView(APIView):
             data['cancellation_penalty_applies'] = snap['penalty_applies']
             data['cancellation_penalty_percent'] = snap['penalty_percent']
             data['order_total'] = order_payable_total_str(order)
-            data['penalty_amount_estimate'] = estimate_cancellation_penalty_amount(
-                order, snap['penalty_percent'] if snap['penalty_applies'] else 0
-            )
+            data['penalty_amount_estimate'] = est
             return Response(data)
 
         if is_assigned_master:
@@ -3422,222 +3430,247 @@ class CompleteOrderView(APIView):
         """Завершить заказ: только мастер, с PIN от клиента."""
         expire_stale_master_offers()
         try:
-            order = Order.objects.get(id=order_id)
-            master = request.user.master_profiles.first()
+            oid = int(order_id)
+        except (TypeError, ValueError):
+            return Response({'error': 'Invalid order_id'}, status=status.HTTP_400_BAD_REQUEST)
 
-            try:
-                logger.warning(
-                    'order_complete_enter order_id=%s req_user_id=%s req_master_id=%s order_master_id=%s '
-                    'order_status=%s order_type=%s has_work_photos=%s',
-                    order.id,
-                    getattr(request.user, 'id', None),
-                    getattr(master, 'id', None) if master else None,
-                    getattr(order, 'master_id', None),
-                    getattr(order, 'status', None),
-                    getattr(order, 'order_type', None),
-                    bool(order.work_completion_images.exists()),
-                )
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            with transaction.atomic():
+                order = Order.objects.select_for_update().get(id=oid)
+                master = request.user.master_profiles.first()
 
-            if order.user_id == request.user.id and not master:
                 try:
                     logger.warning(
-                        'order_complete_blocked order_id=%s reason=%s req_user_id=%s',
+                        'order_complete_enter order_id=%s req_user_id=%s req_master_id=%s order_master_id=%s '
+                        'order_status=%s order_type=%s has_work_photos=%s',
                         order.id,
-                        'user_not_master',
-                        getattr(request.user, 'id', None),
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                return Response(
-                    {
-                        'error': 'Only the assigned master can complete the order. '
-                        'Show the completion code (client_completion_pin) to the master.',
-                    },
-                    status=status.HTTP_403_FORBIDDEN,
-                )
-
-            if not master or order.master_id != master.id:
-                try:
-                    logger.warning(
-                        'order_complete_blocked order_id=%s reason=%s req_user_id=%s req_master_id=%s order_master_id=%s',
-                        order.id,
-                        'access_denied',
                         getattr(request.user, 'id', None),
                         getattr(master, 'id', None) if master else None,
                         getattr(order, 'master_id', None),
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
-
-            if order.status != OrderStatus.IN_PROGRESS:
-                try:
-                    logger.warning(
-                        'order_complete_blocked order_id=%s reason=%s order_status=%s',
-                        order.id,
-                        'status_not_in_progress',
                         getattr(order, 'status', None),
+                        getattr(order, 'order_type', None),
+                        bool(order.work_completion_images.exists()),
                     )
                 except Exception:  # noqa: BLE001
                     pass
-                return Response(
-                    {
-                        'error': 'You can complete the order only when status is in_progress. '
-                        'Finish the workflow first, then call this endpoint.',
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
 
-            if not order.work_completion_images.exists():
-                try:
-                    logger.warning(
-                        'order_complete_blocked order_id=%s reason=%s',
-                        order.id,
-                        'missing_work_completion_photos',
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                return Response(
-                    {
-                        'error': 'Upload at least one work completion photo '
-                        '(POST /api/order/{id}/work-completion-image/) before completing.',
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            raw_pin = request.data.get('completion_pin')
-            if raw_pin is None:
-                try:
-                    logger.warning(
-                        'order_complete_blocked order_id=%s reason=%s',
-                        order.id,
-                        'missing_completion_pin',
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                return Response(
-                    {'error': 'completion_pin is required (4-digit code from the client).'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            pin_s = ''.join(ch for ch in str(raw_pin).strip() if ch.isdigit())
-            if len(pin_s) != 4:
-                try:
-                    logger.warning(
-                        'order_complete_blocked order_id=%s reason=%s pin_len=%s',
-                        order.id,
-                        'invalid_pin_format',
-                        len(pin_s),
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                return Response(
-                    {'error': 'completion_pin must be exactly 4 digits.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            expected = (order.completion_pin or '').strip()
-            if len(expected) != 4:
-                try:
-                    logger.warning(
-                        'order_complete_blocked order_id=%s reason=%s expected_pin_len=%s',
-                        order.id,
-                        'no_valid_pin_on_order',
-                        len(expected),
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                return Response(
-                    {
-                        'error': 'No valid completion PIN on this order. '
-                        'Ask the client to refresh the order or contact support.',
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            if not secrets.compare_digest(expected, pin_s):
-                try:
-                    from apps.order.services.notifications import notify_user_order_event
-
-                    notify_user_order_event(
-                        order,
-                        title='PIN check failed',
-                        body=f'Order #{order.id}: master entered a wrong PIN',
-                        kind='completion_pin_invalid',
-                        extra_data={'status': str(order.status)},
-                    )
+                if order.user_id == request.user.id and not master:
                     try:
                         logger.warning(
-                            'order_complete_push user_id=%s kind=%s order_id=%s status=%s',
-                            order.user_id,
-                            'completion_pin_invalid',
+                            'order_complete_blocked order_id=%s reason=%s req_user_id=%s',
                             order.id,
-                            order.status,
+                            'user_not_master',
+                            getattr(request.user, 'id', None),
                         )
                     except Exception:  # noqa: BLE001
                         pass
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    logger.warning('order_complete_blocked order_id=%s reason=%s', order.id, 'pin_mismatch')
-                except Exception:  # noqa: BLE001
-                    pass
-                return Response(
-                    {'error': 'Invalid completion PIN.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            order.status = OrderStatus.COMPLETED
-            clear_completion_pin(order)
-            order.save(
-                update_fields=[
-                    'status',
-                    'completion_pin',
-                    'completion_pin_issued_at',
-                    'updated_at',
-                ]
-            )
-
-            serializer = OrderSerializer(order, context={'request': request})
-            try:
-                from apps.order.services.notifications import notify_user_order_event
-
-                notify_user_order_event(
-                    order,
-                    title='Order completed',
-                    body=f'Order #{order.id} was completed',
-                    kind='order_completed',
-                    extra_data={'status': str(order.status)},
-                )
-                try:
-                    logger.warning(
-                        'order_complete_push user_id=%s kind=%s order_id=%s status=%s',
-                        order.user_id,
-                        'order_completed',
-                        order.id,
-                        order.status,
+                    return Response(
+                        {
+                            'error': 'Only the assigned master can complete the order. '
+                            'Show the completion code (client_completion_pin) to the master.',
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
                     )
-                except Exception:  # noqa: BLE001
-                    pass
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                logger.warning(
-                    'order_complete_success order_id=%s master_id=%s user_id=%s',
+
+                if not master or order.master_id != master.id:
+                    try:
+                        logger.warning(
+                            'order_complete_blocked order_id=%s reason=%s req_user_id=%s req_master_id=%s order_master_id=%s',
+                            order.id,
+                            'access_denied',
+                            getattr(request.user, 'id', None),
+                            getattr(master, 'id', None) if master else None,
+                            getattr(order, 'master_id', None),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+
+                if order.status != OrderStatus.IN_PROGRESS:
+                    try:
+                        logger.warning(
+                            'order_complete_blocked order_id=%s reason=%s order_status=%s',
+                            order.id,
+                            'status_not_in_progress',
+                            getattr(order, 'status', None),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return Response(
+                        {
+                            'error': 'You can complete the order only when status is in_progress. '
+                            'Finish the workflow first, then call this endpoint.',
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if not order.work_completion_images.exists():
+                    try:
+                        logger.warning(
+                            'order_complete_blocked order_id=%s reason=%s',
+                            order.id,
+                            'missing_work_completion_photos',
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return Response(
+                        {
+                            'error': 'Upload at least one work completion photo '
+                            '(POST /api/order/{id}/work-completion-image/) before completing.',
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                raw_pin = request.data.get('completion_pin')
+                if raw_pin is None:
+                    try:
+                        logger.warning(
+                            'order_complete_blocked order_id=%s reason=%s',
+                            order.id,
+                            'missing_completion_pin',
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return Response(
+                        {'error': 'completion_pin is required (4-digit code from the client).'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                pin_s = ''.join(ch for ch in str(raw_pin).strip() if ch.isdigit())
+                if len(pin_s) != 4:
+                    try:
+                        logger.warning(
+                            'order_complete_blocked order_id=%s reason=%s pin_len=%s',
+                            order.id,
+                            'invalid_pin_format',
+                            len(pin_s),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return Response(
+                        {'error': 'completion_pin must be exactly 4 digits.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                expected = (order.completion_pin or '').strip()
+                if len(expected) != 4:
+                    try:
+                        logger.warning(
+                            'order_complete_blocked order_id=%s reason=%s expected_pin_len=%s',
+                            order.id,
+                            'no_valid_pin_on_order',
+                            len(expected),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return Response(
+                        {
+                            'error': 'No valid completion PIN on this order. '
+                            'Ask the client to refresh the order or contact support.',
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if not secrets.compare_digest(expected, pin_s):
+                    try:
+                        from apps.order.services.notifications import notify_user_order_event
+
+                        notify_user_order_event(
+                            order,
+                            title='PIN check failed',
+                            body=f'Order #{order.id}: master entered a wrong PIN',
+                            kind='completion_pin_invalid',
+                            extra_data={'status': str(order.status)},
+                        )
+                        try:
+                            logger.warning(
+                                'order_complete_push user_id=%s kind=%s order_id=%s status=%s',
+                                order.user_id,
+                                'completion_pin_invalid',
+                                order.id,
+                                order.status,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        logger.warning('order_complete_blocked order_id=%s reason=%s', order.id, 'pin_mismatch')
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return Response(
+                        {'error': 'Invalid completion PIN.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                from apps.payment.services.order_charge import StripeChargeError, charge_order_on_completion
+                from apps.payment.services.checkout_fees import customer_charge_cents
+
+                connect_acct = ''
+                if order.master_id:
+                    try:
+                        connect_acct = (order.master.stripe_connect_account_id or '').strip()
+                    except Exception:
+                        connect_acct = ''
+                try:
+                    pre_cents = customer_charge_cents(order)
+                except Exception:
+                    pre_cents = None
+
+                logger.info(
+                    'order_complete_debug charge_start order_id=%s order_number=%s owner_user_id=%s '
+                    'payment_type=%s saved_card_id=%s master_id=%s connect_account=%s customer_charge_cents=%s',
                     order.id,
-                    getattr(master, 'id', None) if master else None,
+                    getattr(order, 'order_number', None) or '',
                     order.user_id,
+                    order.payment_type,
+                    order.saved_card_id,
+                    order.master_id,
+                    connect_acct or '—',
+                    pre_cents,
                 )
-            except Exception:  # noqa: BLE001
-                pass
-            return Response(
-                {
-                    'message': 'Order completed successfully',
-                    'order': serializer.data,
-                },
-                status=status.HTTP_200_OK,
-            )
+
+                try:
+                    charge_order_on_completion(order)
+                except StripeChargeError as e:
+                    logger.info(
+                        'order_complete_debug charge_fail order_id=%s error=%s',
+                        order.id,
+                        e.message,
+                    )
+                    return Response({'error': e.message}, status=status.HTTP_400_BAD_REQUEST)
+
+                logger.info(
+                    'order_complete_debug charge_ok order_id=%s pi=%s stripe_payment_status=%s '
+                    'amount_cents=%s currency=%s',
+                    order.id,
+                    order.stripe_payment_intent_id,
+                    order.stripe_payment_status,
+                    order.stripe_payment_amount_cents,
+                    order.stripe_payment_currency,
+                )
+
+                order.status = OrderStatus.COMPLETED
+                clear_completion_pin(order)
+                order.save(
+                    update_fields=[
+                        'status',
+                        'completion_pin',
+                        'completion_pin_issued_at',
+                        'updated_at',
+                        'stripe_payment_intent_id',
+                        'stripe_payment_status',
+                        'stripe_payment_amount_cents',
+                        'stripe_payment_currency',
+                        'stripe_payment_error',
+                    ]
+                )
+                logger.info(
+                    'order_complete_debug saved order_id=%s status=%s stripe_payment_status=%s pi=%s',
+                    order.id,
+                    order.status,
+                    order.stripe_payment_status,
+                    order.stripe_payment_intent_id,
+                )
 
         except Order.DoesNotExist:
             try:
@@ -3652,6 +3685,48 @@ class CompleteOrderView(APIView):
                 {'error': 'Order not found'},
                 status=status.HTTP_404_NOT_FOUND,
             )
+
+        order = Order.objects.select_related('saved_card').get(pk=oid)
+        master = request.user.master_profiles.first()
+        serializer = OrderSerializer(order, context={'request': request})
+        try:
+            from apps.order.services.notifications import notify_user_order_event
+
+            notify_user_order_event(
+                order,
+                title='Order completed',
+                body=f'Order #{order.id} was completed',
+                kind='order_completed',
+                extra_data={'status': str(order.status)},
+            )
+            try:
+                logger.warning(
+                    'order_complete_push user_id=%s kind=%s order_id=%s status=%s',
+                    order.user_id,
+                    'order_completed',
+                    order.id,
+                    order.status,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            logger.warning(
+                'order_complete_success order_id=%s master_id=%s user_id=%s',
+                order.id,
+                getattr(master, 'id', None) if master else None,
+                order.user_id,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return Response(
+            {
+                'message': 'Order completed successfully',
+                'order': serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class UploadOrderWorkCompletionImageView(APIView):

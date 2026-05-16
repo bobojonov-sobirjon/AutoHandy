@@ -60,6 +60,13 @@ class Master(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
     last_activity = models.DateTimeField(null=True, blank=True, verbose_name='Last activity')
+    stripe_connect_account_id = models.CharField(
+        max_length=64,
+        blank=True,
+        default='',
+        verbose_name='Stripe Connect account id',
+        help_text='acct_… — destination for marketplace payouts.',
+    )
 
     class Meta:
         verbose_name = 'Master'

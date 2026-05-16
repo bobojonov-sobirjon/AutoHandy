@@ -38,6 +38,21 @@ class OrderPriority(models.TextChoices):
     HIGH = 'high', 'High'
 
 
+class OrderPaymentType(models.TextChoices):
+    """Completed jobs are paid by card only (Stripe)."""
+
+    CARD = 'card', 'Card'
+
+
+class OrderStripePaymentStatus(models.TextChoices):
+    """Stripe capture status after master completes (card orders)."""
+
+    NOT_APPLICABLE = 'not_applicable', 'Not applicable'
+    PENDING = 'pending', 'Pending'
+    SUCCEEDED = 'succeeded', 'Succeeded'
+    FAILED = 'failed', 'Failed'
+
+
 class OrderType(models.TextChoices):
     """Order types: standard (normal booking with a master) vs SOS (emergency)."""
 
@@ -151,6 +166,16 @@ class Order(models.Model):
         default=0.00,
         verbose_name='Extra money',
         help_text='Additional charges added after service selection (e.g. extra work/parts).',
+    )
+    order_penalty_total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0.00,
+        verbose_name='Order penalties total',
+        help_text=(
+            'Fixed penalties on this order (e.g. client cancel fee). Added to client payable total; '
+            'not part of master job payout percentage base.'
+        ),
     )
     average_price = models.DecimalField(
         max_digits=12,
@@ -308,6 +333,50 @@ class Order(models.Model):
         blank=True,
         verbose_name='Custom request time',
         help_text='Preferred time of day for the service (client local / same TZ as custom_request_date).',
+    )
+    payment_type = models.CharField(
+        max_length=16,
+        choices=OrderPaymentType.choices,
+        default=OrderPaymentType.CARD,
+        verbose_name='Payment type',
+        help_text='Card only: charge on master complete via Stripe (Connect destination when set).',
+    )
+    saved_card = models.ForeignKey(
+        'payment.SavedCard',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='orders',
+        verbose_name='Saved card',
+        help_text='Client card used when payment_type=card.',
+    )
+    stripe_payment_intent_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        verbose_name='Stripe PaymentIntent id',
+    )
+    stripe_payment_status = models.CharField(
+        max_length=32,
+        choices=OrderStripePaymentStatus.choices,
+        default=OrderStripePaymentStatus.NOT_APPLICABLE,
+        verbose_name='Stripe payment status',
+    )
+    stripe_payment_amount_cents = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name='Stripe charged amount (minor units)',
+    )
+    stripe_payment_currency = models.CharField(
+        max_length=8,
+        blank=True,
+        default='',
+        verbose_name='Stripe charge currency',
+    )
+    stripe_payment_error = models.TextField(
+        blank=True,
+        default='',
+        verbose_name='Stripe last error',
     )
     completion_pin = models.CharField(
         max_length=4,

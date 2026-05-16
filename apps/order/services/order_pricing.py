@@ -17,6 +17,18 @@ def _q(x: Any) -> Decimal:
     return Decimal(str(x)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
+def _order_penalty_total(order) -> Decimal:
+    """Persisted penalties (cancel fees, etc.); non-negative for pricing."""
+    try:
+        v = getattr(order, 'order_penalty_total', None)
+        if v is None:
+            return Decimal('0')
+        x = _q(v)
+        return x if x > 0 else Decimal('0')
+    except Exception:
+        return Decimal('0')
+
+
 def _order_car_count(order) -> int:
     """
     Multiply line-item service prices by how many cars are on the order (same work per vehicle).
@@ -70,6 +82,9 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
       split across lines proportionally to each line price.
     - If ``settings.ORDER_DISCOUNT_IS_PERCENT`` is True and discount is in ``0..100``,
       treat as **percent** of subtotal; values ``> 100`` are still treated as fixed amount.
+
+    Penalties: ``order.order_penalty_total`` (non-negative) is added on top of the job total.
+    Returned ``work_total`` is the job line (subtotal − discount + extra_money); ``total`` includes penalties.
     """
     extra_money = _q(getattr(order, 'extra_money', 0) or 0)
     offer_price = _custom_request_offer_subtotal(order)
@@ -166,7 +181,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
             # No services: discount allocation is fully on offer.
             offer_discount_allocated = discount_applied
 
-        total = _q(
+        work_total = _q(
             max(
                 (offer_price - offer_discount_allocated)
                 + sum((v.get('line_total', Decimal('0')) for v in lines_by_id.values()), Decimal('0'))
@@ -174,6 +189,8 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
                 Decimal('0'),
             )
         )
+        penalty_total = _order_penalty_total(order)
+        total = _q(max(work_total + penalty_total, Decimal('0')))
 
         return {
             'offer_price': offer_price,
@@ -184,6 +201,8 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
             'discount_raw': raw,
             'discount_mode': mode,
             'discount_applied': discount_applied,
+            'work_total': work_total,
+            'penalty_total': penalty_total,
             'total': total,
             'car_count': car_count,
             'lines_by_order_service_id': lines_by_id,
@@ -276,7 +295,9 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
         mode = 'amount'
         discount_applied = _q(min(raw, subtotal))
 
-    total = _q(max(subtotal - discount_applied + extra_money, Decimal('0')))
+    work_total = _q(max(subtotal - discount_applied + extra_money, Decimal('0')))
+    penalty_total = _order_penalty_total(order)
+    total = _q(max(work_total + penalty_total, Decimal('0')))
 
     lines_out: list[dict[str, Any]] = []
     n = len(rows)
@@ -338,6 +359,8 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
         'discount_raw': raw,
         'discount_mode': mode,
         'discount_applied': discount_applied,
+        'work_total': work_total,
+        'penalty_total': penalty_total,
         'total': total,
         'car_count': car_count,
         'lines_by_order_service_id': by_id,
@@ -355,18 +378,21 @@ def get_cached_order_pricing(order, context: dict) -> dict[str, Any]:
 
 
 def order_payable_total_str(order) -> str:
-    """Order total after line-item discount rules (same as ``pricing.total``)."""
+    """Full payable total: job line (after discount rules) plus ``order_penalty_total``."""
     bd = compute_order_price_breakdown(order)
     return format(bd['total'], 'f')
 
 
 def estimate_cancellation_penalty_amount(order, penalty_percent: int) -> str:
     """
-    Rough fee = ``order_payable_total * penalty_percent / 100`` (two decimals).
-    Billing may use a different base; this mirrors the order ``pricing.total`` snapshot.
+    Rough fee = ``pricing.work_total * penalty_percent / 100`` (two decimals).
+    Uses job subtotal (services/offer + extra − discount), excluding any existing ``order_penalty_total``.
     """
     if penalty_percent <= 0:
         return '0.00'
     bd = compute_order_price_breakdown(order)
-    amt = _q(bd['total'] * Decimal(penalty_percent) / Decimal('100'))
+    base = bd.get('work_total')
+    if base is None:
+        base = _q(Decimal(str(bd['total'])) - Decimal(str(bd.get('penalty_total', 0))))
+    amt = _q(base * Decimal(penalty_percent) / Decimal('100'))
     return format(amt, 'f')

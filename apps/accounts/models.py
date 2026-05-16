@@ -97,6 +97,13 @@ class CustomUser(AbstractUser):
         auto_now=True,
         verbose_name="Updated at"
     )
+    stripe_customer_id = models.CharField(
+        max_length=64,
+        blank=True,
+        default='',
+        verbose_name='Stripe customer id',
+        help_text='cus_… for saved cards / off-session charges (client).',
+    )
 
     # Use email as the username field
     USERNAME_FIELD = 'email'

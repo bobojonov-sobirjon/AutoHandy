@@ -84,6 +84,8 @@ class MasterSerializer(serializers.ModelSerializer):
     completed_orders_count = serializers.SerializerMethodField()
     eta_minutes_approx = serializers.SerializerMethodField()
     min_service_price_for_category = serializers.SerializerMethodField()
+    stripe_connect_account_id = serializers.SerializerMethodField()
+    stripe_balance = serializers.SerializerMethodField()
 
     class Meta:
         model = Master
@@ -96,10 +98,12 @@ class MasterSerializer(serializers.ModelSerializer):
             'eta_minutes_approx', 'min_service_price_for_category',
             'created_at', 'updated_at',
             'last_activity', 'skills_profile', 'schedule_profile',
+            'stripe_connect_account_id', 'stripe_balance',
         ]
         read_only_fields = [
             'id', 'user', 'created_at', 'updated_at', 'last_activity', 'distance',
             'completed_orders_count', 'eta_minutes_approx', 'min_service_price_for_category',
+            'stripe_connect_account_id', 'stripe_balance',
         ]
 
     def to_representation(self, instance):
@@ -244,6 +248,29 @@ class MasterSerializer(serializers.ModelSerializer):
             'master_cancellations_this_month': master_cancellations_this_month(obj),
             'schedule_forward_horizon_days_cap': cap,
         }
+
+    def _stripe_owner(self, obj) -> bool:
+        request = self.context.get('request')
+        return bool(request and request.user.is_authenticated and request.user.id == obj.user_id)
+
+    def get_stripe_connect_account_id(self, obj):
+        if not self._stripe_owner(obj):
+            return None
+        return (getattr(obj, 'stripe_connect_account_id', '') or '').strip() or None
+
+    def get_stripe_balance(self, obj):
+        """Stripe Connect wallet (owner only); same data shape as GET /api/master/stripe-balance/."""
+        if not self._stripe_owner(obj):
+            return None
+        acct = (getattr(obj, 'stripe_connect_account_id', '') or '').strip()
+        if not acct:
+            return {'linked': False, 'message': 'Stripe Connect account not linked.'}
+        from apps.payment.services.connect_balance import try_fetch_connect_balance
+
+        data = try_fetch_connect_balance(acct)
+        if data is None:
+            return {'linked': True, 'stripe_connect_account_id': acct, 'load_error': True}
+        return {'linked': True, **data}
 
 
 @extend_schema_serializer(

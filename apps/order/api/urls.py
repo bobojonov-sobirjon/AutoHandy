@@ -1,5 +1,6 @@
 from django.urls import path
 from apps.order.api import views
+from apps.payment.api.views import OrderCheckoutPreviewView, OrderPaymentCardPatchView
 
 app_name = 'order'
 
@@ -95,6 +96,8 @@ urlpatterns = [
         name='order-master-preferred-time',
     ),
     path('<int:order_id>/decline/', views.DeclineOrderView.as_view(), name='decline-order'),
+    path('<int:order_id>/payment-card/', OrderPaymentCardPatchView.as_view(), name='order-payment-card'),
+    path('<int:order_id>/checkout-preview/', OrderCheckoutPreviewView.as_view(), name='order-checkout-preview'),
     path('<int:order_id>/complete/', views.CompleteOrderView.as_view(), name='complete-order'),
     path(
         '<int:order_id>/work-completion-image/',

@@ -39,6 +39,7 @@ from apps.order.services.status_workflow import (
 )
 from apps.order.services.completion_pin import clear_completion_pin, issue_completion_pin
 from apps.order.services.order_pricing import get_cached_order_pricing
+from apps.payment.services.checkout_fees import build_order_marketplace_fee_display
 from apps.order.services.standard_booking_availability import preferred_slot_blocked_message
 from apps.order.services.notifications import _media_url
 from config.wgs84 import WGS84_COORD_DECIMAL_KWARGS
@@ -153,10 +154,13 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
     subtotal = serializers.SerializerMethodField()
     discount_applied = serializers.SerializerMethodField()
     extra_money = serializers.SerializerMethodField()
+    work_total = serializers.SerializerMethodField()
+    penalty_total = serializers.SerializerMethodField()
     total = serializers.SerializerMethodField()
     car_count = serializers.SerializerMethodField()
     emergency_pricing = serializers.SerializerMethodField()
     offer_price = serializers.SerializerMethodField()
+    marketplace_fees = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -167,9 +171,12 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
             'subtotal',
             'discount_applied',
             'extra_money',
+            'work_total',
+            'penalty_total',
             'total',
             'car_count',
             'emergency_pricing',
+            'marketplace_fees',
         )
 
     def get_discount_mode(self, obj):
@@ -183,6 +190,14 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
 
     def get_extra_money(self, obj):
         return format(get_cached_order_pricing(obj, self.context).get('extra_money', Decimal('0')), 'f')
+
+    def get_work_total(self, obj):
+        br = get_cached_order_pricing(obj, self.context)
+        wt = br.get('work_total', br.get('total'))
+        return format(Decimal(str(wt)), 'f')
+
+    def get_penalty_total(self, obj):
+        return format(Decimal(str(get_cached_order_pricing(obj, self.context).get('penalty_total', 0))), 'f')
 
     def get_total(self, obj):
         return format(get_cached_order_pricing(obj, self.context)['total'], 'f')
@@ -209,6 +224,10 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
         br = get_cached_order_pricing(obj, self.context)
         v = br.get('offer_price')
         return format(Decimal(str(v)), 'f') if v is not None else None
+
+    def get_marketplace_fees(self, obj):
+        """TZ-aligned fee lines: scheduled vs emergency; client vs master (see checkout_fees)."""
+        return build_order_marketplace_fee_display(obj)
 
 
 class OrderWorkflowNestedSerializer(serializers.ModelSerializer):
@@ -273,6 +292,12 @@ class OrderSerializer(serializers.ModelSerializer):
     workflow = OrderWorkflowNestedSerializer(source='*', read_only=True)
     eta = OrderEtaNestedSerializer(source='*', read_only=True)
     timestamps = OrderTimestampsNestedSerializer(source='*', read_only=True)
+    payment_type = serializers.CharField(read_only=True)
+    saved_card = serializers.SerializerMethodField()
+    stripe_payment_intent_id = serializers.SerializerMethodField()
+    stripe_payment_status = serializers.SerializerMethodField()
+    stripe_payment_amount_cents = serializers.SerializerMethodField()
+    stripe_payment_currency = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -287,6 +312,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'master',
             'average_price',
             'average_service_name',
+            'order_penalty_total',
             'offer_price',
             'pricing', 'services', 'reviews', 'average_rating',
             'workflow', 'eta',
@@ -295,14 +321,46 @@ class OrderSerializer(serializers.ModelSerializer):
             'client_completion_pin',
             'custom_request_selected_offer',
             'chat_room_id',
+            'payment_type', 'saved_card',
+            'stripe_payment_intent_id', 'stripe_payment_status',
+            'stripe_payment_amount_cents', 'stripe_payment_currency',
         ]
         read_only_fields = [
             'id',
             'workflow', 'eta', 'timestamps', 'pricing',
+            'order_penalty_total',
         ]
     
     def get_user(self, obj):
         return UserSerializer(obj.user, context=self.context).data
+
+    def get_saved_card(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated or obj.user_id != request.user.id:
+            return None
+        if not obj.saved_card_id:
+            return None
+        try:
+            c = obj.saved_card
+        except Exception:
+            return None
+        return {'id': c.id, 'brand': c.brand, 'last4': c.last4}
+
+    def _payment_privileged(self, obj):
+        request = self.context.get('request')
+        return bool(request and request.user.is_authenticated and obj.user_id == request.user.id)
+
+    def get_stripe_payment_intent_id(self, obj):
+        return obj.stripe_payment_intent_id if self._payment_privileged(obj) else None
+
+    def get_stripe_payment_status(self, obj):
+        return obj.stripe_payment_status if self._payment_privileged(obj) else None
+
+    def get_stripe_payment_amount_cents(self, obj):
+        return obj.stripe_payment_amount_cents if self._payment_privileged(obj) else None
+
+    def get_stripe_payment_currency(self, obj):
+        return obj.stripe_payment_currency if self._payment_privileged(obj) else None
 
     def get_custom_request_selected_offer(self, obj):
         """

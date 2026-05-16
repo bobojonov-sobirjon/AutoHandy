@@ -5,26 +5,18 @@ from pathlib import Path
 from celery.schedules import crontab
 
 
-# Load environment variables from .env file
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     load_dotenv = None
-    
-    
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
+
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
-
-# SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-698=9lt4($dou4__kd&*tor4j5kp9g#g2mh8bp37v334-c$8h^'
 
-# SECURITY WARNING: don't run with debug turned on in production!
-# Server: .env da DEBUG=false yoki DJANGO_DEBUG=0 (aks holda log fayl Celery asyncio DEBUG bilan to‘lib ketadi).
 DEBUG = os.getenv('DJANGO_DEBUG', os.getenv('DEBUG', 'true')).lower() in (
     '1',
     'true',
@@ -34,22 +26,21 @@ DEBUG = os.getenv('DJANGO_DEBUG', os.getenv('DEBUG', 'true')).lower() in (
 ALLOWED_HOSTS = ["*"]
 
 
-# Application definition
-
 LOCAL_APPS = [
     'apps.accounts',
     'apps.car',
     'apps.master',
     'apps.order',
+    'apps.payment',
     'apps.categories',
     'apps.chat',
 ]
 
 INSTALLED_APPS = [
-    'daphne',  # Must be first for WebSocket support
+    'daphne',
     'django.contrib.sites',
-    'jazzmin',  # Admin theme — must be before django.contrib.admin
-    'nested_admin',  # Master admin nested inlines; templates: nesting/admin/inlines/...
+    'jazzmin',
+    'nested_admin',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -101,12 +92,8 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-# ASGI Application for WebSocket support
 ASGI_APPLICATION = 'config.asgi.application'
 
-# Channel layers: InMemory = one Python process only. HTTP and WebSocket must hit the SAME process
-# (e.g. one Daphne on :8001 for both). If API runs on runserver :8000 and WS on Daphne :8001, groups
-# do not match — use Redis (CHANNEL_LAYER_REDIS or REDIS_URL starting with redis://).
 _CHANNEL_REDIS = os.getenv('CHANNEL_LAYER_REDIS', '') or os.getenv('REDIS_URL', '')
 if _CHANNEL_REDIS.startswith('redis'):
     CHANNEL_LAYERS = {
@@ -121,9 +108,6 @@ else:
     }
 
 
-# Database
-# https://docs.djangoproject.com/en/5.2/ref/settings/#databases
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -135,9 +119,6 @@ DATABASES = {
     }
 }
 
-
-# Password validation
-# https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -155,9 +136,6 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 
-# Internationalization
-# https://docs.djangoproject.com/en/5.2/topics/i18n/
-
 LANGUAGE_CODE = 'en-us'
 
 TIME_ZONE = 'UTC'
@@ -167,25 +145,17 @@ USE_I18N = True
 USE_TZ = True
 
 
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/5.2/howto/static-files/
-
 STATIC_URL = 'static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 MEDIA_URL = "/media/"
-# Production uchun /var/www/media, development uchun local media folder
 MEDIA_ROOT = os.getenv('MEDIA_ROOT', '/var/www/media')
-# SOS WebSocket / Celery: /media/... ni to‘liq URL qilish (so‘ngida slash yo‘q). Masalan: http://localhost:8001
 API_PUBLIC_BASE_URL = os.getenv('API_PUBLIC_BASE_URL', '').rstrip('/')
 
 
 LOCALE_PATHS = [
     os.path.join(BASE_DIR, 'locale'),
 ]
-
-# Default primary key field type
-# https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -242,7 +212,6 @@ CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 CORS_EXPOSE_HEADERS = ['Content-Type', 'X-CSRFToken']
 
-# CORS Headers
 CORS_ALLOW_HEADERS = [
     'accept',
     'accept-encoding',
@@ -257,7 +226,6 @@ CORS_ALLOW_HEADERS = [
     'pragma',
 ]
 
-# CORS Methods
 CORS_ALLOW_METHODS = [
     'DELETE',
     'GET',
@@ -267,19 +235,16 @@ CORS_ALLOW_METHODS = [
     'PUT',
 ]
 
-# CSRF Settings for production
-CSRF_COOKIE_SECURE = False  # Set True if using HTTPS
+CSRF_COOKIE_SECURE = False
 CSRF_COOKIE_HTTPONLY = False
 CSRF_COOKIE_SAMESITE = 'Lax'
 CSRF_USE_SESSIONS = False
 CSRF_COOKIE_NAME = 'csrftoken'
 
-# Session Settings
-SESSION_COOKIE_SECURE = False  # Set True if using HTTPS
+SESSION_COOKIE_SECURE = False
 SESSION_COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_HTTPONLY = True
 
-# Security Settings for development/production
 SECURE_CROSS_ORIGIN_OPENER_POLICY = None
 
 AUTHENTICATION_BACKENDS = (
@@ -290,7 +255,6 @@ AUTH_USER_MODEL = 'accounts.CustomUser'
 
 SITE_ID = 1
 
-# django-jazzmin — https://django-jazzmin.readthedocs.io/
 JAZZMIN_SETTINGS = {
     'site_title': 'AutoHandy Admin',
     'site_header': 'AutoHandy',
@@ -307,7 +271,6 @@ JAZZMIN_SETTINGS = {
     'navigation_expanded': False,
     'hide_apps': [],
     'hide_models': [],
-    # Sidebar: Order ilovasi ichida modellarni alfavit emas, ish jarayoniga mos tartibda
     'order_with_respect_to': [
         'order.order',
         'order.standardorder',
@@ -361,71 +324,86 @@ JAZZMIN_UI_TWEAKS = {
     },
 }
 
-# Email Configuration
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'  # Change to your SMTP server
+EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 EMAIL_HOST_USER = 'sobirbobojonov2000@gmail.com'
 EMAIL_HOST_PASSWORD = 'harntaefuxuvlqqw'
 DEFAULT_FROM_EMAIL = 'sobirbobojonov2000@gmail.com'
 
-# Public URL prefix for email verification links (no trailing slash). Example: https://app.yourdomain.com
 EMAIL_VERIFICATION_PUBLIC_BASE = os.getenv('EMAIL_VERIFICATION_PUBLIC_BASE', 'https://autohandy.app')
 EMAIL_VERIFICATION_TOKEN_HOURS = int(os.getenv('EMAIL_VERIFICATION_TOKEN_HOURS', '48'))
 
-# Twilio SMS (primary)
 TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
 TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
-TWILIO_PHONE_NUMBER = os.environ.get('TWILIO_PHONE_NUMBER', '')  # E.164 e.g. +1234567890
-DEFAULT_PHONE_COUNTRY_CODE = os.environ.get('DEFAULT_PHONE_COUNTRY_CODE', '')  # e.g. 998 or 1
+TWILIO_PHONE_NUMBER = os.environ.get('TWILIO_PHONE_NUMBER', '')
+DEFAULT_PHONE_COUNTRY_CODE = os.environ.get('DEFAULT_PHONE_COUNTRY_CODE', '')
 
-# SMS service settings
-SMS_SERVICE = 'twilio'  # Primary: twilio
-SMS_SEND_CODE_IN_RESPONSE_IF_FAIL = True  # If Twilio fails, still return sms_code in response (for dev/testing)
-SMS_DEBUG_IN_RESPONSE = os.environ.get('SMS_DEBUG_IN_RESPONSE', '').lower() in ['1', 'true', 'yes']  # expose sms_debug in response (dev only)
+SMS_SERVICE = 'twilio'
+SMS_SEND_CODE_IN_RESPONSE_IF_FAIL = True
+SMS_DEBUG_IN_RESPONSE = os.environ.get('SMS_DEBUG_IN_RESPONSE', '').lower() in ['1', 'true', 'yes']
 
-# Legacy SMSC.ru (optional fallback, kept for reference)
 SMSC_LOGIN = os.environ.get('SMSC_LOGIN', '')
 SMSC_PASSWORD = os.environ.get('SMSC_PASSWORD', '')
 SMSC_API_URL = 'https://smsc.ru/sys/send.php'
 
-# Master must accept/decline assigned order within this window (minutes); then auto-decline.
 MASTER_OFFER_RESPONSE_MINUTES = int(os.environ.get('MASTER_OFFER_RESPONSE_MINUTES', '15'))
-# After a master accepts an order, they must mark "on the way" within this window (minutes).
-# If they don't, the system takes action:
-# - SOS/custom-request: unassign + re-broadcast to other masters
-# - Standard: auto-cancel (client can choose another master)
 MASTER_NO_DEPARTURE_MINUTES = int(os.environ.get('MASTER_NO_DEPARTURE_MINUTES', '30'))
-# Legacy sequential SOS ring (unused for broadcast); kept for old clients reading payload fields.
 SOS_OFFER_SECONDS_PER_MASTER = int(os.environ.get('SOS_OFFER_SECONDS_PER_MASTER', '420'))
-# SOS broadcast: all in-zone masters in queue get the offer; shared countdown until auto-reject.
 SOS_BROADCAST_RESPONSE_SECONDS = int(os.environ.get('SOS_BROADCAST_RESPONSE_SECONDS', '420'))
-# Emergency pricing timezone (America local time for day/night multipliers).
 EMERGENCY_TIME_ZONE = os.environ.get('EMERGENCY_TIME_ZONE', 'America/Los_Angeles')
-# Emergency (SOS) multipliers.
 EMERGENCY_DAY_MULTIPLIER = float(os.environ.get('EMERGENCY_DAY_MULTIPLIER', '1.3'))
 EMERGENCY_NIGHT_MULTIPLIER = float(os.environ.get('EMERGENCY_NIGHT_MULTIPLIER', '1.6'))
 
-# Emergency dispatch gating by master rates.
 MASTER_RATE_WINDOW_DAYS = int(os.environ.get('MASTER_RATE_WINDOW_DAYS', '30'))
 EMERGENCY_ACCEPTANCE_RATE_MIN = int(os.environ.get('EMERGENCY_ACCEPTANCE_RATE_MIN', '90'))
 EMERGENCY_COMPLETION_RATE_MIN = int(os.environ.get('EMERGENCY_COMPLETION_RATE_MIN', '90'))
 EMERGENCY_LOW_TIER_DELAY_SECONDS = int(os.environ.get('EMERGENCY_LOW_TIER_DELAY_SECONDS', '120'))
-# Fallback when Celery countdown/beat is broken (e.g. Windows prefork): while masters stay on SOS WS,
-# run expire_stale_master_offers at most once per this many seconds (per ASGI process). 0 = off.
 SOS_WEBSOCKET_STALE_SWEEP_SEC = int(os.environ.get('SOS_WEBSOCKET_STALE_SWEEP_SEC', '8'))
 
-# Custom request: broadcast pending jobs to masters within this radius (miles); master offer POST uses same limit.
 CUSTOM_REQUEST_BROADCAST_RADIUS_MILES = float(os.environ.get('CUSTOM_REQUEST_BROADCAST_RADIUS_MILES', '10'))
 CUSTOM_REQUEST_MIN_IMAGES = int(os.environ.get('CUSTOM_REQUEST_MIN_IMAGES', '2'))
 CUSTOM_REQUEST_MAX_IMAGES = int(os.environ.get('CUSTOM_REQUEST_MAX_IMAGES', '10'))
-# POST /api/order/<id>/work-completion-image/ — max files per request (multipart `images` repeated).
 WORK_COMPLETION_MAX_IMAGES_PER_REQUEST = int(
     os.environ.get('WORK_COMPLETION_MAX_IMAGES_PER_REQUEST', '20')
 )
 
-# Celery (install redis and run: celery -A config worker -l info && celery -A config beat -l info)
+STRIPE_SECRET_KEY = (os.environ.get('STRIPE_SECRET_KEY') or '').strip()
+STRIPE_PUBLISHABLE_KEY = (os.environ.get('STRIPE_PUBLISHABLE_KEY') or '').strip()
+STRIPE_CHARGE_CURRENCY = (os.environ.get('STRIPE_CHARGE_CURRENCY') or 'usd').strip().lower()
+STRIPE_CONNECT_EXTRA_APPLICATION_FEE_BPS = int(os.environ.get('STRIPE_CONNECT_EXTRA_APPLICATION_FEE_BPS', '0'))
+STRIPE_CONNECT_ACCOUNT_DEFAULT_COUNTRY = (os.environ.get('STRIPE_CONNECT_ACCOUNT_DEFAULT_COUNTRY') or '').strip().upper()
+STRIPE_CONNECT_ONBOARDING_RETURN_URL = (os.environ.get('STRIPE_CONNECT_ONBOARDING_RETURN_URL') or '').strip()
+STRIPE_CONNECT_ONBOARDING_REFRESH_URL = (os.environ.get('STRIPE_CONNECT_ONBOARDING_REFRESH_URL') or '').strip()
+PROVIDER_PLATFORM_FEE_PERCENT = float(os.environ.get('PROVIDER_PLATFORM_FEE_PERCENT', '10'))
+CUSTOMER_SERVICE_FEE_PERCENT_SCHEDULED = float(os.environ.get('CUSTOMER_SERVICE_FEE_PERCENT_SCHEDULED', '4'))
+CUSTOMER_PLATFORM_FEE_PERCENT_SCHEDULED = float(os.environ.get('CUSTOMER_PLATFORM_FEE_PERCENT_SCHEDULED', '4'))
+EMERGENCY_DISPATCH_FEE_PERCENT = float(os.environ.get('EMERGENCY_DISPATCH_FEE_PERCENT', '6'))
+CUSTOMER_SERVICE_FEE_PERCENT_EMERGENCY = float(os.environ.get('CUSTOMER_SERVICE_FEE_PERCENT_EMERGENCY', '5'))
+MASTER_PAYOUT_SCHEDULE_NOTE = os.environ.get('MASTER_PAYOUT_SCHEDULE_NOTE', '').strip()
+STRIPE_CONNECT_APPLY_PAYOUT_SCHEDULE = os.environ.get(
+    'STRIPE_CONNECT_APPLY_PAYOUT_SCHEDULE', 'true'
+).lower() in ('1', 'true', 'yes')
+STRIPE_CONNECT_ENSURE_PAYOUT_SCHEDULE_ON_ONBOARDING = os.environ.get(
+    'STRIPE_CONNECT_ENSURE_PAYOUT_SCHEDULE_ON_ONBOARDING', 'true'
+).lower() in ('1', 'true', 'yes')
+STRIPE_CONNECT_PAYOUT_INTERVAL = (os.environ.get('STRIPE_CONNECT_PAYOUT_INTERVAL') or 'weekly').strip().lower()
+STRIPE_CONNECT_PAYOUT_WEEKLY_ANCHOR = (
+    (os.environ.get('STRIPE_CONNECT_PAYOUT_WEEKLY_ANCHOR') or 'monday').strip().lower()
+)
+_STRIPE_CONNECT_PAYOUT_DELAY_RAW = (os.environ.get('STRIPE_CONNECT_PAYOUT_DELAY_DAYS') or '').strip()
+STRIPE_CONNECT_PAYOUT_DELAY_DAYS: str | int | None
+if not _STRIPE_CONNECT_PAYOUT_DELAY_RAW:
+    STRIPE_CONNECT_PAYOUT_DELAY_DAYS = None
+elif _STRIPE_CONNECT_PAYOUT_DELAY_RAW.lower() == 'minimum':
+    STRIPE_CONNECT_PAYOUT_DELAY_DAYS = 'minimum'
+else:
+    try:
+        STRIPE_CONNECT_PAYOUT_DELAY_DAYS = int(_STRIPE_CONNECT_PAYOUT_DELAY_RAW)
+    except ValueError:
+        STRIPE_CONNECT_PAYOUT_DELAY_DAYS = None
+
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://127.0.0.1:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
 CELERY_TASK_ALWAYS_EAGER = os.getenv('CELERY_TASK_ALWAYS_EAGER', '').lower() in ('1', 'true', 'yes')
@@ -433,14 +411,8 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
-# Celery 6: startup broker retries (silences deprecation when True).
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
-# Beat: run `celery -A config.celery beat -l info` alongside the worker.
-# Standard (and non-queue SOS) pending orders use master_response_deadline = now + MASTER_OFFER_RESPONSE_MINUTES.
-# If the master does not accept/decline before that time, expire_stale_master_offers marks the order rejected
-# and clears master (same outcome as POST …/decline/). Per-order ETA tasks also call expire_master_offer_for_order;
-# this schedule is the time-based safety net if a worker missed an ETA.
 CELERY_BEAT_SCHEDULE = {
     'expire-stale-master-offers': {
         'task': 'apps.order.tasks.expire_stale_master_offers_task',
@@ -460,21 +432,15 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
-# Push warnings before automatic deadlines (minutes).
 ORDER_DEADLINE_WARN_MINUTES = int(os.getenv('ORDER_DEADLINE_WARN_MINUTES', '3'))
 
-# Push notification defaults
-# Android: channel_id must exist in the app (Flutter creates it on startup).
 PUSH_ANDROID_CHANNEL_ID = os.getenv('PUSH_ANDROID_CHANNEL_ID', 'high_importance_channel')
 
-# WebSocket chat upload limit (base64 decoded bytes).
 CHAT_WS_MAX_UPLOAD_BYTES = int(os.getenv('CHAT_WS_MAX_UPLOAD_BYTES', str(5 * 1024 * 1024)))
 
-# After master is "on the way", client may cancel without penalty after this many hours (still on the way).
 CLIENT_CANCEL_NO_PENALTY_AFTER_ON_THE_WAY_HOURS = int(
     os.getenv('CLIENT_CANCEL_NO_PENALTY_AFTER_ON_THE_WAY_HOURS', '2')
 )
-# Client cancellation fees (see client_cancellation_snapshot in order status_workflow).
 CLIENT_CANCEL_GRACE_MINUTES_AFTER_ACCEPT = int(
     os.getenv('CLIENT_CANCEL_GRACE_MINUTES_AFTER_ACCEPT', '10')
 )
@@ -487,30 +453,18 @@ CLIENT_CANCEL_PENALTY_PERCENT_ON_THE_WAY = int(
 CLIENT_CANCEL_PENALTY_PERCENT_ARRIVED = int(
     os.getenv('CLIENT_CANCEL_PENALTY_PERCENT_ARRIVED', '25')
 )
-# Master "Start job" (in_progress): must be within this distance (meters) of order coordinates after arrived.
 ORDER_START_JOB_MAX_DISTANCE_M = int(os.getenv('ORDER_START_JOB_MAX_DISTANCE_M', '300'))
-# Max minutes master may declare for ETA when marking on_the_way (default 72h).
 ORDER_ETA_MAX_MINUTES = int(os.getenv('ORDER_ETA_MAX_MINUTES', str(72 * 60)))
-# Avg speed (km/h) for auto ETA: order GPS → master workshop/user GPS when status=on_the_way without manual eta.
 ORDER_ETA_ASSUMED_SPEED_KMH = float(os.getenv('ORDER_ETA_ASSUMED_SPEED_KMH', '35'))
-# Auto-cancel if the master did not arrive by (estimated_arrival_at + grace minutes).
 ORDER_AUTO_CANCEL_NO_SHOW_GRACE_MINUTES = int(os.getenv('ORDER_AUTO_CANCEL_NO_SHOW_GRACE_MINUTES', '40'))
-# If True: order.discount in 0..100 is a percent of subtotal; above 100 = fixed amount. If False: always fixed amount.
 ORDER_DISCOUNT_IS_PERCENT = os.getenv('ORDER_DISCOUNT_IS_PERCENT', 'false').lower() in (
     '1',
     'true',
     'yes',
 )
-# Master cancel: first 3 cancellations in a calendar month do not cap schedule horizon; from the 4th on,
-# see master_schedule_forward_horizon_days in apps.order.services.status_workflow.
 MASTER_FREE_CANCELLATIONS_PER_MONTH = int(os.getenv('MASTER_FREE_CANCELLATIONS_PER_MONTH', '3'))
-# When the master is under no cancellation-policy cap, bulk schedule must cover this many days from today.
 MASTER_SCHEDULE_MIN_COVERAGE_DAYS_DEFAULT = int(os.getenv('MASTER_SCHEDULE_MIN_COVERAGE_DAYS_DEFAULT', '14'))
 
-# Logging — barcha ilova loglari bitta faylga (serverda real-time: tail -f yo‘li)
-# Server: odatda DJANGO_LOG_FILE=/var/www/AutoHandy/logs/django.log (.env da yozing).
-# Windows: DJANGO_LOG_FILE berilmasa, BASE_DIR / logs / django.log ishlatiladi.
-# Agar tanlangan yo‘lga yozib bo‘lmasa, BASE_DIR/logs ga tushadi yoki faqat console (502 oldini olish).
 if os.name == 'nt' and not os.environ.get('DJANGO_LOG_FILE'):
     _DJANGO_LOG_FILE = str(BASE_DIR / 'logs' / 'django.log')
 else:
@@ -578,7 +532,6 @@ LOGGING = {
         },
     },
     'handlers': _LOG_HANDLERS,
-    # Shu loglar root DEBUG bo‘lsa ham ichki “shovqin”ni bosadi (Celery task stub chop etish va asyncio selector).
     'loggers': {
         'celery.utils.functional': {
             'level': 'WARNING',
@@ -595,7 +548,6 @@ LOGGING = {
     },
 }
 
-# DRF Spectacular Configuration
 SPECTACULAR_SETTINGS = {
     'TITLE': 'AutoHandy APIs',
     'DESCRIPTION': 'AutoHandy Apies - JWT Authentication Required',
@@ -614,7 +566,6 @@ SPECTACULAR_SETTINGS = {
         'hideHostname': True,
     },
     'SERVERS': [
-        {'url': 'http://217.114.11.249:7002/', 'description': 'Production server'},
         {'url': 'http://localhost:8001', 'description': 'Development server'},
     ],
     'TAGS': [
@@ -635,6 +586,8 @@ SPECTACULAR_SETTINGS = {
         {'name': 'System', 'description': 'Health check, app version'},
         {'name': 'FAQ', 'description': 'Frequently asked questions'},
         {'name': 'User Profile', 'description': 'User profile and registration'},
+        {'name': 'Stripe — Driver', 'description': 'Driver (order owner): Stripe Customer, client saved cards, order card attach, checkout preview.'},
+        {'name': 'Stripe — Master', 'description': 'Master: Connect link/onboarding, balance, checkout history (Stripe Connect payouts).'},
     ],
     'PREPROCESSING_HOOKS': [],
     'POSTPROCESSING_HOOKS': [],

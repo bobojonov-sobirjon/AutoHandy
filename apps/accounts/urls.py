@@ -1,4 +1,6 @@
 from django.urls import path
+
+from .stripe_customer_view import StripeCustomerView
 from .views import (
     LoginView,
     CheckSMSCodeView,
@@ -37,6 +39,7 @@ urlpatterns = [
     path('user/', UserDetailsView.as_view(), name='user_details'),
     path('user/location/', UserLocationUpdateView.as_view(), name='user_location'),
     path('user/<int:user_id>/', UserDetailsByIdView.as_view(), name='user_details_by_id'),
+    path('stripe-customer/', StripeCustomerView.as_view(), name='stripe_customer'),
     path(
         'user/register-profile/',
         UserProfileRegistrationView.as_view(),

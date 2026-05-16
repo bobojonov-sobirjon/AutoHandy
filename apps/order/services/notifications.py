@@ -587,11 +587,16 @@ def build_sos_order_websocket_payload(
                     }
                 )
             # Replace pricing totals for WS (discount not applied in SOS offer list).
+            pen = Decimal(str(bd.get('penalty_total', 0)))
+            if pen < 0:
+                pen = Decimal('0')
             bd = {
                 **bd,
                 'subtotal': subtotal,
                 'discount_applied': Decimal('0'),
-                'total': subtotal,
+                'work_total': subtotal,
+                'penalty_total': pen,
+                'total': (subtotal + pen).quantize(Decimal('0.01')),
             }
         except Exception:  # noqa: BLE001
             pass
@@ -676,6 +681,8 @@ def build_sos_order_websocket_payload(
         'pricing': {
             'subtotal': format(Decimal(str(bd.get('subtotal', 0))), 'f'),
             'discount_applied': format(Decimal(str(bd.get('discount_applied', 0))), 'f'),
+            'work_total': format(Decimal(str(bd.get('work_total', bd.get('total', 0)))), 'f'),
+            'penalty_total': format(Decimal(str(bd.get('penalty_total', 0))), 'f'),
             'total': format(Decimal(str(bd.get('total', 0))), 'f'),
             'emergency_pricing': {
                 **em,

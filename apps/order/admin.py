@@ -15,6 +15,7 @@ from .models import (
     OrderImage,
     OrderService,
     OrderStatus,
+    OrderStripePaymentStatus,
     OrderType,
     OrderWorkCompletionImage,
     OrderPriority,
@@ -299,6 +300,23 @@ class BaseOrderAdmin(admin.ModelAdmin):
     status_badge.short_description = 'Status'
     status_badge.admin_order_field = 'status'
 
+    def payment_status_badge(self, obj):
+        colors = {
+            OrderStripePaymentStatus.NOT_APPLICABLE: '#6c757d',
+            OrderStripePaymentStatus.PENDING: '#ffc107',
+            OrderStripePaymentStatus.SUCCEEDED: '#28a745',
+            OrderStripePaymentStatus.FAILED: '#dc3545',
+        }
+        color = colors.get(obj.stripe_payment_status, '#6c757d')
+        return format_html(
+            '<span style="background-color:{};color:#fff;padding:3px 8px;border-radius:3px;font-size:11px;">{}</span>',
+            color,
+            obj.get_stripe_payment_status_display(),
+        )
+
+    payment_status_badge.short_description = 'Payment status'
+    payment_status_badge.admin_order_field = 'stripe_payment_status'
+
     def priority_badge(self, obj):
         colors = {
             OrderPriority.LOW: '#28a745',
@@ -361,6 +379,7 @@ class OrderAdmin(BaseOrderAdmin):
         'user_link',
         'assigned_master',
         'status_badge',
+        'payment_status_badge',
         'priority_badge',
         'location_short',
         'coords_link',
@@ -368,6 +387,7 @@ class OrderAdmin(BaseOrderAdmin):
     ]
     list_filter = [
         'status',
+        'stripe_payment_status',
         'priority',
         'order_type',
         'location_source',
@@ -389,6 +409,21 @@ class OrderAdmin(BaseOrderAdmin):
                     'priority',
                     'discount',
                 )
+            },
+        ),
+        (
+            'Payment (Stripe)',
+            {
+                'fields': (
+                    'payment_type',
+                    'saved_card',
+                    'stripe_payment_intent_id',
+                    'stripe_payment_status',
+                    'stripe_payment_amount_cents',
+                    'stripe_payment_currency',
+                    'stripe_payment_error',
+                ),
+                'classes': ('collapse',),
             },
         ),
         (
@@ -456,11 +491,13 @@ class StandardOrderAdmin(BaseOrderAdmin):
         'assigned_master',
         'location_short',
         'status_badge',
+        'payment_status_badge',
         'priority_badge',
         'created_at',
     ]
     list_filter = [
         'status',
+        'stripe_payment_status',
         'priority',
         ('created_at', admin.DateFieldListFilter),
     ]
@@ -480,6 +517,13 @@ class StandardOrderAdmin(BaseOrderAdmin):
                     'status',
                     'priority',
                     'discount',
+                    'payment_type',
+                    'saved_card',
+                    'stripe_payment_intent_id',
+                    'stripe_payment_status',
+                    'stripe_payment_amount_cents',
+                    'stripe_payment_currency',
+                    'stripe_payment_error',
                 )
             },
         ),
@@ -534,12 +578,14 @@ class SOSOrderAdmin(BaseOrderAdmin):
         'location_short',
         'coords_link',
         'status_badge',
+        'payment_status_badge',
         'sos_ring',
         'master_response_deadline',
         'created_at',
     ]
     list_filter = [
         'status',
+        'stripe_payment_status',
         ('created_at', admin.DateFieldListFilter),
     ]
     date_hierarchy = 'created_at'
@@ -561,6 +607,21 @@ class SOSOrderAdmin(BaseOrderAdmin):
                     'sos_offer_index',
                     'master_response_deadline',
                 )
+            },
+        ),
+        (
+            'Payment (Stripe)',
+            {
+                'fields': (
+                    'payment_type',
+                    'saved_card',
+                    'stripe_payment_intent_id',
+                    'stripe_payment_status',
+                    'stripe_payment_amount_cents',
+                    'stripe_payment_currency',
+                    'stripe_payment_error',
+                ),
+                'classes': ('collapse',),
             },
         ),
         (
@@ -591,7 +652,7 @@ class SOSOrderAdmin(BaseOrderAdmin):
         ),
         (
             'Other',
-            {'fields': ('parts_purchase_required', 'parts_purchase_required_json', 'discount', 'car', 'category')},
+            {'fields': ('parts_purchase_required', 'parts_purchase_required_json', 'discount', 'order_penalty_total', 'car', 'category')},
         ),
         (
             'Timestamps',
@@ -625,11 +686,13 @@ class CustomRequestOrderAdmin(BaseOrderAdmin):
         'offers_count',
         'location_short',
         'status_badge',
+        'payment_status_badge',
         'priority_badge',
         'created_at',
     ]
     list_filter = [
         'status',
+        'stripe_payment_status',
         'priority',
         ('created_at', admin.DateFieldListFilter),
     ]
@@ -650,6 +713,21 @@ class CustomRequestOrderAdmin(BaseOrderAdmin):
                     'priority',
                     'discount',
                 )
+            },
+        ),
+        (
+            'Payment (Stripe)',
+            {
+                'fields': (
+                    'payment_type',
+                    'saved_card',
+                    'stripe_payment_intent_id',
+                    'stripe_payment_status',
+                    'stripe_payment_amount_cents',
+                    'stripe_payment_currency',
+                    'stripe_payment_error',
+                ),
+                'classes': ('collapse',),
             },
         ),
         (
