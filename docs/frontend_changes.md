@@ -123,7 +123,15 @@ Offer eventlar audit’i bo‘yicha:
 
 ### Completion Rate (%)
 
-`completed / accepted_total * 100`
+Yakunlangan va bekor qilingan buyurtmalar bo‘yicha (jarayondagi acceptlar hisobga olinmaydi):
+
+`completed / (completed + cancelled) * 100`
+
+- **completed** — `status=completed`
+- **cancelled** — `status=cancelled` (mijoz xohlamadi, usta bekor qildi, auto-cancel, …)
+- **accepted / on_the_way / …** — denominatorga kirmaydi (ochiq zakaz completionni pasaytirmaydi)
+
+Misol: 2 ta completed, 0 cancelled → **100%**. 2 completed + 1 cancelled → **67%**.
 
 Window default: **30 kun** (settings orqali).
 

@@ -61,8 +61,8 @@ def _assert_connect_destination_can_receive_transfers(stripe, account_id: str) -
         )
     elif not charges_on:
         hint = (
-            'Onboarding is not finished: open POST /api/master/stripe-connect/onboarding/, '
-            'complete every step in the Stripe-hosted flow, then retry.'
+            'Direct deposit is not finished: POST /api/master/stripe-connect/bank-account/ '
+            'with routing_number and account_number, then retry.'
         )
     else:
         hint = (
@@ -82,8 +82,8 @@ def _friendly_stripe_destination_error(msg: str) -> str | None:
     if 'destination account' in m and 'capabilities' in m:
         return (
             'The master’s Stripe Connect account cannot receive transfers yet (Stripe capabilities). '
-            'They must fully complete Connect onboarding: POST /api/master/stripe-connect/onboarding/ '
-            'and finish all steps until the account is ready to process charges.'
+            'They must link a bank account: POST /api/master/stripe-connect/bank-account/ '
+            'and ensure Stripe Connect capabilities are active.'
         )
     return None
 

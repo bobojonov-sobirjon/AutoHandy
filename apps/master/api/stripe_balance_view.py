@@ -35,7 +35,7 @@ class MasterStripeBalanceView(APIView):
             return Response(
                 {
                     'error': 'Stripe Connect is not linked for this master.',
-                    'hint': 'POST /api/master/stripe-connect/ with stripe_connect_account_id (acct_…) after Connect onboarding.',
+                    'hint': 'POST /api/master/stripe-connect/bank-account/ with routing_number and account_number.',
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )

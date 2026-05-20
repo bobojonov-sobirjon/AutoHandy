@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 from apps.master.models import Master
 from apps.master.permissions import IsMasterGroup
 from apps.payment.services.stripe_connect_link import StripeConnectLinkError, fetch_connect_account_public_summary
+from apps.payment.services.stripe_connect_bank import build_master_payout_profile
 from apps.payment.services.stripe_connect_onboarding import (
     create_account_onboarding_url,
     ensure_express_connect_account_for_master,
@@ -70,14 +71,11 @@ class MasterStripeConnectOnboardingView(APIView):
             return Response({'error': 'Master profile not found'}, status=status.HTTP_404_NOT_FOUND)
         acct = (master.stripe_connect_account_id or '').strip()
         if not acct:
-            return Response(
-                {
-                    'stripe_connect_account_id': None,
-                    'account': None,
-                    'onboarding_complete': False,
-                    'stripe_publishable_key': (getattr(settings, 'STRIPE_PUBLISHABLE_KEY', '') or '').strip(),
-                }
-            )
+            empty = build_master_payout_profile(master=master)
+            empty['stripe_connect_account_id'] = None
+            empty['account'] = None
+            empty['onboarding_complete'] = False
+            return Response(empty)
         try:
             summary = fetch_connect_account_public_summary(acct)
         except StripeConnectLinkError as e:
@@ -91,15 +89,13 @@ class MasterStripeConnectOnboardingView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
-        complete = bool(summary.get('details_submitted')) and bool(summary.get('payouts_enabled'))
-        return Response(
-            {
-                'stripe_connect_account_id': acct,
-                'account': summary,
-                'onboarding_complete': complete,
-                'stripe_publishable_key': (getattr(settings, 'STRIPE_PUBLISHABLE_KEY', '') or '').strip(),
-            }
+        profile = build_master_payout_profile(master=master)
+        profile['stripe_connect_account_id'] = acct
+        profile['account'] = summary
+        profile['onboarding_complete'] = bool(summary.get('details_submitted')) and bool(
+            summary.get('payouts_enabled')
         )
+        return Response(profile)
 
     @extend_schema(
         summary='Stripe Connect onboarding — start / resume (returns Stripe-hosted URL)',

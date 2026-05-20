@@ -37,17 +37,21 @@ def master_acceptance_rate_percent(master) -> int:
 
 def master_completion_rate_percent(master) -> int:
     """
-    Completion rate (%) from Orders accepted in window:
-      completed / accepted_total * 100
-    accepted_total: orders with accepted_at set.
+    Completion rate (%) from resolved assignments in the window (``accepted_at`` set):
+
+      completed / (completed + cancelled) * 100
+
+    In-progress orders (accepted, on_the_way, in_progress, …) are excluded until they
+    finish as **completed** or **cancelled** (e.g. client declined, master cancel).
     """
     from apps.order.models import Order, OrderStatus
 
     start = _window_start(30)
     qs = Order.objects.filter(master=master, accepted_at__isnull=False, accepted_at__gte=start)
-    total = qs.count()
-    if total <= 0:
-        return 0
     completed = qs.filter(status=OrderStatus.COMPLETED).count()
-    return int(round(completed / total * 100))
+    cancelled = qs.filter(status=OrderStatus.CANCELLED).count()
+    resolved = completed + cancelled
+    if resolved <= 0:
+        return 0
+    return int(round(completed / resolved * 100))
 

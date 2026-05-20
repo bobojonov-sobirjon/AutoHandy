@@ -1,8 +1,13 @@
 from django.urls import path
 from apps.master.api.checkout_history_view import MasterCheckoutHistoryView
 from apps.master.api.stripe_balance_view import MasterStripeBalanceView
-from apps.master.api.stripe_connect_link_view import MasterStripeConnectLinkView
-from apps.master.api.stripe_connect_onboarding_view import MasterStripeConnectOnboardingView
+# Legacy hosted onboarding / manual acct_ link (replaced by bank-account API):
+# from apps.master.api.stripe_connect_link_view import MasterStripeConnectLinkView
+# from apps.master.api.stripe_connect_onboarding_view import MasterStripeConnectOnboardingView
+from apps.master.api.stripe_connect_bank_view import (
+    MasterStripeConnectBankAccountView,
+    MasterStripeConnectCompleteSetupView,
+)
 from apps.master.api.views import (
     MasterProfileView, MasterDetailsView, MasterListView,
     MasterFilterChoicesView, MastersByUserView,
@@ -15,14 +20,26 @@ from apps.master.api.views import (
 )
 
 urlpatterns = [
+    # --- Stripe Master: primary (Instacart-style direct deposit) ---
     path(
-        'stripe-connect/onboarding/',
-        MasterStripeConnectOnboardingView.as_view(),
-        name='master-stripe-connect-onboarding',
+        'stripe-connect/bank-account/',
+        MasterStripeConnectBankAccountView.as_view(),
+        name='master-stripe-connect-bank-account',
     ),
-    path('stripe-connect/', MasterStripeConnectLinkView.as_view(), name='master-stripe-connect'),
+    path(
+        'stripe-connect/complete-setup/',
+        MasterStripeConnectCompleteSetupView.as_view(),
+        name='master-stripe-connect-complete-setup',
+    ),
     path('stripe-balance/', MasterStripeBalanceView.as_view(), name='master-stripe-balance'),
     path('checkout-history/', MasterCheckoutHistoryView.as_view(), name='master-checkout-history'),
+    # --- Legacy (Stripe-hosted onboarding / manual acct_ link) — uncomment if needed ---
+    # path(
+    #     'stripe-connect/onboarding/',
+    #     MasterStripeConnectOnboardingView.as_view(),
+    #     name='master-stripe-connect-onboarding',
+    # ),
+    # path('stripe-connect/', MasterStripeConnectLinkView.as_view(), name='master-stripe-connect'),
     path('masters/', MasterProfileView.as_view(), name='master-profile'),
     path('masters/list/', MasterListView.as_view(), name='master-list'),
     # path('masters/by-user/', MastersByUserView.as_view(), name='masters-by-user'),

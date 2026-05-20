@@ -92,10 +92,27 @@ def default_connect_country_code() -> str:
     return 'US'
 
 
-def ensure_express_connect_account_for_master(master: Master) -> tuple[str, bool]:
+def connect_account_type() -> str:
     """
-    If ``master.stripe_connect_account_id`` is empty, create a Stripe **Express** connected account
-    and save ``acct_…`` on the master row.
+    ``custom`` — platform can attach bank via API (Instacart-style in-app form).
+    ``express`` — bank via Stripe onboarding only (API attach after create is blocked).
+    """
+    from django.conf import settings
+
+    t = (getattr(settings, 'STRIPE_CONNECT_ACCOUNT_TYPE', None) or 'custom').strip().lower()
+    return t if t in ('custom', 'express') else 'custom'
+
+
+def ensure_express_connect_account_for_master(
+    master: Master,
+    *,
+    external_account: dict | None = None,
+) -> tuple[str, bool]:
+    """
+    If ``master.stripe_connect_account_id`` is empty, create a Stripe Connect account
+    (type from ``STRIPE_CONNECT_ACCOUNT_TYPE``, default **custom**) and save ``acct_…``.
+
+    Optional ``external_account`` bank payload may be set only when the account is first created.
 
     Returns ``(acct_id, created_this_call)``.
     """
@@ -127,7 +144,7 @@ def ensure_express_connect_account_for_master(master: Master) -> tuple[str, bool
             return existing, False
 
         kwargs: dict = {
-            'type': 'express',
+            'type': connect_account_type(),
             'country': country,
             'capabilities': {
                 'transfers': {'requested': True},
@@ -142,6 +159,9 @@ def ensure_express_connect_account_for_master(master: Master) -> tuple[str, bool
         payout_settings = _connect_account_settings_with_payouts()
         if payout_settings:
             kwargs['settings'] = payout_settings
+
+        if external_account:
+            kwargs['external_account'] = external_account
 
         try:
             acct = stripe.Account.create(**kwargs)

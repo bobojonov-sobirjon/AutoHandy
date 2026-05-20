@@ -19,8 +19,8 @@ def _saved_cards_forbidden_for_master(request):
     if request.user.groups.filter(name='Master').exists():
         return Response(
             {
-                'error': 'Saved cards are for drivers (clients). Masters use Stripe Connect: '
-                '/api/master/stripe-connect/onboarding/ or /api/master/stripe-connect/.',
+                'error': 'Saved cards are for drivers (clients). Masters use direct deposit: '
+                'POST /api/master/stripe-connect/bank-account/.',
             },
             status=status.HTTP_403_FORBIDDEN,
         )
