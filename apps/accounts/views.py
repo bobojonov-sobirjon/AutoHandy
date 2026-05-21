@@ -550,6 +550,38 @@ class UserDetailsView(APIView):
             )
         return Response({'success': False, 'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
+    @extend_schema(
+        summary='Delete account',
+        description=(
+            'Permanently deletes the authenticated user (`request.user`) and related data '
+            '(orders, devices, master profile, saved cards, etc. via CASCADE). '
+            'Requires a valid JWT. This action cannot be undone.'
+        ),
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'success': {'type': 'boolean', 'example': True},
+                    'message': {'type': 'string', 'example': 'Account deleted'},
+                },
+            },
+            401: {
+                'type': 'object',
+                'properties': {
+                    'detail': {'type': 'string', 'example': 'Authentication credentials were not provided.'},
+                },
+            },
+        },
+        tags=['User Profile'],
+    )
+    def delete(self, request):
+        """Delete the current user account."""
+        request.user.delete()
+        return Response(
+            {'success': True, 'message': 'Account deleted'},
+            status=status.HTTP_200_OK,
+        )
+
 
 class UserLocationUpdateView(APIView):
     """Update latitude/longitude/address for the authenticated user (from JWT)."""
