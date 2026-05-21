@@ -411,6 +411,11 @@ else:
         STRIPE_CONNECT_PAYOUT_DELAY_DAYS = int(_STRIPE_CONNECT_PAYOUT_DELAY_RAW)
     except ValueError:
         STRIPE_CONNECT_PAYOUT_DELAY_DAYS = None
+STRIPE_CONNECT_PAYOUT_REMINDER_ENABLED = os.getenv(
+    'STRIPE_CONNECT_PAYOUT_REMINDER_ENABLED', 'true'
+).lower() in ('1', 'true', 'yes')
+STRIPE_CONNECT_PAYOUT_REMINDER_HOUR = int(os.getenv('STRIPE_CONNECT_PAYOUT_REMINDER_HOUR', '9'))
+STRIPE_CONNECT_PAYOUT_REMINDER_MINUTE = int(os.getenv('STRIPE_CONNECT_PAYOUT_REMINDER_MINUTE', '0'))
 
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://127.0.0.1:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
@@ -438,6 +443,17 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.order.tasks.sweep_auto_cancel_master_no_show_task',
         'schedule': crontab(minute='*'),
     },
+    'sweep-unpaid-cancellation-penalties': {
+        'task': 'apps.order.tasks.sweep_unpaid_cancellation_penalties_task',
+        'schedule': crontab(minute='*/5'),
+    },
+    'notify-masters-payout-day': {
+        'task': 'apps.payment.tasks.notify_masters_payout_day_task',
+        'schedule': crontab(
+            hour=STRIPE_CONNECT_PAYOUT_REMINDER_HOUR,
+            minute=STRIPE_CONNECT_PAYOUT_REMINDER_MINUTE,
+        ),
+    },
 }
 
 ORDER_DEADLINE_WARN_MINUTES = int(os.getenv('ORDER_DEADLINE_WARN_MINUTES', '3'))
@@ -461,6 +477,9 @@ CLIENT_CANCEL_PENALTY_PERCENT_ON_THE_WAY = int(
 CLIENT_CANCEL_PENALTY_PERCENT_ARRIVED = int(
     os.getenv('CLIENT_CANCEL_PENALTY_PERCENT_ARRIVED', '25')
 )
+CLIENT_CANCEL_PENALTY_CHARGE_ENABLED = os.getenv(
+    'CLIENT_CANCEL_PENALTY_CHARGE_ENABLED', 'true'
+).lower() in ('1', 'true', 'yes')
 ORDER_START_JOB_MAX_DISTANCE_M = int(os.getenv('ORDER_START_JOB_MAX_DISTANCE_M', '300'))
 ORDER_ETA_MAX_MINUTES = int(os.getenv('ORDER_ETA_MAX_MINUTES', str(72 * 60)))
 ORDER_ETA_ASSUMED_SPEED_KMH = float(os.getenv('ORDER_ETA_ASSUMED_SPEED_KMH', '35'))

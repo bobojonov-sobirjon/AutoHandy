@@ -550,3 +550,48 @@ def sweep_auto_cancel_master_no_show_task() -> int:
         )
         n += 1
     return n
+
+
+@shared_task(ignore_result=True)
+def charge_cancellation_penalty_task(order_id: int) -> bool:
+    """
+    Retry charging ``order_penalty_total`` from the driver's saved card after client cancel.
+    """
+    from apps.order.models import OrderStripePaymentStatus
+    from apps.order.services.client_cancel_penalty import collect_pending_cancellation_penalty
+
+    try:
+        order = Order.objects.select_related('saved_card', 'user').get(pk=order_id)
+    except Order.DoesNotExist:
+        return False
+    if order.order_penalty_total <= 0:
+        return True
+    if order.stripe_payment_status == OrderStripePaymentStatus.SUCCEEDED:
+        return True
+    return collect_pending_cancellation_penalty(order)
+
+
+@shared_task(ignore_result=True)
+def sweep_unpaid_cancellation_penalties_task() -> int:
+    """
+    Beat fallback: cancelled orders with ``order_penalty_total`` but no successful Stripe capture.
+    """
+    from decimal import Decimal
+
+    from apps.order.models import OrderStripePaymentStatus
+    from apps.order.services.client_cancel_penalty import collect_pending_cancellation_penalty
+
+    if not getattr(settings, 'CLIENT_CANCEL_PENALTY_CHARGE_ENABLED', True):
+        return 0
+
+    qs = (
+        Order.objects.filter(status=OrderStatus.CANCELLED, order_penalty_total__gt=Decimal('0'))
+        .exclude(stripe_payment_status=OrderStripePaymentStatus.SUCCEEDED)
+        .select_related('saved_card', 'user')
+        .order_by('id')[:200]
+    )
+    n = 0
+    for order in qs.iterator():
+        if collect_pending_cancellation_penalty(order):
+            n += 1
+    return n

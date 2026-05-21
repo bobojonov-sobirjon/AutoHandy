@@ -104,6 +104,7 @@ from apps.order.api.serializers import (
     EmergencyPriceEstimateResponseSerializer,
     OrderServiceCountPatchSerializer,
 )
+from apps.order.services.client_cancel_penalty import apply_client_cancel_penalty_and_charge
 from apps.order.services.order_pricing import estimate_cancellation_penalty_amount, order_payable_total_str
 from apps.order.permissions import IsOrderOwnerOrMaster, IsOrderOwner, IsMaster
 from apps.master.models import Master
@@ -2419,15 +2420,18 @@ class UpdateOrderStatusView(APIView):
                         {'error': snap['summary'], 'cancellation': snap},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                extra_response['cancellation_penalty_applies'] = snap['penalty_applies']
-                extra_response['cancellation_penalty_percent'] = snap['penalty_percent']
-                extra_response['penalty_amount_estimate'] = estimate_cancellation_penalty_amount(
-                    order, snap['penalty_percent'] if snap['penalty_applies'] else 0
+                penalty_out = apply_client_cancel_penalty_and_charge(
+                    order,
+                    penalty_applies=bool(snap['penalty_applies']),
+                    penalty_percent=int(snap['penalty_percent'] or 0),
                 )
-                if snap['penalty_applies'] and snap['penalty_percent'] > 0:
-                    fee = Decimal(extra_response['penalty_amount_estimate'])
-                    prev = getattr(order, 'order_penalty_total', None) or Decimal('0')
-                    order.order_penalty_total = (prev + fee).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                extra_response['cancellation_penalty_applies'] = penalty_out['penalty_applies']
+                extra_response['cancellation_penalty_percent'] = penalty_out['penalty_percent']
+                extra_response['penalty_amount_estimate'] = penalty_out['penalty_amount_estimate']
+                extra_response['penalty_charge_attempted'] = penalty_out['penalty_charge_attempted']
+                extra_response['penalty_charge_succeeded'] = penalty_out['penalty_charge_succeeded']
+                extra_response['penalty_charge_error'] = penalty_out['penalty_charge_error']
+                extra_response['stripe_payment_intent_id'] = penalty_out.get('stripe_payment_intent_id') or ''
                 extra_response['order_total'] = order_payable_total_str(order)
                 order.status = OrderStatus.CANCELLED
                 order.auto_cancel_reason = ''
@@ -2886,13 +2890,12 @@ class CancelOrderView(APIView):
                     {'error': snap['summary'], 'cancellation': snap},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            est = estimate_cancellation_penalty_amount(
-                order, snap['penalty_percent'] if snap['penalty_applies'] else 0
+            penalty_out = apply_client_cancel_penalty_and_charge(
+                order,
+                penalty_applies=bool(snap['penalty_applies']),
+                penalty_percent=int(snap['penalty_percent'] or 0),
             )
-            if snap['penalty_applies'] and snap['penalty_percent'] > 0:
-                fee = Decimal(est)
-                prev = getattr(order, 'order_penalty_total', None) or Decimal('0')
-                order.order_penalty_total = (prev + fee).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            est = penalty_out['penalty_amount_estimate']
             order.status = OrderStatus.CANCELLED
             order.auto_cancel_reason = ''
             order.client_penalty_free_cancel_unlocked = False
@@ -2953,10 +2956,14 @@ class CancelOrderView(APIView):
             except Exception:  # noqa: BLE001
                 pass
             data = OrderSerializer(order, context={'request': request}).data
-            data['cancellation_penalty_applies'] = snap['penalty_applies']
-            data['cancellation_penalty_percent'] = snap['penalty_percent']
+            data['cancellation_penalty_applies'] = penalty_out['penalty_applies']
+            data['cancellation_penalty_percent'] = penalty_out['penalty_percent']
             data['order_total'] = order_payable_total_str(order)
             data['penalty_amount_estimate'] = est
+            data['penalty_charge_attempted'] = penalty_out['penalty_charge_attempted']
+            data['penalty_charge_succeeded'] = penalty_out['penalty_charge_succeeded']
+            data['penalty_charge_error'] = penalty_out['penalty_charge_error']
+            data['stripe_payment_intent_id'] = penalty_out.get('stripe_payment_intent_id') or ''
             return Response(data)
 
         if is_assigned_master:
@@ -3692,12 +3699,16 @@ class CompleteOrderView(APIView):
         try:
             from apps.order.services.notifications import notify_user_order_event
 
+            pay_extra = {'status': str(order.status)}
+            if order.stripe_payment_amount_cents:
+                pay_extra['amount_cents'] = str(order.stripe_payment_amount_cents)
+                pay_extra['currency'] = (order.stripe_payment_currency or '').strip()
             notify_user_order_event(
                 order,
                 title='Order completed',
                 body=f'Order #{order.id} was completed',
                 kind='order_completed',
-                extra_data={'status': str(order.status)},
+                extra_data=pay_extra,
             )
             try:
                 logger.warning(

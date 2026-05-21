@@ -294,6 +294,30 @@ def send_fcm_to_user_devices(
             logger.warning('FCM token cleanup failed: %s', exc)
 
 
+def format_money_for_push(
+    *,
+    amount_cents: int | None = None,
+    amount_str: str | None = None,
+    currency: str | None = None,
+) -> str:
+    """Human-readable amount for push body (e.g. ``$10.00``)."""
+    from decimal import Decimal
+
+    cur = (currency or getattr(settings, 'STRIPE_CHARGE_CURRENCY', 'usd') or 'usd').strip().lower()
+    if amount_str not in (None, ''):
+        try:
+            val = Decimal(str(amount_str).replace(',', '').strip())
+        except Exception:  # noqa: BLE001
+            val = None
+        if val is not None:
+            sym = '$' if cur in ('usd', 'cad') else ''
+            return f'{sym}{val:.2f}'
+    if amount_cents is not None and int(amount_cents) > 0:
+        sym = '$' if cur in ('usd', 'cad') else ''
+        return f'{sym}{Decimal(int(amount_cents)) / Decimal(100):.2f}'
+    return ''
+
+
 def _pro_push_copy(
     *,
     kind: str,
@@ -405,7 +429,73 @@ def _pro_push_copy(
             return 'Order cancelled', f'The customer cancelled order {oid}.'.strip()
         return 'Order cancelled', f'Order {oid} was cancelled.'.strip()
 
+    if k == 'cancellation_penalty_charged' and audience == 'user':
+        cents_raw = (extra_data or {}).get('amount_cents')
+        try:
+            cents_val = int(cents_raw) if cents_raw not in (None, '') else None
+        except (TypeError, ValueError):
+            cents_val = None
+        amt = format_money_for_push(
+            amount_cents=cents_val,
+            amount_str=(extra_data or {}).get('amount_display'),
+            currency=(extra_data or {}).get('currency'),
+        )
+        pct = (extra_data or {}).get('penalty_percent') if extra_data else None
+        pct_s = str(pct).strip() if pct not in (None, '') else ''
+        if amt and pct_s and pct_s != '0':
+            return (
+                'Cancellation fee charged',
+                f'{amt} was charged to your saved card for cancelling order {oid} ({pct_s}% fee). '
+                f'Tap to view details.',
+            )
+        if amt:
+            return (
+                'Cancellation fee charged',
+                f'{amt} was charged to your saved card because you cancelled order {oid}. Tap to view details.',
+            )
+        return (
+            'Cancellation fee charged',
+            f'A cancellation fee was charged to your saved card for order {oid}. Tap to view details.',
+        )
+
+    if k == 'order_payment_charged' and audience == 'user':
+        cents_raw = (extra_data or {}).get('amount_cents')
+        try:
+            cents_val = int(cents_raw) if cents_raw not in (None, '') else None
+        except (TypeError, ValueError):
+            cents_val = None
+        amt = format_money_for_push(
+            amount_cents=cents_val,
+            amount_str=(extra_data or {}).get('amount_display'),
+            currency=(extra_data or {}).get('currency'),
+        )
+        if amt:
+            return (
+                'Payment processed',
+                f'Your order {oid} is complete. {amt} was charged to your saved card. Tap to view the receipt.',
+            )
+        return (
+            'Payment processed',
+            f'Your order {oid} is complete. Your saved card was charged. Tap to view details.',
+        )
+
     if k == 'order_completed' and audience == 'user':
+        amt = ''
+        if extra_data:
+            try:
+                cents = int(extra_data.get('amount_cents') or 0)
+            except (TypeError, ValueError):
+                cents = 0
+            if cents > 0:
+                amt = format_money_for_push(
+                    amount_cents=cents,
+                    currency=extra_data.get('currency'),
+                )
+        if amt:
+            return (
+                'Order completed',
+                f'Your order {oid} is complete. {amt} was charged to your saved card. Thank you!',
+            )
         return 'Order completed', f'Your order {oid} has been marked as completed. Tap to review the details.'.strip()
 
     if k == 'completion_pin_invalid' and audience == 'user':
@@ -432,6 +522,22 @@ def _pro_push_copy(
         if stars:
             return 'New review received', f'You received a {stars}-star review for order {oid}. Tap to view.'.strip()
         return 'New review received', f'You received a new review for order {oid}. Tap to view.'.strip()
+
+    if k == 'payout_scheduled_today' and audience == 'master':
+        day = ((extra_data or {}).get('anchor_day') or 'today').strip().capitalize()
+        interval = ((extra_data or {}).get('interval') or 'weekly').strip().lower()
+        if interval == 'weekly':
+            return (
+                'Bank payout today',
+                f'Today is your scheduled payout day ({day}). Stripe will transfer your available '
+                f'balance to your linked bank. Funds usually arrive within 1–2 business days. '
+                f'Check Payouts in the app for details.',
+            )
+        return (
+            'Payout scheduled',
+            f'Your Stripe payout schedule runs on {interval} payouts. Check your balance and '
+            f'Payouts in the app for transfer status.',
+        )
 
     if k == 'order_status_changed':
         if audience == 'user':
@@ -1035,6 +1141,48 @@ def notify_master_new_order(order: 'Order', *, target_master_id: int | None = No
     )
 
 
+def notify_user_cancellation_penalty_charged(
+    order: 'Order',
+    *,
+    amount_cents: int,
+    penalty_percent: int,
+    currency: str | None = None,
+) -> None:
+    """Push after a cancellation penalty is successfully captured on the driver's card."""
+    cur = (currency or getattr(order, 'stripe_payment_currency', None) or '').strip()
+    notify_user_order_event(
+        order,
+        title='Cancellation fee charged',
+        body=f'Order #{order.id}: cancellation fee charged.',
+        kind='cancellation_penalty_charged',
+        extra_data={
+            'amount_cents': str(int(amount_cents)),
+            'penalty_percent': str(int(penalty_percent)),
+            'currency': cur or getattr(settings, 'STRIPE_CHARGE_CURRENCY', 'usd'),
+        },
+    )
+
+
+def notify_user_order_payment_charged(
+    order: 'Order',
+    *,
+    amount_cents: int,
+    currency: str | None = None,
+) -> None:
+    """Push after the full order total is charged on complete."""
+    cur = (currency or getattr(order, 'stripe_payment_currency', None) or '').strip()
+    notify_user_order_event(
+        order,
+        title='Payment processed',
+        body=f'Order #{order.id}: payment charged.',
+        kind='order_payment_charged',
+        extra_data={
+            'amount_cents': str(int(amount_cents)),
+            'currency': cur or getattr(settings, 'STRIPE_CHARGE_CURRENCY', 'usd'),
+        },
+    )
+
+
 def notify_user_order_event(
     order: 'Order',
     *,
@@ -1067,6 +1215,37 @@ def notify_user_order_event(
         title=title_out,
         body=body_out,
         data=data,
+    )
+
+
+def notify_master_payout_day(
+    *,
+    master_user_id: int,
+    anchor_day: str,
+    interval: str = 'weekly',
+) -> None:
+    """Push on the configured weekly payout anchor (all Connect-linked masters)."""
+    title_out, body_out = _pro_push_copy(
+        kind='payout_scheduled_today',
+        order_id=None,
+        audience='master',
+        extra_data={
+            'anchor_day': anchor_day,
+            'interval': interval,
+        },
+        fallback_title='Bank payout today',
+        fallback_body='Your scheduled Stripe payout to your bank is processing today.',
+    )
+    send_fcm_to_user_devices(
+        user_id=int(master_user_id),
+        firebase_kind='master',
+        title=title_out,
+        body=body_out,
+        data={
+            'kind': 'payout_scheduled_today',
+            'anchor_day': anchor_day,
+            'interval': interval,
+        },
     )
 
 
