@@ -385,13 +385,9 @@ class UserDetailsSerializer(serializers.ModelSerializer):
     def get_completion_rate(self, obj):
         """Completion rate (%) for masters; drivers get 0."""
         try:
-            from apps.master.models import Master
-            from apps.master.services.rates import master_completion_rate_percent
+            from apps.master.services.rates import user_completion_rate_percent
 
-            m = Master.objects.filter(user=obj).only('id').first()
-            if not m:
-                return 0
-            return master_completion_rate_percent(m)
+            return user_completion_rate_percent(obj)
         except Exception:
             return 0
 

@@ -14,6 +14,7 @@ from apps.order.services.assignment_failure import (
 from apps.order.services.mvp_timers import no_departure_cutoff_minutes_for_order
 from apps.order.services.order_scheduled_start import order_has_scheduled_start
 from apps.order.services.scheduled_mvp import sweep_scheduled_mvp_deadlines
+from apps.order.services.standard_accept_mvp import sweep_standard_accept_no_on_the_way
 from apps.order.services.sos_rotation import (
     advance_sos_ring_after_decline_or_timeout,
     filter_master_ids_meeting_emergency_thresholds,
@@ -91,6 +92,7 @@ def expire_stale_master_offers(now=None, *, skip_order_ids: Container[int] | Non
     # This is a fallback path for environments where Celery ETA tasks are unreliable.
     n += sweep_accepted_no_departure(now=now)
     n += sweep_scheduled_mvp_deadlines(now=now)
+    n += sweep_standard_accept_no_on_the_way(now=now)
     return n
 
 

@@ -109,6 +109,17 @@ def sos_on_the_way_communication_reminder_task(order_id: int) -> bool:
 
 
 @shared_task(ignore_result=True)
+def standard_accept_no_on_the_way_task(order_id: int) -> bool:
+    """ETA: push when master accepted but did not mark on the way (scheduled standard; also beat fallback)."""
+    try:
+        from apps.order.services.standard_accept_mvp import notify_standard_accept_no_on_the_way_if_due
+
+        return bool(notify_standard_accept_no_on_the_way_if_due(order_id=order_id))
+    except Exception:
+        return False
+
+
+@shared_task(ignore_result=True)
 def master_no_departure_action_task(order_id: int) -> bool:
     """
     ETA task: after accept, if master did not move order to ON_THE_WAY in time,

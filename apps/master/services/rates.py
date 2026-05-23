@@ -36,23 +36,62 @@ def master_acceptance_rate_percent(master) -> int:
     return int(round(num / denom * 100))
 
 
-def master_completion_rate_percent(master) -> int:
+def _master_completion_counts(master) -> tuple[int, int]:
     """
-    Completion rate (%) from resolved assignments in the window (``accepted_at`` set):
+    All-time resolved assignments for this master:
 
       completed / (completed + cancelled + assignment_failures) * 100
 
-    ``assignment_failures`` covers SOS rebroadcast and other auto-failures where the order
-    row no longer shows ``master`` + ``cancelled`` together.
+    Examples: 1 complete → 100%; 2 complete → 100%; 2 complete + 1 cancel → 67%;
+    then +1 complete → 75%.
     """
     from apps.order.models import MasterAssignmentFailure, Order, OrderStatus
 
-    start = _window_start(30)
-    qs = Order.objects.filter(master=master, accepted_at__isnull=False, accepted_at__gte=start)
-    completed = qs.filter(status=OrderStatus.COMPLETED).count()
-    cancelled = qs.filter(status=OrderStatus.CANCELLED).count()
-    failures = MasterAssignmentFailure.objects.filter(master=master, created_at__gte=start).count()
+    completed = Order.objects.filter(
+        master_id=master.id,
+        status=OrderStatus.COMPLETED,
+    ).count()
+
+    cancelled = Order.objects.filter(
+        master_id=master.id,
+        status=OrderStatus.CANCELLED,
+    ).count()
+
+    completed_ids = Order.objects.filter(
+        master_id=master.id,
+        status=OrderStatus.COMPLETED,
+    ).values_list('id', flat=True)
+    failures = (
+        MasterAssignmentFailure.objects.filter(master_id=master.id)
+        .exclude(order_id__in=completed_ids)
+        .count()
+    )
+
     resolved = completed + cancelled + failures
+    return completed, resolved
+
+
+def master_completion_rate_percent(master) -> int:
+    """All-time completion rate (%); see ``_master_completion_counts``."""
+    completed, resolved = _master_completion_counts(master)
+    if resolved <= 0:
+        return 0
+    return int(round(completed / resolved * 100))
+
+
+def user_completion_rate_percent(user) -> int:
+    """All-time completion rate across every Master profile for this user."""
+    from apps.master.models import Master
+
+    masters = Master.objects.filter(user=user).only('id')
+    if not masters.exists():
+        return 0
+    completed = 0
+    resolved = 0
+    for m in masters:
+        c, r = _master_completion_counts(m)
+        completed += c
+        resolved += r
     if resolved <= 0:
         return 0
     return int(round(completed / resolved * 100))

@@ -55,6 +55,8 @@ def schedule_post_accept_timers(*, order_id: int, order_type: str, accepted_at: 
             order = None
         if order and order_has_scheduled_start(order):
             _schedule_standard_scheduled_timers(order_id, order)
+            _schedule_standard_no_departure_timer(order_id, accepted_at)
+            _schedule_standard_accept_no_on_the_way_notify(order_id, accepted_at)
             return
         _schedule_standard_no_departure_timer(order_id, accepted_at)
 
@@ -89,6 +91,22 @@ def _schedule_standard_no_departure_timer(order_id: int, accepted_at: datetime) 
         from apps.order.tasks import master_no_departure_action_task
 
         master_no_departure_action_task.apply_async(
+            args=[order_id],
+            eta=accepted_at + timedelta(minutes=minutes),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _schedule_standard_accept_no_on_the_way_notify(order_id: int, accepted_at: datetime) -> None:
+    """Scheduled standard: push at accept+N if still not on the way (order is not cancelled here)."""
+    minutes = _master_no_departure_minutes()
+    if minutes <= 0:
+        return
+    try:
+        from apps.order.tasks import standard_accept_no_on_the_way_task
+
+        standard_accept_no_on_the_way_task.apply_async(
             args=[order_id],
             eta=accepted_at + timedelta(minutes=minutes),
         )

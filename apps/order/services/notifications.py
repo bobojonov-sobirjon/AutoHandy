@@ -693,6 +693,19 @@ def _pro_push_copy(
             f'after the scheduled time.',
         )
 
+    if k == 'standard_accept_no_on_the_way':
+        depart_min = int(getattr(settings, 'MASTER_NO_DEPARTURE_MINUTES', 30))
+        if audience == 'user':
+            return (
+                'Master has not departed',
+                f'Order {oid}: the master accepted but did not mark "On the way" within '
+                f'{depart_min} minutes of accepting. Tap to view or contact the master.',
+            )
+        return (
+            'Mark "On the way" now',
+            f'Order {oid}: please mark "On the way" — {depart_min} minutes have passed since you accepted.',
+        )
+
     if k == 'auto_cancel_no_departure':
         depart_min = int(getattr(settings, 'MASTER_NO_DEPARTURE_MINUTES', 30))
         if audience == 'user':
