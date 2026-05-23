@@ -388,7 +388,14 @@ class UserDetailsSerializer(serializers.ModelSerializer):
             from apps.master.services.rates import user_completion_rate_percent
 
             return user_completion_rate_percent(obj)
-        except Exception:
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                'get_completion_rate failed user_id=%s: %s',
+                getattr(obj, 'id', None),
+                e,
+            )
             return 0
 
 

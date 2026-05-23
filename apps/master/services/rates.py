@@ -36,63 +36,127 @@ def master_acceptance_rate_percent(master) -> int:
     return int(round(num / denom * 100))
 
 
-def _master_completion_counts(master) -> tuple[int, int]:
-    """
-    All-time resolved assignments for this master:
+def _safe_assignment_failure_count(*, master_ids: list[int], completed_order_ids) -> int:
+    try:
+        from apps.order.models import MasterAssignmentFailure
 
-      completed / (completed + cancelled + assignment_failures) * 100
+        return (
+            MasterAssignmentFailure.objects.filter(master_id__in=master_ids)
+            .exclude(order_id__in=completed_order_ids)
+            .count()
+        )
+    except Exception:  # noqa: BLE001 — table missing before migrate, etc.
+        return 0
 
-    Examples: 1 complete → 100%; 2 complete → 100%; 2 complete + 1 cancel → 67%;
-    then +1 complete → 75%.
-    """
-    from apps.order.models import MasterAssignmentFailure, Order, OrderStatus
+
+def _user_completion_triplet(user) -> tuple[int, int, int]:
+    """(completed, cancelled, failures) — same completed scope as profile counter."""
+    from apps.master.models import Master
+    from apps.order.models import Order, OrderStatus
+
+    completed = Order.objects.filter(
+        master__user=user,
+        status=OrderStatus.COMPLETED,
+    ).count()
+    if completed <= 0:
+        return 0, 0, 0
+
+    cancelled = Order.objects.filter(
+        master__user=user,
+        status=OrderStatus.CANCELLED,
+    ).count()
+
+    master_ids = list(Master.objects.filter(user=user).values_list('id', flat=True))
+    completed_ids = Order.objects.filter(
+        master__user=user,
+        status=OrderStatus.COMPLETED,
+    ).values_list('id', flat=True)
+    failures = _safe_assignment_failure_count(
+        master_ids=master_ids,
+        completed_order_ids=completed_ids,
+    )
+    return completed, cancelled, failures
+
+
+def _master_completion_triplet(master) -> tuple[int, int, int]:
+    from apps.order.models import Order, OrderStatus
 
     completed = Order.objects.filter(
         master_id=master.id,
         status=OrderStatus.COMPLETED,
     ).count()
+    if completed <= 0:
+        cancelled_only = Order.objects.filter(
+            master_id=master.id,
+            status=OrderStatus.CANCELLED,
+        ).count()
+        failures_only = _safe_assignment_failure_count(
+            master_ids=[master.id],
+            completed_order_ids=[],
+        )
+        return 0, cancelled_only, failures_only
 
     cancelled = Order.objects.filter(
         master_id=master.id,
         status=OrderStatus.CANCELLED,
     ).count()
-
     completed_ids = Order.objects.filter(
         master_id=master.id,
         status=OrderStatus.COMPLETED,
     ).values_list('id', flat=True)
-    failures = (
-        MasterAssignmentFailure.objects.filter(master_id=master.id)
-        .exclude(order_id__in=completed_ids)
-        .count()
+    failures = _safe_assignment_failure_count(
+        master_ids=[master.id],
+        completed_order_ids=completed_ids,
     )
+    return completed, cancelled, failures
 
-    resolved = completed + cancelled + failures
-    return completed, resolved
+
+def _display_completion_rate_percent(*, completed: int, cancelled: int, failures: int) -> int:
+    """
+    Profile completion % (rises quickly with first successes, soft on auto-failures).
+
+    Raw: completed / (completed + cancelled + failures)
+    Display: Bayesian prior (~94% over virtual prior orders) + failures/cancels weighted < 1.
+    """
+    if completed <= 0:
+        return 0
+
+    prior_pct = int(getattr(settings, 'COMPLETION_RATE_BAYESIAN_PRIOR_PERCENT', 94))
+    prior_n = int(getattr(settings, 'COMPLETION_RATE_BAYESIAN_PRIOR_ORDERS', 10))
+    fail_w = float(getattr(settings, 'COMPLETION_RATE_FAILURE_WEIGHT', 0.3))
+    cancel_w = float(getattr(settings, 'COMPLETION_RATE_CANCEL_WEIGHT', 1.0))
+
+    prior_n = max(1, prior_n)
+    prior_pct = max(0, min(100, prior_pct))
+    prior_successes = prior_pct / 100.0 * prior_n
+
+    penalty = cancelled * cancel_w + failures * fail_w
+    effective_resolved = completed + penalty
+
+    numerator = completed + prior_successes
+    denominator = effective_resolved + prior_n
+    if denominator <= 0:
+        return 0
+
+    rate = numerator / denominator * 100.0
+    return max(0, min(100, int(round(rate))))
 
 
 def master_completion_rate_percent(master) -> int:
-    """All-time completion rate (%); see ``_master_completion_counts``."""
-    completed, resolved = _master_completion_counts(master)
-    if resolved <= 0:
-        return 0
-    return int(round(completed / resolved * 100))
+    """All-time display completion rate (%)."""
+    completed, cancelled, failures = _master_completion_triplet(master)
+    return _display_completion_rate_percent(
+        completed=completed,
+        cancelled=cancelled,
+        failures=failures,
+    )
 
 
 def user_completion_rate_percent(user) -> int:
-    """All-time completion rate across every Master profile for this user."""
-    from apps.master.models import Master
-
-    masters = Master.objects.filter(user=user).only('id')
-    if not masters.exists():
-        return 0
-    completed = 0
-    resolved = 0
-    for m in masters:
-        c, r = _master_completion_counts(m)
-        completed += c
-        resolved += r
-    if resolved <= 0:
-        return 0
-    return int(round(completed / resolved * 100))
-
+    """All-time display completion rate — aligned with profile ``completed_orders``."""
+    completed, cancelled, failures = _user_completion_triplet(user)
+    return _display_completion_rate_percent(
+        completed=completed,
+        cancelled=cancelled,
+        failures=failures,
+    )

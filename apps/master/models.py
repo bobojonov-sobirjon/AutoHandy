@@ -88,8 +88,13 @@ class Master(models.Model):
 
     @property
     def completion_rate(self):
-        """Order completion rate percentage"""
-        return 0  # Field removed, always return 0
+        """Order completion rate percentage (all-time)."""
+        try:
+            from apps.master.services.rates import master_completion_rate_percent
+
+            return master_completion_rate_percent(self)
+        except Exception:  # noqa: BLE001
+            return 0
 
     def get_work_location_for_distance(self):
         """Point for distance to orders: latitude / longitude."""
