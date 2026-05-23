@@ -49,29 +49,23 @@ def schedule_master_no_show_autocancel(order_id: int, arrival_deadline_at: datet
 
 def schedule_sos_master_no_departure_rebroadcast(order_id: int, accepted_at: datetime) -> None:
     """
-    If a master accepts an SOS order but does not start the trip ("on_the_way") within N minutes,
-    the order should be re-broadcast to other masters.
+    Legacy alias: SOS no-departure is scheduled via ``schedule_post_accept_timers``.
     """
-    minutes = int(getattr(settings, 'SOS_MASTER_NO_DEPARTURE_MINUTES', 30))
-    eta = accepted_at + timedelta(minutes=minutes)
     try:
-        from apps.order.tasks import rebroadcast_sos_if_master_not_departed_task
+        from apps.order.models import Order
 
-        rebroadcast_sos_if_master_not_departed_task.apply_async(args=[order_id], eta=eta)
+        order = Order.objects.only('id', 'order_type').get(pk=order_id)
+        from apps.order.services.mvp_timers import schedule_post_accept_timers
+
+        schedule_post_accept_timers(
+            order_id=order_id,
+            order_type=str(order.order_type),
+            accepted_at=accepted_at,
+        )
     except Exception:
         pass
 
 
 def schedule_master_no_departure_action(order_id: int, accepted_at: datetime) -> None:
-    """
-    Generic "no departure" watchdog after accept (all order types):
-    if the master does not mark ON_THE_WAY within N minutes, the system takes action.
-    """
-    minutes = int(getattr(settings, 'MASTER_NO_DEPARTURE_MINUTES', 30))
-    eta = accepted_at + timedelta(minutes=minutes)
-    try:
-        from apps.order.tasks import master_no_departure_action_task
-
-        master_no_departure_action_task.apply_async(args=[order_id], eta=eta)
-    except Exception:
-        pass
+    """Legacy alias for post-accept MVP timers."""
+    schedule_sos_master_no_departure_rebroadcast(order_id, accepted_at)

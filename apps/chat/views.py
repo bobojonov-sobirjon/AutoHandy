@@ -311,36 +311,41 @@ image: <file>
             result_serializer = ChatMessageSerializer(message, context={'request': request})
             try:
                 # Realtime broadcast for REST-sent attachments + push notification
+                import logging
+
                 from asgiref.sync import async_to_sync
                 from channels.layers import get_channel_layer
-                from apps.order.services.notifications import send_fcm_to_user_devices
+                from apps.order.services.notifications import notify_chat_message
 
+                chat_log = logging.getLogger(__name__)
                 other = room.get_other_participant(request.user)
                 if other:
-                    try:
-                        is_master = bool(
-                            getattr(other, 'master_profiles', None)
-                            and other.master_profiles.exists()
-                        )
-                    except Exception:  # noqa: BLE001
-                        is_master = False
-                    other_kind = 'master' if is_master else 'user'
-                    body = ''
-                    if message.message_type == 'text':
-                        body = (message.text or '').strip()[:120] or 'You have a new message'
-                    else:
-                        body = f'You received a new {message.message_type} message'
-                    send_fcm_to_user_devices(
-                        user_id=other.id,
-                        firebase_kind=other_kind,
-                        title='New chat message',
-                        body=body,
-                        data={
-                            'kind': 'chat_message',
-                            'room_id': str(room.id),
-                            'message_id': str(message.id),
-                            'message_type': str(message.message_type),
-                        },
+                    sender_name = (
+                        request.user.get_full_name()
+                        or request.user.email
+                        or request.user.phone_number
+                        or f'User {request.user.id}'
+                    )
+                    sent = notify_chat_message(
+                        recipient_user_id=other.id,
+                        room_id=room.id,
+                        message_id=message.id,
+                        message_type=message.message_type,
+                        text=message.text,
+                        sender_display=str(sender_name),
+                    )
+                    chat_log.warning(
+                        'chat_rest_push room_id=%s message_id=%s to_user_id=%s success=%s',
+                        room.id,
+                        message.id,
+                        other.id,
+                        sent,
+                    )
+                else:
+                    chat_log.warning(
+                        'chat_rest_push_skip room_id=%s message_id=%s reason=no_other_participant',
+                        room.id,
+                        message.id,
                     )
 
                 layer = get_channel_layer()
@@ -352,8 +357,8 @@ image: <file>
                             'message': result_serializer.data,
                         },
                     )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger(__name__).exception('chat_rest_push_failed room_id=%s: %s', room_id, exc)
             return Response(result_serializer.data, status=status.HTTP_201_CREATED)
 
         except ChatRoom.DoesNotExist:

@@ -32,8 +32,10 @@ from apps.order.services.status_workflow import (
 from apps.order.services.celery_schedule import (
     schedule_client_penalty_free_unlock,
     schedule_master_no_show_autocancel,
-    schedule_sos_master_no_departure_rebroadcast,
-    schedule_master_no_departure_action,
+)
+from apps.order.services.mvp_timers import (
+    schedule_post_accept_timers,
+    schedule_sos_communication_reminder,
 )
 from apps.order.services.master_inbox_sync import (
     pending_assigned_standard_order_ids_for_master,
@@ -1257,14 +1259,12 @@ class CustomRequestOfferListCreateView(APIView):
         )
         # Best-effort push to the order owner: master submitted an offer with price.
         try:
-            from apps.order.services.notifications import notify_user_order_event
+            from apps.order.services.notifications import notify_user_order_kind
 
             master_name = (getattr(master, 'user', None).get_full_name() if getattr(master, 'user', None) else '')  # type: ignore[union-attr]
             master_name = (master_name or '').strip()
-            notify_user_order_event(
+            notify_user_order_kind(
                 order,
-                title='New offer received',
-                body=f'You received a new offer for order #{order.id}.',
                 kind='custom_request_offer',
                 extra_data={
                     'price': str(offer.price),
@@ -2442,13 +2442,11 @@ class UpdateOrderStatusView(APIView):
                 clear_completion_pin(order)
                 order.save()
                 try:
-                    from apps.order.services.notifications import notify_master_order_event, notify_user_order_event
+                    from apps.order.services.notifications import notify_master_order_kind, notify_user_order_kind
                     from apps.master.models import Master
 
-                    notify_user_order_event(
+                    notify_user_order_kind(
                         order,
-                        title='Order cancelled',
-                        body=f'Order #{order.id} was cancelled',
                         kind='order_cancelled',
                         extra_data={'by': 'user', 'status': str(order.status)},
                     )
@@ -2469,11 +2467,9 @@ class UpdateOrderStatusView(APIView):
                             .only('id', 'user_id')
                             .get(pk=order.master_id)
                         )
-                        notify_master_order_event(
+                        notify_master_order_kind(
                             master_user_id=mu.user_id,
                             order_id=order.id,
-                            title='Order cancelled',
-                            body=f'Order #{order.id} was cancelled by the customer',
                             kind='order_cancelled',
                             extra_data={'by': 'user'},
                         )
@@ -2500,11 +2496,9 @@ class UpdateOrderStatusView(APIView):
                                     .only('id', 'user_id')
                                     .get(pk=mid)
                                 )
-                                notify_master_order_event(
+                                notify_master_order_kind(
                                     master_user_id=mu.user_id,
                                     order_id=order.id,
-                                    title='Order cancelled',
-                                    body=f'Order #{order.id} was cancelled by the customer',
                                     kind='order_cancelled',
                                     extra_data={'by': 'user'},
                                 )
@@ -2550,12 +2544,10 @@ class UpdateOrderStatusView(APIView):
                 clear_completion_pin(order)
                 order.save()
                 try:
-                    from apps.order.services.notifications import notify_user_order_event
+                    from apps.order.services.notifications import notify_user_order_kind
 
-                    notify_user_order_event(
+                    notify_user_order_kind(
                         order,
-                        title='Order cancelled',
-                        body=f'Order #{order.id} was cancelled by the master',
                         kind='order_cancelled',
                         extra_data={'by': 'master', 'status': str(order.status)},
                     )
@@ -2611,6 +2603,40 @@ class UpdateOrderStatusView(APIView):
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+
+            if order.order_type == OrderType.SOS:
+                order.status = OrderStatus.ON_THE_WAY
+                order.on_the_way_at = now
+                order.auto_cancel_reason = ''
+                order.client_penalty_free_cancel_unlocked = False
+                order.estimated_arrival_at = None
+                order.eta_minutes = None
+                order.arrival_deadline_at = None
+                order.save(
+                    update_fields=[
+                        'status',
+                        'on_the_way_at',
+                        'auto_cancel_reason',
+                        'client_penalty_free_cancel_unlocked',
+                        'estimated_arrival_at',
+                        'eta_minutes',
+                        'arrival_deadline_at',
+                        'updated_at',
+                    ]
+                )
+                schedule_client_penalty_free_unlock(order.pk, order.on_the_way_at)
+                try:
+                    schedule_sos_communication_reminder(order_id=order.pk, from_dt=order.on_the_way_at)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    from apps.order.services.notifications import notify_order_status_changed_to_user
+
+                    notify_order_status_changed_to_user(order, new_status=OrderStatus.ON_THE_WAY)
+                except Exception:  # noqa: BLE001
+                    pass
+                return Response(OrderSerializer(order, context={'request': request}).data)
+
             est, em, eta_err = resolve_on_the_way_eta(request.data, now)
             if eta_err:
                 eta_messages = {
@@ -2648,22 +2674,17 @@ class UpdateOrderStatusView(APIView):
             schedule_client_penalty_free_unlock(order.pk, order.on_the_way_at)
             schedule_master_no_show_autocancel(order.pk, order.arrival_deadline_at)
             try:
-                from apps.order.services.notifications import notify_user_order_event
+                from apps.order.services.notifications import notify_order_status_changed_to_user
 
-                notify_user_order_event(
-                    order,
-                    title='Master is on the way',
-                    body=f'Order #{order.id}: master is on the way',
-                    kind='order_status_changed',
-                    extra_data={'status': str(order.status)},
-                )
+                sent = notify_order_status_changed_to_user(order, new_status=OrderStatus.ON_THE_WAY)
                 try:
                     logger.warning(
-                        'order_status_update_push user_id=%s kind=%s order_id=%s status=%s',
+                        'order_status_update_push user_id=%s kind=%s order_id=%s status=%s success=%s',
                         order.user_id,
                         'order_status_changed',
                         order.id,
                         order.status,
+                        sent,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -2690,22 +2711,17 @@ class UpdateOrderStatusView(APIView):
                 ]
             )
             try:
-                from apps.order.services.notifications import notify_user_order_event
+                from apps.order.services.notifications import notify_order_status_changed_to_user
 
-                notify_user_order_event(
-                    order,
-                    title='Master arrived',
-                    body=f'Order #{order.id}: master arrived',
-                    kind='order_status_changed',
-                    extra_data={'status': str(order.status)},
-                )
+                sent = notify_order_status_changed_to_user(order, new_status=OrderStatus.ARRIVED)
                 try:
                     logger.warning(
-                        'order_status_update_push user_id=%s kind=%s order_id=%s status=%s',
+                        'order_status_update_push user_id=%s kind=%s order_id=%s status=%s success=%s',
                         order.user_id,
                         'order_status_changed',
                         order.id,
                         order.status,
+                        sent,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -2798,22 +2814,17 @@ class UpdateOrderStatusView(APIView):
                 ]
             )
             try:
-                from apps.order.services.notifications import notify_user_order_event
+                from apps.order.services.notifications import notify_order_status_changed_to_user
 
-                notify_user_order_event(
-                    order,
-                    title='Work started',
-                    body=f'Order #{order.id}: work started',
-                    kind='order_status_changed',
-                    extra_data={'status': str(order.status)},
-                )
+                sent = notify_order_status_changed_to_user(order, new_status=OrderStatus.IN_PROGRESS)
                 try:
                     logger.warning(
-                        'order_status_update_push user_id=%s kind=%s order_id=%s status=%s',
+                        'order_status_update_push user_id=%s kind=%s order_id=%s status=%s success=%s',
                         order.user_id,
                         'order_status_changed',
                         order.id,
                         order.status,
+                        sent,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -2836,6 +2847,10 @@ class UpdateOrderStatusView(APIView):
             {'error': f'Invalid transition {order.status} → {new_status}.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+    def patch(self, request, order_id):
+        """Alias for POST — some mobile clients use PATCH for status updates."""
+        return self.post(request, order_id)
 
 
 class CancelOrderView(APIView):
@@ -2905,13 +2920,11 @@ class CancelOrderView(APIView):
             clear_completion_pin(order)
             order.save()
             try:
-                from apps.order.services.notifications import notify_master_order_event, notify_user_order_event
+                from apps.order.services.notifications import notify_master_order_kind, notify_user_order_kind
                 from apps.master.models import Master
 
-                notify_user_order_event(
+                notify_user_order_kind(
                     order,
-                    title='Order cancelled',
-                    body=f'Order #{order.id} was cancelled',
                     kind='order_cancelled',
                     extra_data={'by': 'user', 'status': str(order.status)},
                 )
@@ -2921,11 +2934,9 @@ class CancelOrderView(APIView):
                         .only('id', 'user_id')
                         .get(pk=order.master_id)
                     )
-                    notify_master_order_event(
+                    notify_master_order_kind(
                         master_user_id=mu.user_id,
                         order_id=order.id,
-                        title='Order cancelled',
-                        body=f'Order #{order.id} was cancelled by the customer',
                         kind='order_cancelled',
                         extra_data={'by': 'user'},
                     )
@@ -2943,11 +2954,9 @@ class CancelOrderView(APIView):
                                 .only('id', 'user_id')
                                 .get(pk=mid)
                             )
-                            notify_master_order_event(
+                            notify_master_order_kind(
                                 master_user_id=mu.user_id,
                                 order_id=order.id,
-                                title='Order cancelled',
-                                body=f'Order #{order.id} was cancelled by the customer',
                                 kind='order_cancelled',
                                 extra_data={'by': 'user'},
                             )
@@ -2981,12 +2990,10 @@ class CancelOrderView(APIView):
             clear_completion_pin(order)
             order.save()
             try:
-                from apps.order.services.notifications import notify_user_order_event
+                from apps.order.services.notifications import notify_user_order_kind
 
-                notify_user_order_event(
+                notify_user_order_kind(
                     order,
-                    title='Order cancelled',
-                    body=f'Order #{order.id} was cancelled by the master',
                     kind='order_cancelled',
                     extra_data={'by': 'master', 'status': str(order.status)},
                 )
@@ -3158,20 +3165,18 @@ class AcceptOrderView(APIView):
             # If the master does not depart ("on the way") in time, take action (by order type).
             try:
                 if order.accepted_at and not order.on_the_way_at:
-                    # Generic watchdog (standard + custom-request + SOS).
-                    schedule_master_no_departure_action(order.pk, order.accepted_at)
-                    # Keep SOS-specific task too (legacy/backward compatibility).
-                    if order.order_type == OrderType.SOS:
-                        schedule_sos_master_no_departure_rebroadcast(order.pk, order.accepted_at)
+                    schedule_post_accept_timers(
+                        order_id=order.pk,
+                        order_type=str(order.order_type),
+                        accepted_at=order.accepted_at,
+                    )
             except Exception:  # noqa: BLE001
                 pass
             try:
-                from apps.order.services.notifications import notify_user_order_event
+                from apps.order.services.notifications import notify_user_order_kind
 
-                notify_user_order_event(
+                notify_user_order_kind(
                     order,
-                    title='Order accepted',
-                    body=f'Order #{order.id} was accepted by a master',
                     kind='order_accepted',
                     extra_data={'status': str(order.status), 'master_id': str(order.master_id or '')},
                 )
@@ -3308,12 +3313,10 @@ class DeclineOrderView(APIView):
             except Exception:  # noqa: BLE001
                 pass
         try:
-            from apps.order.services.notifications import notify_user_order_event
+            from apps.order.services.notifications import notify_user_order_kind
 
-            notify_user_order_event(
+            notify_user_order_kind(
                 order,
-                title='Order declined',
-                body=f'Order #{order.id} was declined by the master',
                 kind='order_declined',
                 extra_data={'master_id': str(master.id), 'status': str(order.status)},
             )
@@ -3579,12 +3582,10 @@ class CompleteOrderView(APIView):
 
                 if not secrets.compare_digest(expected, pin_s):
                     try:
-                        from apps.order.services.notifications import notify_user_order_event
+                        from apps.order.services.notifications import notify_user_order_kind
 
-                        notify_user_order_event(
+                        notify_user_order_kind(
                             order,
-                            title='PIN check failed',
-                            body=f'Order #{order.id}: master entered a wrong PIN',
                             kind='completion_pin_invalid',
                             extra_data={'status': str(order.status)},
                         )
@@ -3697,16 +3698,14 @@ class CompleteOrderView(APIView):
         master = request.user.master_profiles.first()
         serializer = OrderSerializer(order, context={'request': request})
         try:
-            from apps.order.services.notifications import notify_user_order_event
+            from apps.order.services.notifications import notify_user_order_kind
 
             pay_extra = {'status': str(order.status)}
             if order.stripe_payment_amount_cents:
                 pay_extra['amount_cents'] = str(order.stripe_payment_amount_cents)
                 pay_extra['currency'] = (order.stripe_payment_currency or '').strip()
-            notify_user_order_event(
+            notify_user_order_kind(
                 order,
-                title='Order completed',
-                body=f'Order #{order.id} was completed',
                 kind='order_completed',
                 extra_data=pay_extra,
             )
@@ -3881,7 +3880,7 @@ Response: **`tags`**, **`tags_detail`**, absolute URLs on nested media where app
         # Best-effort push to assigned master: customer left a review.
         try:
             if order.master_id:
-                from apps.order.services.notifications import notify_master_order_event
+                from apps.order.services.notifications import notify_master_order_kind
                 from apps.master.models import Master
 
                 mu = (
@@ -3890,11 +3889,9 @@ Response: **`tags`**, **`tags_detail`**, absolute URLs on nested media where app
                     .get(pk=order.master_id)
                 )
                 reviewer_name = (getattr(request.user, 'get_full_name', lambda: '')() or '').strip()
-                notify_master_order_event(
+                notify_master_order_kind(
                     master_user_id=mu.user_id,
                     order_id=order.id,
-                    title='New review received',
-                    body=f'You received a new review for order #{order.id}.',
                     kind='review_created',
                     extra_data={
                         'rating': str(rating),
@@ -4459,17 +4456,15 @@ class AddServicesToOrderView(APIView):
             payload = OrderServiceAddRequestSerializer(req, context={'request': request}).data
             # Realtime + push to client (best-effort)
             try:
-                from apps.order.services.notifications import notify_user_order_event, push_order_event_to_user_websocket
+                from apps.order.services.notifications import notify_user_order_kind, push_order_event_to_user_websocket
 
                 push_order_event_to_user_websocket(
                     user_id=order.user_id,
                     event_type='service_add_request',
                     payload=payload,
                 )
-                notify_user_order_event(
+                notify_user_order_kind(
                     order,
-                    title='Additional services request',
-                    body='The master requested to add additional services. Approve or decline in the app.',
                     kind='service_add_request',
                     extra_data={'request_id': str(req.id)},
                 )
@@ -4520,12 +4515,10 @@ class AddServicesToOrderView(APIView):
             master = None
         if master and order.master_id == master.id:
             try:
-                from apps.order.services.notifications import notify_user_order_event
+                from apps.order.services.notifications import notify_user_order_kind
 
-                notify_user_order_event(
+                notify_user_order_kind(
                     order,
-                    title='Services updated',
-                    body=f'The master updated the services for your order #{order.id}.',
                     kind='order_services_added',
                     extra_data={'service_count': str(len(created_services))},
                 )
@@ -4694,17 +4687,15 @@ class OrderExtraMoneyRequestCreateView(APIView):
 
         # Realtime + push to client (best-effort)
         try:
-            from apps.order.services.notifications import notify_user_order_event, push_order_event_to_user_websocket
+            from apps.order.services.notifications import notify_user_order_kind, push_order_event_to_user_websocket
 
             push_order_event_to_user_websocket(
                 user_id=order.user_id,
                 event_type='extra_money_request',
                 payload=payload,
             )
-            notify_user_order_event(
+            notify_user_order_kind(
                 order,
-                title='Send additional charge request',
-                body=f'The master sent an additional charge request: +{req.amount}. Approve or reject in the app.',
                 kind='extra_money_request',
                 extra_data={
                     'request_id': str(req.id),
@@ -4764,18 +4755,16 @@ class OrderExtraMoneyRequestApproveView(APIView):
 
         # Notify master (best-effort)
         try:
-            from apps.order.services.notifications import notify_master_order_event, push_order_event_to_master_websocket
+            from apps.order.services.notifications import notify_master_order_kind, push_order_event_to_master_websocket
 
             push_order_event_to_master_websocket(
                 master_user_id=req.master.user_id,
                 event_type='extra_money_decision',
                 payload=payload,
             )
-            notify_master_order_event(
+            notify_master_order_kind(
                 master_user_id=req.master.user_id,
                 order_id=req.order_id,
-                title='Extra money approved',
-                body=f'Client approved +{req.amount} extra.',
                 kind='extra_money_approved',
                 extra_data={
                     'request_id': str(req.id),
@@ -4834,18 +4823,16 @@ class OrderExtraMoneyRequestRejectView(APIView):
 
         # Notify master (best-effort)
         try:
-            from apps.order.services.notifications import notify_master_order_event, push_order_event_to_master_websocket
+            from apps.order.services.notifications import notify_master_order_kind, push_order_event_to_master_websocket
 
             push_order_event_to_master_websocket(
                 master_user_id=req.master.user_id,
                 event_type='extra_money_decision',
                 payload=payload,
             )
-            notify_master_order_event(
+            notify_master_order_kind(
                 master_user_id=req.master.user_id,
                 order_id=req.order_id,
-                title='Extra money rejected',
-                body=f'Client rejected +{req.amount} extra: {comment[:140]}',
                 kind='extra_money_rejected',
                 extra_data={
                     'request_id': str(req.id),
@@ -4934,17 +4921,15 @@ class OrderServiceAddRequestCreateView(APIView):
 
         payload = OrderServiceAddRequestSerializer(req, context={'request': request}).data
         try:
-            from apps.order.services.notifications import notify_user_order_event, push_order_event_to_user_websocket
+            from apps.order.services.notifications import notify_user_order_kind, push_order_event_to_user_websocket
 
             push_order_event_to_user_websocket(
                 user_id=order.user_id,
                 event_type='service_add_request',
                 payload=payload,
             )
-            notify_user_order_event(
+            notify_user_order_kind(
                 order,
-                title='Additional services request',
-                body='The master requested to add additional services. Approve or decline in the app.',
                 kind='service_add_request',
                 extra_data={'request_id': str(req.id)},
             )
@@ -5035,18 +5020,16 @@ class OrderServiceAddRequestApproveView(APIView):
         payload = OrderServiceAddRequestSerializer(req, context={'request': request}).data
         # Notify master (best-effort)
         try:
-            from apps.order.services.notifications import notify_master_order_event, push_order_event_to_master_websocket
+            from apps.order.services.notifications import notify_master_order_kind, push_order_event_to_master_websocket
 
             push_order_event_to_master_websocket(
                 master_user_id=req.master.user_id,
                 event_type='service_add_decision',
                 payload=payload,
             )
-            notify_master_order_event(
+            notify_master_order_kind(
                 master_user_id=req.master.user_id,
                 order_id=req.order_id,
-                title='Services approved',
-                body='Client approved adding services.',
                 kind='service_add_approved',
                 extra_data={'request_id': str(req.id)},
             )
@@ -5101,18 +5084,16 @@ class OrderServiceAddRequestRejectView(APIView):
         payload = OrderServiceAddRequestSerializer(req, context={'request': request}).data
         # Notify master (best-effort)
         try:
-            from apps.order.services.notifications import notify_master_order_event, push_order_event_to_master_websocket
+            from apps.order.services.notifications import notify_master_order_kind, push_order_event_to_master_websocket
 
             push_order_event_to_master_websocket(
                 master_user_id=req.master.user_id,
                 event_type='service_add_decision',
                 payload=payload,
             )
-            notify_master_order_event(
+            notify_master_order_kind(
                 master_user_id=req.master.user_id,
                 order_id=req.order_id,
-                title='Services rejected',
-                body=f'Client rejected adding services: {comment[:140]}',
                 kind='service_add_rejected',
                 extra_data={'request_id': str(req.id)},
             )
@@ -5508,13 +5489,11 @@ class AddMasterToOrderView(APIView):
         if order.status == OrderStatus.PENDING:
             # Push a "selected" notification to the master, then start the response window without duplicating push.
             try:
-                from apps.order.services.notifications import notify_master_order_event
+                from apps.order.services.notifications import notify_master_order_kind
 
-                notify_master_order_event(
+                notify_master_order_kind(
                     master_user_id=master.user_id,
                     order_id=order.id,
-                    title='You were selected',
-                    body=f'A customer selected you for order #{order.id}. Tap to review and accept.',
                     kind='order_selected',
                     extra_data={'order_type': str(getattr(order, 'order_type', '') or '')},
                 )

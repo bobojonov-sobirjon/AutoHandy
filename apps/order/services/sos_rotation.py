@@ -200,12 +200,10 @@ def finish_sos_broadcast_all_declined(order: Order) -> None:
     """
     _finish_sos_broadcast_exhausted(order)
     try:
-        from apps.order.services.notifications import notify_user_order_event
+        from apps.order.services.notifications import notify_user_order_kind
 
-        notify_user_order_event(
+        notify_user_order_kind(
             order,
-            title='Emergency request declined',
-            body='No technicians accepted your request. Please try again.',
             kind='sos_all_declined',
             extra_data={'by': 'system'},
         )
@@ -218,12 +216,10 @@ def finish_sos_broadcast_on_timeout(order: Order) -> None:
     _finish_sos_broadcast_exhausted(order)
     # Timeout is different from "all declined": keep the existing semantics/message.
     try:
-        from apps.order.services.notifications import notify_user_order_event
+        from apps.order.services.notifications import notify_user_order_kind
 
-        notify_user_order_event(
+        notify_user_order_kind(
             order,
-            title='SOS request expired',
-            body=f'SOS order #{order.id}: no master responded in time. Please try again.',
             kind='sos_expired',
             extra_data={'by': 'system'},
         )

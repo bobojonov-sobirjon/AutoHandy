@@ -32,6 +32,83 @@ def rebroadcast_sos_if_master_not_departed_task(order_id: int) -> bool:
 
 
 @shared_task(ignore_result=True)
+def sos_no_departure_warning_task(order_id: int) -> bool:
+    try:
+        from apps.order.services.sos_mvp import send_sos_no_departure_warning
+
+        return bool(send_sos_no_departure_warning(order_id=order_id))
+    except Exception:
+        return False
+
+
+@shared_task(ignore_result=True)
+def scheduled_reminder_before_start_task(order_id: int) -> bool:
+    try:
+        from apps.order.services.scheduled_mvp import send_scheduled_reminder_before_start
+
+        return bool(send_scheduled_reminder_before_start(order_id=order_id))
+    except Exception:
+        return False
+
+
+@shared_task(ignore_result=True)
+def scheduled_no_start_warning_task(order_id: int) -> bool:
+    try:
+        from apps.order.services.scheduled_mvp import send_scheduled_no_start_warning
+
+        return bool(send_scheduled_no_start_warning(order_id=order_id))
+    except Exception:
+        return False
+
+
+@shared_task(ignore_result=True)
+def scheduled_no_start_cancel_task(order_id: int) -> bool:
+    try:
+        from apps.order.services.scheduled_mvp import cancel_scheduled_no_start
+
+        return bool(cancel_scheduled_no_start(order_id=order_id))
+    except Exception:
+        return False
+
+
+@shared_task(ignore_result=True)
+def sos_on_the_way_communication_reminder_task(order_id: int) -> bool:
+    """
+    SOS MVP: every N minutes after on_the_way, remind master to update the customer (no GPS).
+    """
+    try:
+        order = Order.objects.only('id', 'order_type', 'status', 'master_id', 'on_the_way_at').get(pk=order_id)
+    except Order.DoesNotExist:
+        return False
+    if order.order_type != OrderType.SOS:
+        return False
+    if order.status not in (
+        OrderStatus.ON_THE_WAY,
+        OrderStatus.ARRIVED,
+        OrderStatus.IN_PROGRESS,
+    ):
+        return False
+    if not order.master_id:
+        return False
+    try:
+        from apps.master.models import Master
+        from apps.order.services.notifications import notify_master_order_kind
+        from apps.order.services.mvp_timers import schedule_sos_communication_reminder
+
+        mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=order.master_id)
+        notify_master_order_kind(
+            master_user_id=mu.user_id,
+            order_id=order.id,
+            kind='sos_communication_reminder',
+            extra_data={'order_type': str(order.order_type)},
+        )
+        schedule_sos_communication_reminder(order_id=order.pk, from_dt=timezone.now())
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+@shared_task(ignore_result=True)
 def master_no_departure_action_task(order_id: int) -> bool:
     """
     ETA task: after accept, if master did not move order to ON_THE_WAY in time,
@@ -150,7 +227,7 @@ def warn_upcoming_order_deadlines_task() -> int:
     from datetime import timedelta
 
     from apps.master.models import Master
-    from apps.order.services.notifications import notify_master_order_event, notify_user_order_event
+    from apps.order.services.notifications import notify_master_order_kind, notify_user_order_kind
 
     now = timezone.now()
     warn_min = int(getattr(settings, 'ORDER_DEADLINE_WARN_MINUTES', 3))
@@ -178,10 +255,8 @@ def warn_upcoming_order_deadlines_task() -> int:
         # User warning (requested: always for pending expiry).
         try:
             kind = 'sos_expiring_soon' if (o.order_type == OrderType.SOS and o.sos_offer_queue) else 'offer_expiring_soon'
-            notify_user_order_event(
+            notify_user_order_kind(
                 o,
-                title='Order update',
-                body=f'Order #{o.id}: response window is ending soon.',
                 kind=kind,
                 extra_data={'minutes_left': str(remaining)},
             )
@@ -193,11 +268,9 @@ def warn_upcoming_order_deadlines_task() -> int:
         if o.order_type != OrderType.SOS and o.master_id:
             try:
                 mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=o.master_id)
-                notify_master_order_event(
+                notify_master_order_kind(
                     master_user_id=mu.user_id,
                     order_id=o.id,
-                    title='Response needed',
-                    body=f'Order #{o.id}: please accept or decline before the timer ends.',
                     kind='offer_expiring_soon',
                     extra_data={'minutes_left': str(remaining), 'order_type': str(o.order_type)},
                 )
@@ -224,10 +297,8 @@ def warn_upcoming_order_deadlines_task() -> int:
             continue
         cache.set(key, 1, timeout=warn_min * 60 + 300)
         try:
-            notify_user_order_event(
+            notify_user_order_kind(
                 o,
-                title='Cancellation update',
-                body=f'Order #{o.id}: penalty-free cancellation will unlock soon.',
                 kind='penalty_free_unlock_soon',
                 extra_data={'minutes_left': str(warn_min)},
             )
@@ -237,11 +308,9 @@ def warn_upcoming_order_deadlines_task() -> int:
         if o.master_id:
             try:
                 mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=o.master_id)
-                notify_master_order_event(
+                notify_master_order_kind(
                     master_user_id=mu.user_id,
                     order_id=o.id,
-                    title='Cancellation update',
-                    body=f'Order #{o.id}: the customer will be able to cancel without penalty soon.',
                     kind='penalty_free_unlock_soon',
                     extra_data={'minutes_left': str(warn_min), 'order_type': str(o.order_type)},
                 )
@@ -266,10 +335,8 @@ def warn_upcoming_order_deadlines_task() -> int:
             continue
         cache.set(key, 1, timeout=warn_min * 60 + 60)
         try:
-            notify_user_order_event(
+            notify_user_order_kind(
                 o,
-                title='Arrival reminder',
-                body=f'Order #{o.id}: the arrival deadline is approaching.',
                 kind='arrival_deadline_soon',
                 extra_data={'minutes_left': str(warn_min)},
             )
@@ -279,11 +346,9 @@ def warn_upcoming_order_deadlines_task() -> int:
         if o.master_id:
             try:
                 mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=o.master_id)
-                notify_master_order_event(
+                notify_master_order_kind(
                     master_user_id=mu.user_id,
                     order_id=o.id,
-                    title='Arrival deadline approaching',
-                    body=f'Order #{o.id}: please arrive before the deadline to avoid auto-cancel.',
                     kind='arrival_deadline_soon',
                     extra_data={'minutes_left': str(warn_min), 'order_type': str(o.order_type)},
                 )
@@ -300,7 +365,7 @@ def run_broadcast_custom_request(order_id: int) -> int:
     """
     from apps.order.services.custom_request_broadcast import custom_request_broadcast_recipient_master_ids
     from apps.order.services.notifications import (
-        notify_master_order_event,
+        notify_master_order_kind,
         push_custom_request_to_master_websocket,
     )
 
@@ -322,11 +387,9 @@ def run_broadcast_custom_request(order_id: int) -> int:
                 .only('id', 'user_id')
                 .get(pk=mid)
             )
-            notify_master_order_event(
+            notify_master_order_kind(
                 master_user_id=mu.user_id,
                 order_id=order.id,
-                title='New custom request',
-                body=f'Order #{order.id} is available',
                 kind='custom_request_new',
                 extra_data={'order_type': str(order.order_type)},
             )
@@ -377,7 +440,7 @@ def unlock_client_penalty_free_cancel_task(order_id: int) -> None:
     ETA task: after N hours «on the way», allow client penalty-free cancel (if still on the way).
     """
     from apps.master.models import Master
-    from apps.order.services.notifications import notify_master_order_event, notify_user_order_event
+    from apps.order.services.notifications import notify_master_order_kind, notify_user_order_kind
 
     updated = Order.objects.filter(pk=order_id, status=OrderStatus.ON_THE_WAY).update(
         client_penalty_free_cancel_unlocked=True,
@@ -390,26 +453,17 @@ def unlock_client_penalty_free_cancel_task(order_id: int) -> None:
         return
     # Notify user.
     try:
-        notify_user_order_event(
-            o,
-            title='Cancellation unlocked',
-            body=f'Order #{o.id}: you can now cancel without a penalty (while the master is on the way).',
-            kind='penalty_free_unlocked',
-            extra_data=None,
-        )
+        notify_user_order_kind(o, kind='penalty_free_unlocked')
     except Exception:  # noqa: BLE001
         pass
     # Notify master.
     if o.master_id:
         try:
             mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=o.master_id)
-            notify_master_order_event(
+            notify_master_order_kind(
                 master_user_id=mu.user_id,
                 order_id=o.id,
-                title='Cancellation unlocked',
-                body=f'Order #{o.id}: the customer can now cancel without a penalty (while you are on the way).',
                 kind='penalty_free_unlocked',
-                extra_data=None,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -480,25 +534,18 @@ def auto_cancel_master_no_show_task(order_id: int) -> None:
         )
         # Push notifications about auto-cancel (no-show).
         try:
-            from apps.order.services.notifications import notify_master_order_event, notify_user_order_event
+            from apps.order.services.notifications import notify_master_order_kind, notify_user_order_kind
             from apps.master.models import Master
 
-            notify_user_order_event(
-                order,
-                title='Order cancelled',
-                body=f'Order #{order.id} was cancelled because the master did not arrive in time.',
-                kind='auto_cancel_no_show',
-                extra_data={'by': 'system'},
-            )
+            extra = {'by': 'system'}
+            notify_user_order_kind(order, kind='auto_cancel_no_show', extra_data=extra)
             if order.master_id:
                 mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=order.master_id)
-                notify_master_order_event(
+                notify_master_order_kind(
                     master_user_id=mu.user_id,
                     order_id=order.id,
-                    title='Order cancelled',
-                    body=f'Order #{order.id} was auto-cancelled because the arrival deadline passed.',
                     kind='auto_cancel_no_show',
-                    extra_data={'by': 'system'},
+                    extra_data=extra,
                 )
         except Exception:  # noqa: BLE001
             pass

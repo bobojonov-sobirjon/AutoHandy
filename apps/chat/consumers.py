@@ -376,29 +376,39 @@ class ChatConsumer(AsyncWebsocketConsumer):
         return other.id, ('master' if is_master else 'user')
 
     @database_sync_to_async
-    def _send_chat_push_sync(
-        self,
-        *,
-        other_user_id: int,
-        other_kind: str,
-        title: str,
-        body: str,
-        data: dict[str, str],
-    ) -> None:
-        """
-        Run FCM send in a sync thread.
-        FCM helper uses Django ORM internally (device token lookup), so it must not run
-        directly inside the async event loop.
-        """
-        from apps.order.services.notifications import send_fcm_to_user_devices
+    def _send_chat_push_sync(self, message) -> int:
+        """Run FCM send in a sync thread (ORM + firebase-admin)."""
+        from apps.order.services.notifications import notify_chat_message
 
-        send_fcm_to_user_devices(
-            user_id=other_user_id,
-            firebase_kind=other_kind,
-            title=title,
-            body=body,
-            data=data,
+        other_user_id, _other_kind = self._other_participant_id_and_kind_sync()
+        if not other_user_id:
+            return 0
+        sender = getattr(message, 'sender', None) or self.user
+        sender_name = (
+            getattr(sender, 'get_full_name', lambda: '')()
+            or getattr(sender, 'email', None)
+            or getattr(sender, 'phone_number', None)
+            or f'User {getattr(sender, "id", "")}'
         )
+        return notify_chat_message(
+            recipient_user_id=other_user_id,
+            room_id=int(message.room_id),
+            message_id=int(message.id),
+            message_type=str(message.message_type),
+            text=getattr(message, 'text', None),
+            sender_display=str(sender_name),
+        )
+
+    def _other_participant_id_and_kind_sync(self):
+        room = ChatRoom.objects.get(id=self.room_id)
+        other = room.get_other_participant(self.user)
+        if not other:
+            return None, None
+        try:
+            is_master = bool(getattr(other, 'master_profiles', None) and other.master_profiles.exists())
+        except Exception:  # noqa: BLE001
+            is_master = False
+        return other.id, ('master' if is_master else 'user')
 
     async def push_other_participant(self, message):
         logger = logging.getLogger(__name__)
@@ -412,13 +422,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 )
                 return
 
-            # Keep push body short
-            body = ''
-            if message.message_type == 'text':
-                body = (message.text or '').strip()[:120] or 'You have a new message'
-            else:
-                body = f'You received a new {message.message_type} message'
-
             logger.warning(
                 'chat_push_attempt room_id=%s message_id=%s to_user_id=%s kind=%s',
                 getattr(message, 'room_id', None),
@@ -426,23 +429,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 other_user_id,
                 other_kind,
             )
-            await self._send_chat_push_sync(
-                other_user_id=other_user_id,
-                other_kind=other_kind,
-                title='New chat message',
-                body=body,
-                data={
-                    'kind': 'chat_message',
-                    'room_id': str(message.room_id),
-                    'message_id': str(message.id),
-                    'message_type': str(message.message_type),
-                },
-            )
+            sent = await self._send_chat_push_sync(message)
             logger.warning(
-                'chat_push_done room_id=%s message_id=%s to_user_id=%s',
+                'chat_push_done room_id=%s message_id=%s to_user_id=%s success=%s',
                 getattr(message, 'room_id', None),
                 getattr(message, 'id', None),
                 other_user_id,
+                sent,
             )
         except Exception:  # noqa: BLE001
             logger.exception(

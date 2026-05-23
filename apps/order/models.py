@@ -687,6 +687,54 @@ class MasterOrderCancellation(models.Model):
         return f'Master {self.master_id} cancelled order {self.order_id}'
 
 
+class MasterAssignmentFailureReason(models.TextChoices):
+    """System-initiated assignment failures (completion rate)."""
+
+    SOS_NO_DEPARTURE = 'sos_no_departure', 'SOS: no departure after accept'
+    STANDARD_NO_DEPARTURE = 'standard_no_departure', 'Standard: no departure after accept'
+    SCHEDULED_NO_START = 'scheduled_no_start', 'Scheduled: did not start by deadline'
+
+
+class MasterAssignmentFailure(models.Model):
+    """
+    When the system penalizes a master (reassign / auto-cancel) but the order is no longer
+    ``master`` + ``cancelled`` on the same row (e.g. SOS rebroadcast), this row drives completion rate.
+    """
+
+    master = models.ForeignKey(
+        'master.Master',
+        on_delete=models.CASCADE,
+        related_name='assignment_failures',
+        verbose_name='Master',
+    )
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='assignment_failures',
+        verbose_name='Order',
+    )
+    reason = models.CharField(
+        max_length=32,
+        choices=MasterAssignmentFailureReason.choices,
+        verbose_name='Reason',
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
+
+    class Meta:
+        verbose_name = 'Master assignment failure'
+        verbose_name_plural = 'Master assignment failures'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=('master', 'order', 'reason'),
+                name='uniq_master_assignment_failure_master_order_reason',
+            ),
+        ]
+
+    def __str__(self):
+        return f'Failure {self.reason}: master={self.master_id} order={self.order_id}'
+
+
 class MasterOfferEventStatus(models.TextChoices):
     SENT = 'sent', 'Sent'
     ACCEPTED = 'accepted', 'Accepted'

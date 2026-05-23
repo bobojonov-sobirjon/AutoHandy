@@ -41,24 +41,32 @@ def _fcm_error_means_invalid_token(err: Any) -> bool:
     """True when FCM says this registration token must be dropped (stale app, reinstall, wrong project)."""
     if err is None:
         return False
+    msg = str(err).lower()
     try:
         import firebase_admin.exceptions as fb_exc
 
         if isinstance(err, fb_exc.NotFoundError):
             return True
         if isinstance(err, fb_exc.InvalidArgumentError):
-            return True
+            # Bad payload keys (e.g. reserved ``message_type``) are not stale tokens.
+            if 'payload key' in msg or 'data payload' in msg:
+                return False
+            if 'registration' in msg or 'token' in msg:
+                return True
+            return False
     except Exception:  # noqa: BLE001
         pass
-    code = str(getattr(err, 'code', '') or '')
-    msg = str(err).lower()
-    code_l = code.lower()
-    if 'not_found' in code_l or code_l == 'not_found':
+    code = str(getattr(err, 'code', '') or '').lower()
+    if 'not_found' in code or code == 'not_found':
         return True
-    if 'registration-token-not-registered' in code_l:
+    if 'registration-token-not-registered' in code:
         return True
-    if 'invalid-argument' in code_l:
-        return True
+    if 'invalid-argument' in code:
+        if 'payload key' in msg or 'data payload' in msg:
+            return False
+        if 'registration' in msg or 'token' in msg:
+            return True
+        return False
     if 'notregistered' in msg or 'not registered' in msg or 'requested entity was not found' in msg:
         return True
     if 'invalid registration' in msg:
@@ -159,30 +167,31 @@ def send_fcm_to_user_devices(
     title: str,
     body: str,
     data: dict[str, str] | None = None,
-) -> None:
+) -> int:
     """
     Best-effort FCM send. Does not raise.
     firebase_kind: "user" or "master"
+    Returns number of devices that accepted the message (0 if none sent).
     """
     try:
         from firebase_admin import messaging
     except Exception as exc:  # noqa: BLE001
         logger.warning('FCM skipped (firebase-admin not available): %s', exc)
         _fcm_dbg(f'skipped: firebase-admin not available: {exc}')
-        return
+        return 0
 
     tokens = _device_tokens_for_user(user_id)
     if not tokens:
         logger.warning('FCM no_tokens (kind=%s user_id=%s)', firebase_kind, user_id)
         _fcm_dbg(f'no_tokens kind={firebase_kind} user_id={user_id}')
-        return
+        return 0
 
     try:
         app = _get_firebase_app(firebase_kind)
     except Exception as exc:  # noqa: BLE001
         logger.warning('FCM init failed (kind=%s): %s', firebase_kind, exc)
         _fcm_dbg(f'init_failed kind={firebase_kind} user_id={user_id}: {exc}')
-        return
+        return 0
 
     logger.warning(
         'FCM send attempt (kind=%s user_id=%s tokens=%s title=%s)',
@@ -238,18 +247,19 @@ def send_fcm_to_user_devices(
     except Exception as exc:  # noqa: BLE001
         logger.warning('FCM send failed (kind=%s user_id=%s): %s', firebase_kind, user_id, exc)
         _fcm_dbg(f'send_failed kind={firebase_kind} user_id={user_id}: {exc}')
-        return
+        return 0
 
+    success_count = int(getattr(resp, 'success_count', 0) or 0)
+    _fcm_dbg(
+        f'send_result kind={firebase_kind} user_id={user_id} success={success_count} '
+        f'failure={getattr(resp,"failure_count",None)}'
+    )
     logger.warning(
         'FCM send result (kind=%s user_id=%s success=%s failure=%s)',
         firebase_kind,
         user_id,
-        getattr(resp, 'success_count', None),
+        success_count,
         getattr(resp, 'failure_count', None),
-    )
-    _fcm_dbg(
-        f'send_result kind={firebase_kind} user_id={user_id} success={getattr(resp,"success_count",None)} '
-        f'failure={getattr(resp,"failure_count",None)}'
     )
 
     invalid_tokens: list[str] = []
@@ -292,6 +302,74 @@ def send_fcm_to_user_devices(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning('FCM token cleanup failed: %s', exc)
+
+    return success_count
+
+
+def _firebase_kind_for_user(user_id: int) -> str:
+    """Provider app vs rider app label (same Firebase project; used for logging only)."""
+    try:
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.filter(pk=user_id).first()
+        if user and user.master_profiles.exists():
+            return 'master'
+    except Exception:  # noqa: BLE001
+        pass
+    return 'user'
+
+
+def notify_chat_message(
+    *,
+    recipient_user_id: int,
+    room_id: int,
+    message_id: int,
+    message_type: str,
+    text: str | None = None,
+    sender_display: str | None = None,
+) -> int:
+    """
+    Push when a chat message is sent (REST POST or WebSocket).
+    Returns FCM success count (0 if recipient has no registered device).
+    """
+    if not recipient_user_id:
+        return 0
+    if message_type == 'text':
+        body = (text or '').strip()[:120] or 'You have a new message'
+    else:
+        body = f'You received a new {message_type} message'
+    title = f'Message from {sender_display}' if sender_display else 'New chat message'
+    kind = _firebase_kind_for_user(recipient_user_id)
+    title_out, body_out = _pro_push_copy(
+        kind='chat_message',
+        order_id=None,
+        audience='master' if kind == 'master' else 'user',
+        extra_data=None,
+        fallback_title=title,
+        fallback_body=body,
+    )
+    return send_fcm_to_user_devices(
+        user_id=int(recipient_user_id),
+        firebase_kind=kind,
+        title=title_out,
+        body=body_out,
+        data={
+            'kind': 'chat_message',
+            'room_id': str(room_id),
+            # FCM reserves ``message_type`` / ``message_id`` — do not use those key names.
+            'chat_msg_id': str(message_id),
+            'chat_msg_type': str(message_type),
+        },
+    )
+
+
+def notify_order_status_changed_to_user(order: 'Order', *, new_status: str) -> int:
+    """Push rider when master changes workflow status (on_the_way, arrived, in_progress)."""
+    return notify_user_order_kind(
+        order,
+        kind='order_status_changed',
+        extra_data={'status': str(new_status)},
+    )
 
 
 def format_money_for_push(
@@ -540,11 +618,216 @@ def _pro_push_copy(
         )
 
     if k == 'order_status_changed':
+        st = ((extra_data or {}).get('status') or '').strip().lower()
         if audience == 'user':
+            if st == 'on_the_way':
+                return (
+                    'Master is on the way',
+                    f'Your master is heading to order {oid}. Tap for details.'.strip(),
+                )
+            if st == 'arrived':
+                return (
+                    'Master arrived',
+                    f'Your master arrived for order {oid}.'.strip(),
+                )
+            if st == 'in_progress':
+                return (
+                    'Work started',
+                    f'Work has started on order {oid}.'.strip(),
+                )
             return fallback_title or 'Order update', fallback_body or f'Your order {oid} has an update.'.strip()
         return fallback_title or 'Order update', fallback_body or f'Order {oid} has an update.'.strip()
 
-    return fallback_title, fallback_body
+    if k == 'scheduled_start_reminder':
+        mins = (extra_data or {}).get('minutes_until_start') if extra_data else None
+        try:
+            mins_int = int(mins) if mins not in (None, '') else None
+        except (TypeError, ValueError):
+            mins_int = None
+        if audience == 'user':
+            if mins_int is not None:
+                return (
+                    'Scheduled service reminder',
+                    f'Order {oid}: your booked service starts in about {mins_int} minutes. '
+                    f'Please be ready at the location.',
+                )
+            return (
+                'Scheduled service reminder',
+                f'Order {oid}: your booked service time is coming up soon. Tap for details.',
+            )
+        if mins_int is not None:
+            return (
+                'Scheduled service reminder',
+                f'Order {oid}: service starts in about {mins_int} minutes. Head to the customer on time.',
+            )
+        return (
+            'Scheduled service reminder',
+            f'Order {oid}: the booked service time is coming up soon. Tap to view.',
+        )
+
+    if k == 'scheduled_no_start_warning':
+        warn_after = int(getattr(settings, 'SCHEDULED_NO_START_WARNING_MINUTES', 20))
+        if audience == 'user':
+            return (
+                'Work not started yet',
+                f'Order {oid}: the scheduled start time passed {warn_after} minutes ago and work has '
+                f'not begun. We sent the master a reminder.',
+            )
+        return (
+            'Start work now',
+            f'Order {oid}: the scheduled time was {warn_after} minutes ago. Please start work now '
+            f'or the order may be cancelled.',
+        )
+
+    if k == 'auto_cancel_scheduled_no_start':
+        cancel_after = int(getattr(settings, 'SCHEDULED_NO_START_CANCEL_MINUTES', 30))
+        if audience == 'user':
+            return (
+                'Order cancelled',
+                f'Order {oid}: cancelled because the master did not start within {cancel_after} minutes '
+                f'after the scheduled time. You can book another master.',
+            )
+        return (
+            'Order cancelled',
+            f'Order {oid}: cancelled automatically — work was not started within {cancel_after} minutes '
+            f'after the scheduled time.',
+        )
+
+    if k == 'auto_cancel_no_departure':
+        depart_min = int(getattr(settings, 'MASTER_NO_DEPARTURE_MINUTES', 30))
+        if audience == 'user':
+            return (
+                'Order cancelled',
+                f'Order {oid}: cancelled because the master did not mark "On the way" within '
+                f'{depart_min} minutes of accepting. Please choose another master.',
+            )
+        return (
+            'Order cancelled',
+            f'Order {oid}: cancelled because you did not start the trip within {depart_min} minutes '
+            f'of accepting the order.',
+        )
+
+    if k == 'sos_rebroadcast' and audience == 'user':
+        return (
+            'Looking for another master',
+            f'SOS order {oid}: the assigned master did not start in time. We are sending your '
+            f'request to other nearby masters.',
+        )
+
+    if k == 'sos_unassigned_no_departure' and audience == 'master':
+        action_min = int(getattr(settings, 'SOS_NO_DEPARTURE_ACTION_MINUTES', 5))
+        return (
+            'SOS order unassigned',
+            f'Order {oid}: you did not mark "On the way" within {action_min} minutes. '
+            f'The SOS was reassigned to another master.',
+        )
+
+    if k == 'custom_request_rebroadcast' and audience == 'user':
+        return (
+            'Looking for another master',
+            f'Custom request {oid}: the master did not start in time. We are notifying other '
+            f'masters near you.',
+        )
+
+    if k == 'custom_request_unassigned_no_departure' and audience == 'master':
+        depart_min = int(getattr(settings, 'MASTER_NO_DEPARTURE_MINUTES', 30))
+        return (
+            'Request unassigned',
+            f'Order {oid}: you did not start in time (within {depart_min} minutes). '
+            f'The request was sent to other masters.',
+        )
+
+    if k == 'sos_departure_warning' and audience == 'master':
+        warn_min = int(getattr(settings, 'SOS_NO_DEPARTURE_WARNING_MINUTES', 4))
+        action_min = int(getattr(settings, 'SOS_NO_DEPARTURE_ACTION_MINUTES', 5))
+        return (
+            'Start your trip now',
+            f'Urgent — order {oid}: tap "On the way" within the next {max(1, action_min - warn_min)} '
+            f'minutes or the SOS will be reassigned (deadline {action_min} min after accept).',
+        )
+
+    if k == 'sos_communication_reminder' and audience == 'master':
+        interval = int(getattr(settings, 'SOS_ON_THE_WAY_REMINDER_MINUTES', 10))
+        return (
+            'Update the customer',
+            f'Order {oid}: please message or call the customer if your arrival time changes '
+            f'(reminder every {interval} minutes while on the way).',
+        )
+
+    if k == 'service_add_request' and audience == 'user':
+        return (
+            'Additional services request',
+            f'The master wants to add services to order {oid}. Open the app to approve or decline.',
+        )
+
+    if k == 'service_add_approved' and audience == 'master':
+        return (
+            'Services approved',
+            f'The customer approved your additional services for order {oid}. Tap to view the updated total.',
+        )
+
+    if k == 'service_add_rejected' and audience == 'master':
+        return (
+            'Services declined',
+            f'The customer declined your additional services request for order {oid}.',
+        )
+
+    if k == 'extra_money_request' and audience == 'user':
+        amt = format_money_for_push(
+            amount_str=(extra_data or {}).get('amount') if extra_data else None,
+            currency=(extra_data or {}).get('currency'),
+        )
+        if amt:
+            return (
+                'Additional charge request',
+                f'The master requested an extra charge of {amt} on order {oid}. '
+                f'Approve or reject in the app.',
+            )
+        return (
+            'Additional charge request',
+            f'The master requested an extra charge on order {oid}. Approve or reject in the app.',
+        )
+
+    if k == 'extra_money_approved' and audience == 'master':
+        amt = format_money_for_push(
+            amount_str=(extra_data or {}).get('amount') if extra_data else None,
+            currency=(extra_data or {}).get('currency'),
+        )
+        if amt:
+            return (
+                'Extra charge approved',
+                f'The customer approved your extra charge of {amt} for order {oid}.',
+            )
+        return (
+            'Extra charge approved',
+            f'The customer approved your extra charge request for order {oid}.',
+        )
+
+    if k == 'extra_money_rejected' and audience == 'master':
+        return (
+            'Extra charge declined',
+            f'The customer declined your extra charge request for order {oid}.',
+        )
+
+    if k == 'sos_all_declined' and audience == 'user':
+        return (
+            'No masters available',
+            f'SOS order {oid}: all nearby masters declined or did not respond. '
+            f'Please try again or adjust your location.',
+        )
+
+    if k == 'sos_expired' and audience == 'user':
+        return (
+            'SOS request expired',
+            f'SOS order {oid}: no master responded in time. Please create a new request.',
+        )
+
+    if k == 'chat_message':
+        return fallback_title or 'New chat message', fallback_body or 'You have a new message'
+
+    if fallback_title or fallback_body:
+        return fallback_title or 'Order update', fallback_body or f'Order {oid} has an update.'.strip()
+    return 'Order update', f'Order {oid} has an update. Tap for details.'.strip()
 
 
 def _ws_json_safe(value: Any) -> Any:
@@ -1150,10 +1433,8 @@ def notify_user_cancellation_penalty_charged(
 ) -> None:
     """Push after a cancellation penalty is successfully captured on the driver's card."""
     cur = (currency or getattr(order, 'stripe_payment_currency', None) or '').strip()
-    notify_user_order_event(
+    notify_user_order_kind(
         order,
-        title='Cancellation fee charged',
-        body=f'Order #{order.id}: cancellation fee charged.',
         kind='cancellation_penalty_charged',
         extra_data={
             'amount_cents': str(int(amount_cents)),
@@ -1171,15 +1452,47 @@ def notify_user_order_payment_charged(
 ) -> None:
     """Push after the full order total is charged on complete."""
     cur = (currency or getattr(order, 'stripe_payment_currency', None) or '').strip()
-    notify_user_order_event(
+    notify_user_order_kind(
         order,
-        title='Payment processed',
-        body=f'Order #{order.id}: payment charged.',
         kind='order_payment_charged',
         extra_data={
             'amount_cents': str(int(amount_cents)),
             'currency': cur or getattr(settings, 'STRIPE_CHARGE_CURRENCY', 'usd'),
         },
+    )
+
+
+def notify_user_order_kind(
+    order: 'Order',
+    *,
+    kind: str,
+    extra_data: dict[str, str] | None = None,
+) -> int:
+    """Production: push matni faqat ``kind`` + ``_pro_push_copy`` dan (title/body kodda yozilmaydi)."""
+    return notify_user_order_event(
+        order,
+        title='',
+        body='',
+        kind=kind,
+        extra_data=extra_data,
+    )
+
+
+def notify_master_order_kind(
+    *,
+    master_user_id: int,
+    order_id: int,
+    kind: str,
+    extra_data: dict[str, str] | None = None,
+) -> int:
+    """Production: push matni faqat ``kind`` + ``_pro_push_copy`` dan."""
+    return notify_master_order_event(
+        master_user_id=master_user_id,
+        order_id=order_id,
+        title='',
+        body='',
+        kind=kind,
+        extra_data=extra_data,
     )
 
 
@@ -1190,9 +1503,9 @@ def notify_user_order_event(
     body: str,
     kind: str,
     extra_data: dict[str, str] | None = None,
-) -> None:
+) -> int:
     if not getattr(order, 'user_id', None):
-        return
+        return 0
     _fcm_dbg(
         'notify_user_order_event '
         f'order_id={getattr(order,"id",None)} user_id={getattr(order,"user_id",None)} kind={kind} '
@@ -1209,7 +1522,7 @@ def notify_user_order_event(
     data = {'kind': kind, 'order_id': str(order.id)}
     if extra_data:
         data.update({str(k): str(v) for k, v in extra_data.items()})
-    send_fcm_to_user_devices(
+    return send_fcm_to_user_devices(
         user_id=order.user_id,
         firebase_kind='user',
         title=title_out,
@@ -1257,7 +1570,7 @@ def notify_master_order_event(
     body: str,
     kind: str,
     extra_data: dict[str, str] | None = None,
-) -> None:
+) -> int:
     _fcm_dbg(
         'notify_master_order_event '
         f'order_id={order_id} master_user_id={master_user_id} kind={kind} '
@@ -1274,7 +1587,7 @@ def notify_master_order_event(
     data = {'kind': kind, 'order_id': str(order_id)}
     if extra_data:
         data.update({str(k): str(v) for k, v in extra_data.items()})
-    send_fcm_to_user_devices(
+    return send_fcm_to_user_devices(
         user_id=master_user_id,
         firebase_kind='master',
         title=title_out,

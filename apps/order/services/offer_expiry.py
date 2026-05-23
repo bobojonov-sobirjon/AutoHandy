@@ -7,6 +7,13 @@ from typing import Container
 from django.utils import timezone
 
 from apps.order.models import Order, OrderStatus, OrderType
+from apps.order.services.assignment_failure import (
+    record_sos_no_departure_failure,
+    record_standard_no_departure_failure,
+)
+from apps.order.services.mvp_timers import no_departure_cutoff_minutes_for_order
+from apps.order.services.order_scheduled_start import order_has_scheduled_start
+from apps.order.services.scheduled_mvp import sweep_scheduled_mvp_deadlines
 from apps.order.services.sos_rotation import (
     advance_sos_ring_after_decline_or_timeout,
     filter_master_ids_meeting_emergency_thresholds,
@@ -65,23 +72,16 @@ def expire_stale_master_offers(now=None, *, skip_order_ids: Container[int] | Non
         # Push notifications: order expired (no accept in time).
         try:
             from apps.master.models import Master
-            from apps.order.services.notifications import notify_master_order_event, notify_user_order_event
+            from apps.order.services.notifications import notify_master_order_kind, notify_user_order_kind
 
-            notify_user_order_event(
-                order,
-                title='Order expired',
-                body=f'Order #{order.id}: no master accepted in time. Please choose another master or create a new request.',
-                kind='offer_expired',
-                extra_data={'by': 'system'},
-            )
+            extra = {'by': 'system'}
+            notify_user_order_kind(order, kind='offer_expired', extra_data=extra)
             mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=old_master_id)
-            notify_master_order_event(
+            notify_master_order_kind(
                 master_user_id=mu.user_id,
                 order_id=order.id,
-                title='Offer expired',
-                body=f'Order #{order.id}: the response window ended.',
                 kind='offer_expired',
-                extra_data={'by': 'system'},
+                extra_data=extra,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -90,7 +90,13 @@ def expire_stale_master_offers(now=None, *, skip_order_ids: Container[int] | Non
     # Also handle SOS orders that were accepted but the master never departed.
     # This is a fallback path for environments where Celery ETA tasks are unreliable.
     n += sweep_accepted_no_departure(now=now)
+    n += sweep_scheduled_mvp_deadlines(now=now)
     return n
+
+
+def rebroadcast_stale_accepted_sos_no_departure(*, now=None, order_id: int) -> bool:
+    """ETA task entry: SOS-only no-departure rebroadcast."""
+    return bool(handle_accepted_no_departure_for_order(order_id=order_id, now=now))
 
 
 def handle_accepted_no_departure_for_order(*, order_id: int, now=None) -> int:
@@ -105,178 +111,181 @@ def sweep_accepted_no_departure(*, now=None, order_id: int | None = None) -> int
     """
     If an order is accepted but the master did not mark "on the way" in time,
     take action:
-    - SOS: re-broadcast to other masters
+    - SOS: re-broadcast to other masters (MVP: 5 minutes after accept)
     - Custom request: reset to pending and broadcast again to masters in radius
-    - Standard: auto-cancel and notify (client can choose another master)
-
-    This is intentionally conservative: it only touches SOS orders in ACCEPTED state
-    where on_the_way_at is still null and accepted_at is older than the threshold.
+    - Standard (no scheduled slot): auto-cancel and notify
+    - Standard (with preferred_date/time): handled by scheduled_mvp (start + 30 min)
     """
     now = now or timezone.now()
-    from django.conf import settings
-
-    minutes = int(getattr(settings, 'MASTER_NO_DEPARTURE_MINUTES', 30))
-    cutoff = now - timedelta(minutes=minutes)
     qs = (
         Order.objects.filter(
             status=OrderStatus.ACCEPTED,
             on_the_way_at__isnull=True,
             accepted_at__isnull=False,
-            accepted_at__lte=cutoff,
         )
         .select_related('master')
         .prefetch_related('category')
-        .only('id', 'user_id', 'master_id', 'order_type', 'latitude', 'longitude', 'accepted_at')
+        .only(
+            'id',
+            'user_id',
+            'master_id',
+            'order_type',
+            'latitude',
+            'longitude',
+            'accepted_at',
+            'preferred_date',
+            'preferred_time_start',
+        )
     )
     if order_id is not None:
         qs = qs.filter(pk=int(order_id))
     touched = 0
     for order in qs.iterator(chunk_size=100):
-        old_master_id = order.master_id
-
-        # SOS: unassign and re-broadcast.
+        minutes = no_departure_cutoff_minutes_for_order(order)
+        if minutes is None:
+            continue
+        if order.accepted_at is None or order.accepted_at > now - timedelta(minutes=minutes):
+            continue
         if order.order_type == OrderType.SOS:
-            if order.latitude is None or order.longitude is None:
-                continue
-            try:
-                from apps.order.services.sos_master_queue import build_sos_master_id_queue
-                from apps.categories.models import Category
-
-                cat_ids = list(
-                    order.category.filter(type_category=Category.TypeCategory.BY_ORDER).values_list('id', flat=True)
-                )
-                queue = build_sos_master_id_queue(float(order.latitude), float(order.longitude), cat_ids)
-                queue = filter_master_ids_meeting_emergency_thresholds(queue)
-            except Exception:
-                queue = []
-            if not queue:
-                continue
-            order.status = OrderStatus.PENDING
-            order.master = None
-            order.accepted_at = None
-            order.master_response_deadline = None
-            order.sos_offer_queue = queue
-            order.sos_offer_index = 0
-            order.sos_declined_master_ids = []
-            order.save(
-                update_fields=[
-                    'status',
-                    'master',
-                    'accepted_at',
-                    'master_response_deadline',
-                    'sos_offer_queue',
-                    'sos_offer_index',
-                    'sos_declined_master_ids',
-                    'updated_at',
-                ]
-            )
-            try:
-                from apps.order.services.master_offer import activate_pending_master_offer
-
-                activate_pending_master_offer(order, request=None, send_push=True)
-            except Exception:
-                pass
-            try:
-                from apps.order.services.notifications import notify_user_order_event, notify_master_order_event
-                from apps.master.models import Master
-
-                notify_user_order_event(
-                    order,
-                    title='Looking for another master',
-                    body=f'Order #{order.id}: the master did not depart in time. Re-sending to other masters.',
-                    kind='sos_rebroadcast',
-                    extra_data={'by': 'system'},
-                )
-                if old_master_id:
-                    mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=old_master_id)
-                    notify_master_order_event(
-                        master_user_id=mu.user_id,
-                        order_id=order.id,
-                        title='Order unassigned',
-                        body=f'Order #{order.id}: you did not start the trip in time; the SOS was reassigned.',
-                        kind='sos_unassigned_no_departure',
-                        extra_data={'by': 'system'},
-                    )
-            except Exception:  # noqa: BLE001
-                pass
-            touched += 1
+            if _handle_sos_no_departure(order, now):
+                touched += 1
             continue
-
-        # Custom request: reset to pending and broadcast again to nearby masters.
         if order.order_type == OrderType.CUSTOM_REQUEST:
-            order.status = OrderStatus.PENDING
-            order.master = None
-            order.accepted_at = None
-            order.master_response_deadline = None
-            order.save(
-                update_fields=['status', 'master', 'accepted_at', 'master_response_deadline', 'updated_at']
-            )
-            try:
-                from apps.order.tasks import schedule_broadcast_custom_request
-
-                schedule_broadcast_custom_request(order.pk)
-            except Exception:
-                pass
-            try:
-                from apps.order.services.notifications import notify_user_order_event, notify_master_order_event
-                from apps.master.models import Master
-
-                notify_user_order_event(
-                    order,
-                    title='Looking for another master',
-                    body=f'Order #{order.id}: the master did not depart in time. Re-sending to other masters.',
-                    kind='custom_request_rebroadcast',
-                    extra_data={'by': 'system'},
-                )
-                if old_master_id:
-                    mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=old_master_id)
-                    notify_master_order_event(
-                        master_user_id=mu.user_id,
-                        order_id=order.id,
-                        title='Order unassigned',
-                        body=f'Order #{order.id}: you did not start in time; the request was reassigned.',
-                        kind='custom_request_unassigned_no_departure',
-                        extra_data={'by': 'system'},
-                    )
-            except Exception:  # noqa: BLE001
-                pass
-            touched += 1
+            if _handle_custom_request_no_departure(order, now):
+                touched += 1
             continue
-
-        # Standard: auto-cancel (client chose a specific master; cannot safely reassign automatically).
-        order.status = OrderStatus.CANCELLED
-        order.auto_cancel_reason = 'master_no_departure'
-        order.master = None
-        order.accepted_at = None
-        order.master_response_deadline = None
-        order.save(
-            update_fields=['status', 'auto_cancel_reason', 'master', 'accepted_at', 'master_response_deadline', 'updated_at']
-        )
-        try:
-            from apps.order.services.notifications import notify_user_order_event, notify_master_order_event
-            from apps.master.models import Master
-
-            notify_user_order_event(
-                order,
-                title='Order cancelled',
-                body=f'Order #{order.id}: the master did not depart in time. Please choose another master.',
-                kind='auto_cancel_no_departure',
-                extra_data={'by': 'system'},
-            )
-            if old_master_id:
-                mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=old_master_id)
-                notify_master_order_event(
-                    master_user_id=mu.user_id,
-                    order_id=order.id,
-                    title='Order cancelled',
-                    body=f'Order #{order.id}: you did not start in time; the order was cancelled.',
-                    kind='auto_cancel_no_departure',
-                    extra_data={'by': 'system'},
-                )
-        except Exception:  # noqa: BLE001
-            pass
-        touched += 1
+        if order.order_type == OrderType.STANDARD:
+            if order_has_scheduled_start(order):
+                continue
+            if _handle_standard_no_departure(order, now):
+                touched += 1
     return touched
+
+
+def _handle_sos_no_departure(order, now) -> bool:
+    old_master_id = order.master_id
+    if order.latitude is None or order.longitude is None:
+        return False
+    try:
+        from apps.order.services.sos_master_queue import build_sos_master_id_queue
+        from apps.categories.models import Category
+
+        cat_ids = list(
+            order.category.filter(type_category=Category.TypeCategory.BY_ORDER).values_list('id', flat=True)
+        )
+        queue = build_sos_master_id_queue(float(order.latitude), float(order.longitude), cat_ids)
+        queue = filter_master_ids_meeting_emergency_thresholds(queue)
+    except Exception:
+        queue = []
+    if not queue:
+        return False
+    if old_master_id:
+        record_sos_no_departure_failure(master_id=old_master_id, order_id=order.pk)
+    order.status = OrderStatus.PENDING
+    order.master = None
+    order.accepted_at = None
+    order.master_response_deadline = None
+    order.sos_offer_queue = queue
+    order.sos_offer_index = 0
+    order.sos_declined_master_ids = []
+    order.save(
+        update_fields=[
+            'status',
+            'master',
+            'accepted_at',
+            'master_response_deadline',
+            'sos_offer_queue',
+            'sos_offer_index',
+            'sos_declined_master_ids',
+            'updated_at',
+        ]
+    )
+    try:
+        from apps.order.services.master_offer import activate_pending_master_offer
+
+        activate_pending_master_offer(order, request=None, send_push=True)
+    except Exception:
+        pass
+    try:
+        from apps.order.services.notifications import notify_master_order_kind, notify_user_order_kind
+        from apps.master.models import Master
+
+        extra = {'by': 'system'}
+        notify_user_order_kind(order, kind='sos_rebroadcast', extra_data=extra)
+        if old_master_id:
+            mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=old_master_id)
+            notify_master_order_kind(
+                master_user_id=mu.user_id,
+                order_id=order.id,
+                kind='sos_unassigned_no_departure',
+                extra_data=extra,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
+def _handle_custom_request_no_departure(order, now) -> bool:
+    old_master_id = order.master_id
+    order.status = OrderStatus.PENDING
+    order.master = None
+    order.accepted_at = None
+    order.master_response_deadline = None
+    order.save(update_fields=['status', 'master', 'accepted_at', 'master_response_deadline', 'updated_at'])
+    try:
+        from apps.order.tasks import schedule_broadcast_custom_request
+
+        schedule_broadcast_custom_request(order.pk)
+    except Exception:
+        pass
+    try:
+        from apps.order.services.notifications import notify_master_order_kind, notify_user_order_kind
+        from apps.master.models import Master
+
+        extra = {'by': 'system'}
+        notify_user_order_kind(order, kind='custom_request_rebroadcast', extra_data=extra)
+        if old_master_id:
+            mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=old_master_id)
+            notify_master_order_kind(
+                master_user_id=mu.user_id,
+                order_id=order.id,
+                kind='custom_request_unassigned_no_departure',
+                extra_data=extra,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
+def _handle_standard_no_departure(order, now) -> bool:
+    old_master_id = order.master_id
+    if old_master_id:
+        record_standard_no_departure_failure(master_id=old_master_id, order_id=order.pk)
+    order.status = OrderStatus.CANCELLED
+    order.auto_cancel_reason = 'master_no_departure'
+    order.master = None
+    order.accepted_at = None
+    order.master_response_deadline = None
+    order.save(
+        update_fields=['status', 'auto_cancel_reason', 'master', 'accepted_at', 'master_response_deadline', 'updated_at']
+    )
+    try:
+        from apps.order.services.notifications import notify_master_order_kind, notify_user_order_kind
+        from apps.master.models import Master
+
+        extra = {'by': 'system'}
+        notify_user_order_kind(order, kind='auto_cancel_no_departure', extra_data=extra)
+        if old_master_id:
+            mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=old_master_id)
+            notify_master_order_kind(
+                master_user_id=mu.user_id,
+                order_id=order.id,
+                kind='auto_cancel_no_departure',
+                extra_data=extra,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return True
 
 
 def expire_master_offer_for_order(order_id: int, now=None) -> bool:
@@ -308,23 +317,16 @@ def expire_master_offer_for_order(order_id: int, now=None) -> bool:
     # Push notifications: order expired (no accept in time).
     try:
         from apps.master.models import Master
-        from apps.order.services.notifications import notify_master_order_event, notify_user_order_event
+        from apps.order.services.notifications import notify_master_order_kind, notify_user_order_kind
 
-        notify_user_order_event(
-            order,
-            title='Order expired',
-            body=f'Order #{order.id}: no master accepted in time. Please choose another master or create a new request.',
-            kind='offer_expired',
-            extra_data={'by': 'system'},
-        )
+        extra = {'by': 'system'}
+        notify_user_order_kind(order, kind='offer_expired', extra_data=extra)
         mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=old_master_id)
-        notify_master_order_event(
+        notify_master_order_kind(
             master_user_id=mu.user_id,
             order_id=order.id,
-            title='Offer expired',
-            body=f'Order #{order.id}: the response window ended.',
             kind='offer_expired',
-            extra_data={'by': 'system'},
+            extra_data=extra,
         )
     except Exception:  # noqa: BLE001
         pass

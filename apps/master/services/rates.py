@@ -16,7 +16,9 @@ def _window_start(days_default: int) -> object:
 def master_acceptance_rate_percent(master) -> int:
     """
     Acceptance rate (%) from MasterOfferEvent:
-      accepted / (accepted + declined + expired) * 100
+      accepted / (accepted + declined) * 100
+
+    Expired offers do not affect the rate (client MVP: only explicit decline lowers it).
     """
     from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
 
@@ -26,7 +28,6 @@ def master_acceptance_rate_percent(master) -> int:
         status__in=(
             MasterOfferEventStatus.ACCEPTED,
             MasterOfferEventStatus.DECLINED,
-            MasterOfferEventStatus.EXPIRED,
         )
     ).count()
     if denom <= 0:
@@ -39,18 +40,19 @@ def master_completion_rate_percent(master) -> int:
     """
     Completion rate (%) from resolved assignments in the window (``accepted_at`` set):
 
-      completed / (completed + cancelled) * 100
+      completed / (completed + cancelled + assignment_failures) * 100
 
-    In-progress orders (accepted, on_the_way, in_progress, …) are excluded until they
-    finish as **completed** or **cancelled** (e.g. client declined, master cancel).
+    ``assignment_failures`` covers SOS rebroadcast and other auto-failures where the order
+    row no longer shows ``master`` + ``cancelled`` together.
     """
-    from apps.order.models import Order, OrderStatus
+    from apps.order.models import MasterAssignmentFailure, Order, OrderStatus
 
     start = _window_start(30)
     qs = Order.objects.filter(master=master, accepted_at__isnull=False, accepted_at__gte=start)
     completed = qs.filter(status=OrderStatus.COMPLETED).count()
     cancelled = qs.filter(status=OrderStatus.CANCELLED).count()
-    resolved = completed + cancelled
+    failures = MasterAssignmentFailure.objects.filter(master=master, created_at__gte=start).count()
+    resolved = completed + cancelled + failures
     if resolved <= 0:
         return 0
     return int(round(completed / resolved * 100))
