@@ -848,6 +848,30 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                     'preferred_date and preferred_time_start must both be sent together, or omit both.'
                 )
             if pd is not None and ps is not None:
+                from apps.order.services.order_scheduled_start import (
+                    scheduled_slot_is_in_future,
+                    scheduled_slot_past_cancel_deadline,
+                )
+
+                if not scheduled_slot_is_in_future(preferred_date=pd, preferred_time_start=ps):
+                    raise serializers.ValidationError(
+                        {
+                            'preferred_time_start': (
+                                'Scheduled start time must be in the future (service timezone).'
+                            )
+                        }
+                    )
+                if scheduled_slot_past_cancel_deadline(
+                    preferred_date=pd,
+                    preferred_time_start=ps,
+                ):
+                    raise serializers.ValidationError(
+                        {
+                            'preferred_time_start': (
+                                'Scheduled time window has already passed; choose a later slot.'
+                            )
+                        }
+                    )
                 blocked = preferred_slot_blocked_message(
                     master_id=master_id,
                     preferred_date=pd,

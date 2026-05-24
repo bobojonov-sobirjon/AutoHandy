@@ -24,4 +24,4 @@ import apps.order.tasks  # noqa: E402 — ensure @shared_task registration
 
 @app.task(bind=True, ignore_result=True)
 def debug_task(self):
-    print(f'Request: {self.request!r}')
+    return None

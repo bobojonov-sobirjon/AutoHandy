@@ -55,7 +55,6 @@ def schedule_post_accept_timers(*, order_id: int, order_type: str, accepted_at: 
             order = None
         if order and order_has_scheduled_start(order):
             _schedule_standard_scheduled_timers(order_id, order)
-            _schedule_standard_no_departure_timer(order_id, accepted_at)
             _schedule_standard_accept_no_on_the_way_notify(order_id, accepted_at)
             return
         _schedule_standard_no_departure_timer(order_id, accepted_at)

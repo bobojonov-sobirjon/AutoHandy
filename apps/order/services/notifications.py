@@ -25,18 +25,6 @@ def _env(key: str, default: str = '') -> str:
     return (os.getenv(key, default) or '').strip()
 
 
-def _fcm_debug_enabled() -> bool:
-    return _env('FCM_DEBUG', '').lower() in ('1', 'true', 'yes', 'on')
-
-
-def _fcm_dbg(msg: str) -> None:
-    if _fcm_debug_enabled():
-        try:
-            print(f'[FCM_DEBUG] {msg}')
-        except Exception:  # noqa: BLE001
-            return
-
-
 def _fcm_error_means_invalid_token(err: Any) -> bool:
     """True when FCM says this registration token must be dropped (stale app, reinstall, wrong project)."""
     if err is None:
@@ -120,12 +108,6 @@ def _get_firebase_app(_kind: str):
         raise RuntimeError(f'Firebase env missing (prefix {prefix})')
 
     cred = credentials.Certificate(sa)
-    logger.warning(
-        'FCM init app (project_id=%s client_email=%s)',
-        sa.get('project_id'),
-        (sa.get('client_email') or '').split('@')[0] + '@…',
-    )
-    _fcm_dbg(f'init app project_id={sa.get("project_id")}')
     app = firebase_admin.initialize_app(cred, name='autohandy_default')
     _FIREBASE_APPS[cache_key] = app
     return app
@@ -139,24 +121,14 @@ def _device_tokens_for_user(user_id: int) -> list[str]:
         .order_by('-updated_at')
         .values_list('device_token', flat=True)
     )
-    _fcm_dbg(f'devices_lookup user_id={user_id} rows={len(tokens)}')
     seen = set()
     out: list[str] = []
-    empty = 0
     for t in tokens:
         t = (t or '').strip()
-        if not t:
-            empty += 1
-            continue
-        if t in seen:
+        if not t or t in seen:
             continue
         seen.add(t)
         out.append(t)
-    if empty:
-        _fcm_dbg(f'devices_lookup user_id={user_id} empty_tokens={empty}')
-    if out:
-        sample = out[0]
-        _fcm_dbg(f'devices_lookup user_id={user_id} unique_tokens={len(out)} sample_prefix={sample[:12]}…')
     return out
 
 
@@ -177,32 +149,17 @@ def send_fcm_to_user_devices(
         from firebase_admin import messaging
     except Exception as exc:  # noqa: BLE001
         logger.warning('FCM skipped (firebase-admin not available): %s', exc)
-        _fcm_dbg(f'skipped: firebase-admin not available: {exc}')
         return 0
 
     tokens = _device_tokens_for_user(user_id)
     if not tokens:
-        logger.warning('FCM no_tokens (kind=%s user_id=%s)', firebase_kind, user_id)
-        _fcm_dbg(f'no_tokens kind={firebase_kind} user_id={user_id}')
         return 0
 
     try:
         app = _get_firebase_app(firebase_kind)
     except Exception as exc:  # noqa: BLE001
         logger.warning('FCM init failed (kind=%s): %s', firebase_kind, exc)
-        _fcm_dbg(f'init_failed kind={firebase_kind} user_id={user_id}: {exc}')
         return 0
-
-    logger.warning(
-        'FCM send attempt (kind=%s user_id=%s tokens=%s title=%s)',
-        firebase_kind,
-        user_id,
-        len(tokens),
-        (title or '')[:60],
-    )
-    _fcm_dbg(
-        f'send_attempt kind={firebase_kind} user_id={user_id} tokens={len(tokens)} title={(title or "")[:60]}'
-    )
 
     payload_data = {str(k): str(v) for k, v in (data or {}).items()}
     # Ensure devices wake promptly and play sound consistently (iOS + Android).
@@ -246,60 +203,22 @@ def send_fcm_to_user_devices(
             resp = messaging.send_all(messages, app=app)
     except Exception as exc:  # noqa: BLE001
         logger.warning('FCM send failed (kind=%s user_id=%s): %s', firebase_kind, user_id, exc)
-        _fcm_dbg(f'send_failed kind={firebase_kind} user_id={user_id}: {exc}')
         return 0
 
     success_count = int(getattr(resp, 'success_count', 0) or 0)
-    _fcm_dbg(
-        f'send_result kind={firebase_kind} user_id={user_id} success={success_count} '
-        f'failure={getattr(resp,"failure_count",None)}'
-    )
-    logger.warning(
-        'FCM send result (kind=%s user_id=%s success=%s failure=%s)',
-        firebase_kind,
-        user_id,
-        success_count,
-        getattr(resp, 'failure_count', None),
-    )
 
     invalid_tokens: list[str] = []
     for i, r in enumerate(resp.responses):
         if r.success:
             continue
         err = getattr(r, 'exception', None)
-        code = getattr(err, 'code', '') if err else ''
-        msg_txt = str(err) if err else ''
-        # Log first few failures for diagnostics.
-        if i < 3:
-            logger.warning(
-                'FCM send failure detail (kind=%s user_id=%s token_idx=%s code=%s err=%s)',
-                firebase_kind,
-                user_id,
-                i,
-                code,
-                (msg_txt or '')[:200],
-            )
-        _fcm_dbg(
-            f'failure_detail kind={firebase_kind} user_id={user_id} token_idx={i} '
-            f'code={code} err={(msg_txt or "")[:200]} invalid_token={_fcm_error_means_invalid_token(err)}'
-        )
         if _fcm_error_means_invalid_token(err):
             invalid_tokens.append(tokens[i])
     if invalid_tokens:
         try:
             from apps.accounts.models import UserDevice
 
-            deleted, _ = UserDevice.objects.filter(device_token__in=invalid_tokens).delete()
-            logger.warning(
-                'FCM cleaned invalid tokens (kind=%s user_id=%s removed_rows=%s)',
-                firebase_kind,
-                user_id,
-                deleted,
-            )
-            _fcm_dbg(
-                f'token_cleanup kind={firebase_kind} user_id={user_id} removed_rows={deleted} '
-                f'(client must re-register via POST /api/auth/device/)'
-            )
+            UserDevice.objects.filter(device_token__in=invalid_tokens).delete()
         except Exception as exc:  # noqa: BLE001
             logger.warning('FCM token cleanup failed: %s', exc)
 
@@ -1363,7 +1282,6 @@ def push_sos_order_to_master_websocket(
     mid = target_master_id if target_master_id is not None else order.master_id
     if not mid:
         return
-    _fcm_dbg(f'push_sos_order_to_master_websocket order_id={getattr(order,"id",None)} target_master_id={mid}')
     if order.order_type == OrderType.SOS and not order_within_master_acceptance_zone(order, mid):
         logger.warning(
             'push_sos_order_to_master_websocket skipped: order %s not in master %s acceptance zone',
@@ -1413,16 +1331,6 @@ def notify_master_new_order(order: 'Order', *, target_master_id: int | None = No
         extra_data={'order_type': str(getattr(order, 'order_type', '') or '')},
         fallback_title='New order received',
         fallback_body=f'A new order is waiting for you. Tap to view — #{order.id}',
-    )
-    logger.warning(
-        'notify_master_new_order order_id=%s master_id=%s master_user_id=%s (FCM target user_id=%s)',
-        order.id,
-        mid,
-        master.user_id,
-        master.user_id,
-    )
-    _fcm_dbg(
-        f'notify_master_new_order order_id={order.id} master_id={mid} master_user_id={master.user_id}'
     )
     send_fcm_to_user_devices(
         user_id=master.user_id,
@@ -1519,11 +1427,6 @@ def notify_user_order_event(
 ) -> int:
     if not getattr(order, 'user_id', None):
         return 0
-    _fcm_dbg(
-        'notify_user_order_event '
-        f'order_id={getattr(order,"id",None)} user_id={getattr(order,"user_id",None)} kind={kind} '
-        f'title={(title or "")[:60]} extra_keys={list((extra_data or {}).keys())}'
-    )
     title_out, body_out = _pro_push_copy(
         kind=kind,
         order_id=order.id,
@@ -1584,11 +1487,6 @@ def notify_master_order_event(
     kind: str,
     extra_data: dict[str, str] | None = None,
 ) -> int:
-    _fcm_dbg(
-        'notify_master_order_event '
-        f'order_id={order_id} master_user_id={master_user_id} kind={kind} '
-        f'title={(title or "")[:60]} extra_keys={list((extra_data or {}).keys())}'
-    )
     title_out, body_out = _pro_push_copy(
         kind=kind,
         order_id=order_id,

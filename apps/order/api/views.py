@@ -493,13 +493,7 @@ JWT обязателен.
             and len(response.data) == 0
             and explain
         ):
-            logger.warning(
-                'nearby_masters_empty user_id=%s coord_source=%s category=%s explain=%s',
-                request.user.pk,
-                coord_source,
-                request.query_params.get('category'),
-                explain,
-            )
+            pass
 
         if want_explain and response.status_code == status.HTTP_200_OK and isinstance(response.data, list):
             return Response({'masters': response.data, 'nearby_explain': explain or {}})
@@ -2358,21 +2352,6 @@ class UpdateOrderStatusView(APIView):
             return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # Debug visibility for production issues (status transition + push decisions).
-        try:
-            logger.warning(
-                'order_status_update_enter order_id=%s req_user_id=%s req_is_owner=%s req_has_master=%s '
-                'old_status=%s new_status=%s order_type=%s order_master_id=%s',
-                order.id,
-                getattr(request.user, 'id', None),
-                bool(order.user_id == getattr(request.user, 'id', None)),
-                bool(getattr(request.user, 'master_profiles', None) and request.user.master_profiles.first()),
-                str(getattr(order, 'status', '')),
-                str(request.data.get('status')),
-                str(getattr(order, 'order_type', '')),
-                getattr(order, 'master_id', None),
-            )
-        except Exception:  # noqa: BLE001
-            pass
 
         new_status = request.data.get('status')
         if not new_status:
@@ -2406,16 +2385,6 @@ class UpdateOrderStatusView(APIView):
             if is_owner:
                 snap = client_cancellation_snapshot(order)
                 if not snap['client_can_cancel']:
-                    try:
-                        logger.warning(
-                            'order_status_update_blocked order_id=%s transition=%s->%s reason=%s',
-                            order.id,
-                            order.status,
-                            new_status,
-                            'client_can_cancel=False',
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                     return Response(
                         {'error': snap['summary'], 'cancellation': snap},
                         status=status.HTTP_400_BAD_REQUEST,
@@ -2450,16 +2419,6 @@ class UpdateOrderStatusView(APIView):
                         kind='order_cancelled',
                         extra_data={'by': 'user', 'status': str(order.status)},
                     )
-                    try:
-                        logger.warning(
-                            'order_status_update_push user_id=%s kind=%s order_id=%s status=%s',
-                            order.user_id,
-                            'order_cancelled',
-                            order.id,
-                            order.status,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                     # If there is an assigned master — notify them; for pending SOS broadcast — notify all in queue.
                     if order.master_id:
                         mu = (
@@ -2473,15 +2432,6 @@ class UpdateOrderStatusView(APIView):
                             kind='order_cancelled',
                             extra_data={'by': 'user'},
                         )
-                        try:
-                            logger.warning(
-                                'order_status_update_push master_user_id=%s kind=%s order_id=%s',
-                                mu.user_id,
-                                'order_cancelled',
-                                order.id,
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
                     elif order.order_type == OrderType.SOS and order.sos_offer_queue:
                         mids = []
                         for x in (order.sos_offer_queue or []):
@@ -2502,15 +2452,6 @@ class UpdateOrderStatusView(APIView):
                                     kind='order_cancelled',
                                     extra_data={'by': 'user'},
                                 )
-                                try:
-                                    logger.warning(
-                                        'order_status_update_push master_user_id=%s kind=%s order_id=%s (sos_queue)',
-                                        mu.user_id,
-                                        'order_cancelled',
-                                        order.id,
-                                    )
-                                except Exception:  # noqa: BLE001
-                                    pass
                             except Exception:  # noqa: BLE001
                                 continue
                 except Exception:  # noqa: BLE001
@@ -2523,16 +2464,6 @@ class UpdateOrderStatusView(APIView):
                 reason = request.data.get('cancel_reason')
                 ok, err_msg = validate_master_cancel(order, master, reason)
                 if not ok:
-                    try:
-                        logger.warning(
-                            'order_status_update_blocked order_id=%s transition=%s->%s reason=%s',
-                            order.id,
-                            order.status,
-                            new_status,
-                            err_msg,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                     return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
                 MasterOrderCancellation.objects.create(master=master, order=order, reason=reason)
                 order.status = OrderStatus.CANCELLED
@@ -2551,16 +2482,6 @@ class UpdateOrderStatusView(APIView):
                         kind='order_cancelled',
                         extra_data={'by': 'master', 'status': str(order.status)},
                     )
-                    try:
-                        logger.warning(
-                            'order_status_update_push user_id=%s kind=%s order_id=%s status=%s',
-                            order.user_id,
-                            'order_cancelled',
-                            order.id,
-                            order.status,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                 except Exception:  # noqa: BLE001
                     pass
                 return Response(OrderSerializer(order, context={'request': request}).data)
@@ -2568,17 +2489,6 @@ class UpdateOrderStatusView(APIView):
             return Response({'error': 'Not allowed to cancel'}, status=status.HTTP_403_FORBIDDEN)
 
         if not is_assigned_master:
-            try:
-                logger.warning(
-                    'order_status_update_blocked order_id=%s transition=%s->%s reason=%s req_user_id=%s',
-                    order.id,
-                    order.status,
-                    new_status,
-                    'not_assigned_master',
-                    getattr(request.user, 'id', None),
-                )
-            except Exception:  # noqa: BLE001
-                pass
             return Response(
                 {'error': 'Only the assigned master can change workflow status.'},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -2586,16 +2496,6 @@ class UpdateOrderStatusView(APIView):
 
         if order.status == OrderStatus.ACCEPTED and new_status == OrderStatus.ON_THE_WAY:
             if order.order_type == OrderType.STANDARD and order.preferred_time_end is None:
-                try:
-                    logger.warning(
-                        'order_status_update_blocked order_id=%s transition=%s->%s reason=%s',
-                        order.id,
-                        order.status,
-                        new_status,
-                        'preferred_time_end_required',
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
                 return Response(
                     {
                         'error': 'Set preferred_time_end before marking on the way '
@@ -2677,17 +2577,6 @@ class UpdateOrderStatusView(APIView):
                 from apps.order.services.notifications import notify_order_status_changed_to_user
 
                 sent = notify_order_status_changed_to_user(order, new_status=OrderStatus.ON_THE_WAY)
-                try:
-                    logger.warning(
-                        'order_status_update_push user_id=%s kind=%s order_id=%s status=%s success=%s',
-                        order.user_id,
-                        'order_status_changed',
-                        order.id,
-                        order.status,
-                        sent,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
             except Exception:  # noqa: BLE001
                 pass
             return Response(OrderSerializer(order, context={'request': request}).data)
@@ -2714,33 +2603,12 @@ class UpdateOrderStatusView(APIView):
                 from apps.order.services.notifications import notify_order_status_changed_to_user
 
                 sent = notify_order_status_changed_to_user(order, new_status=OrderStatus.ARRIVED)
-                try:
-                    logger.warning(
-                        'order_status_update_push user_id=%s kind=%s order_id=%s status=%s success=%s',
-                        order.user_id,
-                        'order_status_changed',
-                        order.id,
-                        order.status,
-                        sent,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
             except Exception:  # noqa: BLE001
                 pass
             return Response(OrderSerializer(order, context={'request': request}).data)
 
         if order.status == OrderStatus.ARRIVED and new_status == OrderStatus.IN_PROGRESS:
             if order.latitude is None or order.longitude is None:
-                try:
-                    logger.warning(
-                        'order_status_update_blocked order_id=%s transition=%s->%s reason=%s',
-                        order.id,
-                        order.status,
-                        new_status,
-                        'order_missing_coords',
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
                 return Response(
                     {'error': 'Order has no client coordinates; distance cannot be verified.'},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -2775,18 +2643,6 @@ class UpdateOrderStatusView(APIView):
             )
             max_m = int(getattr(settings, 'ORDER_START_JOB_MAX_DISTANCE_M', 300))
             if dist_m > max_m:
-                try:
-                    logger.warning(
-                        'order_status_update_blocked order_id=%s transition=%s->%s reason=%s dist_m=%s max_m=%s',
-                        order.id,
-                        order.status,
-                        new_status,
-                        'too_far_from_client',
-                        round(dist_m, 1),
-                        max_m,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
                 return Response(
                     {
                         'error': f'Too far from the client ({round(dist_m, 1)} m). '
@@ -2817,32 +2673,10 @@ class UpdateOrderStatusView(APIView):
                 from apps.order.services.notifications import notify_order_status_changed_to_user
 
                 sent = notify_order_status_changed_to_user(order, new_status=OrderStatus.IN_PROGRESS)
-                try:
-                    logger.warning(
-                        'order_status_update_push user_id=%s kind=%s order_id=%s status=%s success=%s',
-                        order.user_id,
-                        'order_status_changed',
-                        order.id,
-                        order.status,
-                        sent,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
             except Exception:  # noqa: BLE001
                 pass
             return Response(OrderSerializer(order, context={'request': request}).data)
 
-        try:
-            logger.warning(
-                'order_status_update_invalid_transition order_id=%s old_status=%s new_status=%s order_type=%s req_user_id=%s',
-                order.id,
-                order.status,
-                new_status,
-                getattr(order, 'order_type', None),
-                getattr(request.user, 'id', None),
-            )
-        except Exception:  # noqa: BLE001
-            pass
         return Response(
             {'error': f'Invalid transition {order.status} → {new_status}.'},
             status=status.HTTP_400_BAD_REQUEST,
@@ -3102,6 +2936,23 @@ class AcceptOrderView(APIView):
                         {'error': 'Order expired and was cancelled'},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+
+                if order.order_type == OrderType.STANDARD and order.preferred_date and order.preferred_time_start:
+                    from apps.order.services.order_scheduled_start import (
+                        order_has_scheduled_start,
+                        scheduled_slot_past_cancel_deadline,
+                    )
+
+                    if order_has_scheduled_start(order) and scheduled_slot_past_cancel_deadline(order=order):
+                        return Response(
+                            {
+                                'error': (
+                                    'The scheduled service window has passed (including the grace period). '
+                                    'This order can no longer be accepted.'
+                                ),
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
 
                 if order.order_type == OrderType.SOS and order.sos_offer_queue:
                     from apps.order.services.sos_rotation import sos_offer_recipient_master_ids
@@ -3449,31 +3300,8 @@ class CompleteOrderView(APIView):
                 order = Order.objects.select_for_update().get(id=oid)
                 master = request.user.master_profiles.first()
 
-                try:
-                    logger.warning(
-                        'order_complete_enter order_id=%s req_user_id=%s req_master_id=%s order_master_id=%s '
-                        'order_status=%s order_type=%s has_work_photos=%s',
-                        order.id,
-                        getattr(request.user, 'id', None),
-                        getattr(master, 'id', None) if master else None,
-                        getattr(order, 'master_id', None),
-                        getattr(order, 'status', None),
-                        getattr(order, 'order_type', None),
-                        bool(order.work_completion_images.exists()),
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
 
                 if order.user_id == request.user.id and not master:
-                    try:
-                        logger.warning(
-                            'order_complete_blocked order_id=%s reason=%s req_user_id=%s',
-                            order.id,
-                            'user_not_master',
-                            getattr(request.user, 'id', None),
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                     return Response(
                         {
                             'error': 'Only the assigned master can complete the order. '
@@ -3483,29 +3311,9 @@ class CompleteOrderView(APIView):
                     )
 
                 if not master or order.master_id != master.id:
-                    try:
-                        logger.warning(
-                            'order_complete_blocked order_id=%s reason=%s req_user_id=%s req_master_id=%s order_master_id=%s',
-                            order.id,
-                            'access_denied',
-                            getattr(request.user, 'id', None),
-                            getattr(master, 'id', None) if master else None,
-                            getattr(order, 'master_id', None),
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                     return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
 
                 if order.status != OrderStatus.IN_PROGRESS:
-                    try:
-                        logger.warning(
-                            'order_complete_blocked order_id=%s reason=%s order_status=%s',
-                            order.id,
-                            'status_not_in_progress',
-                            getattr(order, 'status', None),
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                     return Response(
                         {
                             'error': 'You can complete the order only when status is in_progress. '
@@ -3515,14 +3323,6 @@ class CompleteOrderView(APIView):
                     )
 
                 if not order.work_completion_images.exists():
-                    try:
-                        logger.warning(
-                            'order_complete_blocked order_id=%s reason=%s',
-                            order.id,
-                            'missing_work_completion_photos',
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                     return Response(
                         {
                             'error': 'Upload at least one work completion photo '
@@ -3533,29 +3333,12 @@ class CompleteOrderView(APIView):
 
                 raw_pin = request.data.get('completion_pin')
                 if raw_pin is None:
-                    try:
-                        logger.warning(
-                            'order_complete_blocked order_id=%s reason=%s',
-                            order.id,
-                            'missing_completion_pin',
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                     return Response(
                         {'error': 'completion_pin is required (4-digit code from the client).'},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 pin_s = ''.join(ch for ch in str(raw_pin).strip() if ch.isdigit())
                 if len(pin_s) != 4:
-                    try:
-                        logger.warning(
-                            'order_complete_blocked order_id=%s reason=%s pin_len=%s',
-                            order.id,
-                            'invalid_pin_format',
-                            len(pin_s),
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                     return Response(
                         {'error': 'completion_pin must be exactly 4 digits.'},
                         status=status.HTTP_400_BAD_REQUEST,
@@ -3563,15 +3346,6 @@ class CompleteOrderView(APIView):
 
                 expected = (order.completion_pin or '').strip()
                 if len(expected) != 4:
-                    try:
-                        logger.warning(
-                            'order_complete_blocked order_id=%s reason=%s expected_pin_len=%s',
-                            order.id,
-                            'no_valid_pin_on_order',
-                            len(expected),
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                     return Response(
                         {
                             'error': 'No valid completion PIN on this order. '
@@ -3589,20 +3363,6 @@ class CompleteOrderView(APIView):
                             kind='completion_pin_invalid',
                             extra_data={'status': str(order.status)},
                         )
-                        try:
-                            logger.warning(
-                                'order_complete_push user_id=%s kind=%s order_id=%s status=%s',
-                                order.user_id,
-                                'completion_pin_invalid',
-                                order.id,
-                                order.status,
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
-                    except Exception:  # noqa: BLE001
-                        pass
-                    try:
-                        logger.warning('order_complete_blocked order_id=%s reason=%s', order.id, 'pin_mismatch')
                     except Exception:  # noqa: BLE001
                         pass
                     return Response(
@@ -3624,38 +3384,12 @@ class CompleteOrderView(APIView):
                 except Exception:
                     pre_cents = None
 
-                logger.info(
-                    'order_complete_debug charge_start order_id=%s order_number=%s owner_user_id=%s '
-                    'payment_type=%s saved_card_id=%s master_id=%s connect_account=%s customer_charge_cents=%s',
-                    order.id,
-                    getattr(order, 'order_number', None) or '',
-                    order.user_id,
-                    order.payment_type,
-                    order.saved_card_id,
-                    order.master_id,
-                    connect_acct or '—',
-                    pre_cents,
-                )
 
                 try:
                     charge_order_on_completion(order)
                 except StripeChargeError as e:
-                    logger.info(
-                        'order_complete_debug charge_fail order_id=%s error=%s',
-                        order.id,
-                        e.message,
-                    )
                     return Response({'error': e.message}, status=status.HTTP_400_BAD_REQUEST)
 
-                logger.info(
-                    'order_complete_debug charge_ok order_id=%s pi=%s stripe_payment_status=%s '
-                    'amount_cents=%s currency=%s',
-                    order.id,
-                    order.stripe_payment_intent_id,
-                    order.stripe_payment_status,
-                    order.stripe_payment_amount_cents,
-                    order.stripe_payment_currency,
-                )
 
                 order.status = OrderStatus.COMPLETED
                 clear_completion_pin(order)
@@ -3672,23 +3406,8 @@ class CompleteOrderView(APIView):
                         'stripe_payment_error',
                     ]
                 )
-                logger.info(
-                    'order_complete_debug saved order_id=%s status=%s stripe_payment_status=%s pi=%s',
-                    order.id,
-                    order.status,
-                    order.stripe_payment_status,
-                    order.stripe_payment_intent_id,
-                )
 
         except Order.DoesNotExist:
-            try:
-                logger.warning(
-                    'order_complete_not_found order_id=%s req_user_id=%s',
-                    order_id,
-                    getattr(request.user, 'id', None),
-                )
-            except Exception:  # noqa: BLE001
-                pass
             return Response(
                 {'error': 'Order not found'},
                 status=status.HTTP_404_NOT_FOUND,
@@ -3708,25 +3427,6 @@ class CompleteOrderView(APIView):
                 order,
                 kind='order_completed',
                 extra_data=pay_extra,
-            )
-            try:
-                logger.warning(
-                    'order_complete_push user_id=%s kind=%s order_id=%s status=%s',
-                    order.user_id,
-                    'order_completed',
-                    order.id,
-                    order.status,
-                )
-            except Exception:  # noqa: BLE001
-                pass
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            logger.warning(
-                'order_complete_success order_id=%s master_id=%s user_id=%s',
-                order.id,
-                getattr(master, 'id', None) if master else None,
-                order.user_id,
             )
         except Exception:  # noqa: BLE001
             pass

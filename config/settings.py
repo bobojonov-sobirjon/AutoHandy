@@ -138,7 +138,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'America/Los_Angeles'
 
 USE_I18N = True
 
@@ -362,6 +362,9 @@ SCHEDULED_NO_START_CANCEL_MINUTES = int(os.environ.get('SCHEDULED_NO_START_CANCE
 SOS_OFFER_SECONDS_PER_MASTER = int(os.environ.get('SOS_OFFER_SECONDS_PER_MASTER', '420'))
 SOS_BROADCAST_RESPONSE_SECONDS = int(os.environ.get('SOS_BROADCAST_RESPONSE_SECONDS', '420'))
 EMERGENCY_TIME_ZONE = os.environ.get('EMERGENCY_TIME_ZONE', 'America/Los_Angeles')
+# Local timezone for standard scheduled slots (preferred_date + preferred_time_start from the app).
+SCHEDULED_ORDER_TIMEZONE = os.environ.get('SCHEDULED_ORDER_TIMEZONE', EMERGENCY_TIME_ZONE)
+SCHEDULED_CREATE_PAST_GRACE_MINUTES = int(os.environ.get('SCHEDULED_CREATE_PAST_GRACE_MINUTES', '5'))
 EMERGENCY_DAY_MULTIPLIER = float(os.environ.get('EMERGENCY_DAY_MULTIPLIER', '1.3'))
 EMERGENCY_NIGHT_MULTIPLIER = float(os.environ.get('EMERGENCY_NIGHT_MULTIPLIER', '1.6'))
 

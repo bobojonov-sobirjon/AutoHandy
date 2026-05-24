@@ -12,13 +12,69 @@ from apps.order.services.assignment_failure import (
     record_standard_no_departure_failure,
 )
 from apps.order.services.mvp_timers import no_departure_cutoff_minutes_for_order
-from apps.order.services.order_scheduled_start import order_has_scheduled_start
+from apps.order.services.order_scheduled_start import order_has_scheduled_start, scheduled_slot_past_cancel_deadline
 from apps.order.services.scheduled_mvp import sweep_scheduled_mvp_deadlines
 from apps.order.services.standard_accept_mvp import sweep_standard_accept_no_on_the_way
 from apps.order.services.sos_rotation import (
     advance_sos_ring_after_decline_or_timeout,
     filter_master_ids_meeting_emergency_thresholds,
 )
+
+
+def _expire_pending_scheduled_past_deadline(
+    *,
+    now=None,
+    skip_order_ids: Container[int] | None = None,
+) -> int:
+    """Cancel pending scheduled standard orders whose service window + grace has passed."""
+    now = now or timezone.now()
+    skip = set(skip_order_ids or ())
+    qs = Order.objects.filter(
+        status=OrderStatus.PENDING,
+        order_type=OrderType.STANDARD,
+        preferred_date__isnull=False,
+        preferred_time_start__isnull=False,
+    ).only('id', 'preferred_date', 'preferred_time_start', 'status', 'master_id', 'user_id')
+    n = 0
+    for order in qs.iterator(chunk_size=100):
+        if order.pk in skip:
+            continue
+        if not order_has_scheduled_start(order):
+            continue
+        if not scheduled_slot_past_cancel_deadline(order=order, now=now):
+            continue
+        old_master_id = order.master_id
+        order.status = OrderStatus.CANCELLED
+        order.auto_cancel_reason = 'scheduled_slot_expired_unaccepted'
+        order.master = None
+        order.master_response_deadline = None
+        order.save(
+            update_fields=[
+                'status',
+                'auto_cancel_reason',
+                'master',
+                'master_response_deadline',
+                'updated_at',
+            ]
+        )
+        try:
+            from apps.master.models import Master
+            from apps.order.services.notifications import notify_master_order_kind, notify_user_order_kind
+
+            extra = {'by': 'system'}
+            notify_user_order_kind(order, kind='offer_expired', extra_data=extra)
+            if old_master_id:
+                mu = Master.objects.select_related('user').only('id', 'user_id').get(pk=old_master_id)
+                notify_master_order_kind(
+                    master_user_id=mu.user_id,
+                    order_id=order.id,
+                    kind='offer_expired',
+                    extra_data=extra,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        n += 1
+    return n
 
 
 def expire_stale_master_offers(now=None, *, skip_order_ids: Container[int] | None = None) -> int:
@@ -87,6 +143,8 @@ def expire_stale_master_offers(now=None, *, skip_order_ids: Container[int] | Non
         except Exception:  # noqa: BLE001
             pass
         n += 1
+
+    n += _expire_pending_scheduled_past_deadline(now=now, skip_order_ids=skip_order_ids)
 
     # Also handle SOS orders that were accepted but the master never departed.
     # This is a fallback path for environments where Celery ETA tasks are unreliable.

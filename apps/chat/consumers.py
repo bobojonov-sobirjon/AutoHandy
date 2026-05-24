@@ -22,20 +22,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.room_group_name = f'chat_{self.room_id}'
         self.user = self.scope['user']
 
-        print(f"[DEBUG] WebSocket connect attempt: room_id={self.room_id}, user={self.user}")
-
-        # Check authentication
         if not self.user or not self.user.is_authenticated:
-            print(f"[DEBUG] Authentication failed: user={self.user}")
             await self.close(code=4001)
             return
 
-        # Check room access
         has_access = await self.check_room_access()
-        print(f"[DEBUG] Room access check: has_access={has_access}")
 
         if not has_access:
-            print(f"[DEBUG] Access denied to room {self.room_id} for user {self.user.id}")
             await self.close(code=4003)
             return
 
@@ -47,9 +40,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         await self.accept()
 
-        print(f"[DEBUG] User {self.user.id} successfully connected to room {self.room_id}")
-
-        # Send connection confirmation
         await self.send(text_data=json.dumps({
             'type': 'connection_established',
             'message': 'Successfully connected to chat'
@@ -74,16 +64,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
             if text_data is None:
                 return
 
-            print(f"[DEBUG] Received data: {text_data[:100]}")  # First 100 chars
-
             if not text_data or not text_data.strip():
-                print("[DEBUG] Empty message received, ignoring")
                 return
 
             data = json.loads(text_data)
             message_type = data.get('type')
-
-            print(f"[DEBUG] Message type: {message_type}")
 
             if message_type == 'chat_message':
                 # Save message to DB (text) OR broadcast existing message (attachments uploaded via REST)
@@ -207,8 +192,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         except json.JSONDecodeError as e:
             error_msg = f"Invalid JSON format: {str(e)}"
-            print(f"[DEBUG] JSON decode error: {error_msg}")
-            print(f"[DEBUG] Received text: {text_data}")
             await self.send(text_data=json.dumps({
                 'type': 'error',
                 'message': error_msg
@@ -216,7 +199,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         except Exception as e:
             error_msg = f"Error processing message: {str(e)}"
-            print(f"[DEBUG] General error: {error_msg}")
             await self.send(text_data=json.dumps({
                 'type': 'error',
                 'message': error_msg
@@ -262,18 +244,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         """Check room access"""
         try:
             room = ChatRoom.objects.get(id=self.room_id)
-            participants = room.participants.all()
-            participant_ids = [p.id for p in participants]
-
-            print(f"[DEBUG] Room {self.room_id} participants: {participant_ids}")
-            print(f"[DEBUG] Current user ID: {self.user.id}")
-
-            has_access = room.participants.filter(id=self.user.id).exists()
-            print(f"[DEBUG] Access result: {has_access}")
-
-            return has_access
+            return room.participants.filter(id=self.user.id).exists()
         except ChatRoom.DoesNotExist:
-            print(f"[DEBUG] Room {self.room_id} does not exist")
             return False
 
     @database_sync_to_async
@@ -411,39 +383,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
         return other.id, ('master' if is_master else 'user')
 
     async def push_other_participant(self, message):
-        logger = logging.getLogger(__name__)
         try:
             other_user_id, other_kind = await self._other_participant_id_and_kind()
             if not other_user_id or not other_kind:
-                logger.warning(
-                    'chat_push_skip room_id=%s message_id=%s reason=no_other_participant',
-                    getattr(message, 'room_id', None),
-                    getattr(message, 'id', None),
-                )
                 return
-
-            logger.warning(
-                'chat_push_attempt room_id=%s message_id=%s to_user_id=%s kind=%s',
-                getattr(message, 'room_id', None),
-                getattr(message, 'id', None),
-                other_user_id,
-                other_kind,
-            )
-            sent = await self._send_chat_push_sync(message)
-            logger.warning(
-                'chat_push_done room_id=%s message_id=%s to_user_id=%s success=%s',
-                getattr(message, 'room_id', None),
-                getattr(message, 'id', None),
-                other_user_id,
-                sent,
-            )
+            await self._send_chat_push_sync(message)
         except Exception:  # noqa: BLE001
-            logger.exception(
+            logging.getLogger(__name__).exception(
                 'chat_push_failed room_id=%s message_id=%s',
                 getattr(message, 'room_id', None),
                 getattr(message, 'id', None),
             )
-            return
 
     @database_sync_to_async
     def message_to_dict(self, message):
