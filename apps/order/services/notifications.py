@@ -804,6 +804,7 @@ def build_sos_order_websocket_payload(
     from apps.order.models import Order as OrderModel
     from decimal import Decimal
     from apps.order.services.order_pricing import compute_order_price_breakdown
+    from apps.payment.services.checkout_fees import order_pricing_platform_fee
 
     oid = order.pk
     order = (
@@ -1005,6 +1006,7 @@ def build_sos_order_websocket_payload(
             'work_total': format(Decimal(str(bd.get('work_total', bd.get('total', 0)))), 'f'),
             'penalty_total': format(Decimal(str(bd.get('penalty_total', 0))), 'f'),
             'total': format(Decimal(str(bd.get('total', 0))), 'f'),
+            'platform_fee': order_pricing_platform_fee(order),
             'emergency_pricing': {
                 **em,
                 'coefficient': coef_s,

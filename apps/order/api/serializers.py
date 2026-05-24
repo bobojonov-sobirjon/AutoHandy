@@ -39,7 +39,10 @@ from apps.order.services.status_workflow import (
 )
 from apps.order.services.completion_pin import clear_completion_pin, issue_completion_pin
 from apps.order.services.order_pricing import get_cached_order_pricing
-from apps.payment.services.checkout_fees import build_order_marketplace_fee_display
+from apps.payment.services.checkout_fees import (
+    build_order_marketplace_fee_display,
+    order_pricing_platform_fee,
+)
 from apps.order.services.standard_booking_availability import preferred_slot_blocked_message
 from apps.order.services.notifications import _media_url
 from config.wgs84 import WGS84_COORD_DECIMAL_KWARGS
@@ -160,6 +163,7 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
     car_count = serializers.SerializerMethodField()
     emergency_pricing = serializers.SerializerMethodField()
     offer_price = serializers.SerializerMethodField()
+    platform_fee = serializers.SerializerMethodField()
     marketplace_fees = serializers.SerializerMethodField()
 
     class Meta:
@@ -176,6 +180,7 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
             'total',
             'car_count',
             'emergency_pricing',
+            'platform_fee',
             'marketplace_fees',
         )
 
@@ -224,6 +229,10 @@ class OrderPricingNestedSerializer(serializers.ModelSerializer):
         br = get_cached_order_pricing(obj, self.context)
         v = br.get('offer_price')
         return format(Decimal(str(v)), 'f') if v is not None else None
+
+    def get_platform_fee(self, obj):
+        """Client platform fee ($); same field name for standard, custom_request, and SOS."""
+        return order_pricing_platform_fee(obj)
 
     def get_marketplace_fees(self, obj):
         """TZ-aligned fee lines: scheduled vs emergency; client vs master (see checkout_fees)."""

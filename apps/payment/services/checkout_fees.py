@@ -40,30 +40,35 @@ def compute_marketplace_checkout(order) -> dict[str, Any]:
     if is_emergency:
         d_pct = _dec_setting('EMERGENCY_DISPATCH_FEE_PERCENT', '6')
         s_pct = _dec_setting('CUSTOMER_SERVICE_FEE_PERCENT_EMERGENCY', '5')
+        client_platform_pct = Decimal('0')
         dispatch_fee = _q(tech * d_pct / Decimal('100'))
         service_fee = _q(tech * s_pct / Decimal('100'))
-        platform_fee_line = Decimal('0')
+        platform_fee = Decimal('0')
     else:
         dispatch_fee = Decimal('0')
         s_pct = _dec_setting('CUSTOMER_SERVICE_FEE_PERCENT_SCHEDULED', '4')
-        p_pct = _dec_setting('CUSTOMER_PLATFORM_FEE_PERCENT_SCHEDULED', '4')
+        client_platform_pct = _dec_setting('CUSTOMER_PLATFORM_FEE_PERCENT_SCHEDULED', '4')
         service_fee = _q(tech * s_pct / Decimal('100'))
-        platform_fee_line = _q(tech * p_pct / Decimal('100'))
+        platform_fee = _q(tech * client_platform_pct / Decimal('100'))
 
-    customer_total = _q(tech + dispatch_fee + service_fee + platform_fee_line + penalty)
+    master_platform_fee = _q(tech - master_payout)
+    customer_total = _q(tech + dispatch_fee + service_fee + platform_fee + penalty)
     platform_gross = _q(customer_total - master_payout)
 
+    platform_fee_s = format(platform_fee, 'f')
     return {
         'technician_total': format(tech, 'f'),
         'penalty_total': format(penalty, 'f'),
         'is_emergency': is_emergency,
         'dispatch_fee': format(dispatch_fee, 'f'),
         'service_fee': format(service_fee, 'f'),
-        'platform_fee_line': format(platform_fee_line, 'f'),
+        'platform_fee': platform_fee_s,
+        'master_platform_fee': format(master_platform_fee, 'f'),
+        # Backward-compatible alias (same value as platform_fee).
+        'platform_fee_line': platform_fee_s,
         'customer_total': format(customer_total, 'f'),
         'master_estimated_payout': format(master_payout, 'f'),
         'platform_estimated_gross': format(platform_gross, 'f'),
-        'provider_platform_fee_percent': str(prov_pct),
         '_customer_total_decimal': customer_total,
         '_master_payout_decimal': master_payout,
         '_technician_total_decimal': tech,
@@ -79,6 +84,11 @@ def customer_charge_cents(order) -> int:
 def master_payout_cents(order) -> int:
     d = compute_marketplace_checkout(order)['_master_payout_decimal']
     return money_to_cents(d)
+
+
+def order_pricing_platform_fee(order) -> str:
+    """Unified client platform fee amount (standard / custom_request / SOS)."""
+    return compute_marketplace_checkout(order)['platform_fee']
 
 
 def build_order_marketplace_fee_display(order) -> dict[str, Any]:
@@ -134,22 +144,11 @@ def build_order_marketplace_fee_display(order) -> dict[str, Any]:
     time_bucket = em.get('time_bucket')
     tz_name = em.get('time_zone')
 
-    prov_pct = ck['provider_platform_fee_percent']
-    master_payout_dec = Decimal(str(ck['_master_payout_decimal']))
-
-    pct = {
-        'provider_platform_fee': format(_dec_setting('PROVIDER_PLATFORM_FEE_PERCENT', '10'), 'f'),
-        'customer_service_fee_scheduled': format(
-            _dec_setting('CUSTOMER_SERVICE_FEE_PERCENT_SCHEDULED', '4'), 'f'
-        ),
-        'customer_platform_fee_scheduled': format(
-            _dec_setting('CUSTOMER_PLATFORM_FEE_PERCENT_SCHEDULED', '4'), 'f'
-        ),
-        'emergency_dispatch_fee': format(_dec_setting('EMERGENCY_DISPATCH_FEE_PERCENT', '6'), 'f'),
-        'emergency_service_fee': format(_dec_setting('CUSTOMER_SERVICE_FEE_PERCENT_EMERGENCY', '5'), 'f'),
-    }
+    platform_fee = ck['platform_fee']
+    master_platform_fee = ck['master_platform_fee']
 
     return {
+        'platform_fee': platform_fee,
         'pricing_mode': pricing_mode,
         'uses_emergency_multiplier': bool(em.get('is_emergency')),
         'emergency': {
@@ -158,7 +157,6 @@ def build_order_marketplace_fee_display(order) -> dict[str, Any]:
             'coefficient': format(coef, 'f'),
             'note': em.get('note'),
         },
-        'percentages': pct,
         'master': {
             'base_catalog_subtotal': base_price_display,
             'custom_request_offer_price': custom_offer_only,
@@ -168,21 +166,19 @@ def build_order_marketplace_fee_display(order) -> dict[str, Any]:
             'extra_money': format(extra_money, 'f'),
             'technician_work_total': format(work_total, 'f'),
             'estimated_payout': ck['master_estimated_payout'],
-            'platform_fee_percent': prov_pct,
-            'platform_fee_description': f'{prov_pct}% platform fee applied',
+            'platform_fee': master_platform_fee,
             'car_count': car_count,
         },
         'client': {
             'technician_price': ck['technician_total'],
             'emergency_dispatch_fee': ck['dispatch_fee'],
             'service_fee': ck['service_fee'],
-            'platform_fee': ck['platform_fee_line'],
+            'platform_fee': platform_fee,
             'penalty_total': ck['penalty_total'],
             'total': ck['customer_total'],
         },
         'stripe_charge_alignment': {
             'customer_charge_matches': 'client.total (when paid by card on complete)',
-            'master_payout_percent_of_technician': f'{Decimal("100") - _q(Decimal(str(prov_pct)))}% of technician_work_total',
         },
         'notes': {
             'scheduled_fees': 'Service fee + platform fee (% of technician price); no emergency coefficient.',
