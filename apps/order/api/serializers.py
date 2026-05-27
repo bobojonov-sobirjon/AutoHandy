@@ -473,15 +473,20 @@ class OrderSerializer(serializers.ModelSerializer):
         from apps.master.api.serializers import _absolute_media_url
 
         request = self.context.get('request')
-        categories = (
-            obj.category.all()
-            .select_related('parent')
-            .order_by('parent_id', 'name')
-        )
+        cache = getattr(obj, '_prefetched_objects_cache', None) or {}
+        if 'category' in cache:
+            categories = sorted(
+                cache['category'],
+                key=lambda c: ((c.parent_id or 0), (c.name or '')),
+            )
+        else:
+            categories = list(
+                obj.category.all().select_related('parent').order_by('parent_id', 'name')
+            )
         groups = {}
         mask_for_master = _request_user_is_master(request) and (
             obj.order_type == OrderType.CUSTOM_REQUEST
-            or obj.category.filter(is_custom_request_entry=True).exists()
+            or any(getattr(c, 'is_custom_request_entry', False) for c in categories)
         )
         for cat in categories:
             parent = cat.parent
@@ -590,11 +595,9 @@ class OrderSerializer(serializers.ModelSerializer):
     
     def get_reviews(self, obj):
         """Get order reviews"""
-        from apps.order.models import Review
-
         request = self.context.get('request')
-        reviews = Review.objects.filter(order=obj).select_related('reviewer')
-        if not reviews.exists():
+        review = self._get_order_review(obj)
+        if review is None:
             return []
 
         return [
@@ -613,16 +616,22 @@ class OrderSerializer(serializers.ModelSerializer):
                 else None,
                 'created_at': review.created_at,
             }
-            for review in reviews
         ]
-    
+
+    def _get_order_review(self, obj):
+        try:
+            return obj.review
+        except Exception:
+            from apps.order.models import Review
+
+            return Review.objects.filter(order_id=obj.pk).select_related('reviewer').first()
+
     def get_average_rating(self, obj):
         """Get order average rating"""
-        from django.db.models import Avg
-        from apps.order.models import Review
-        
-        avg = Review.objects.filter(order=obj).aggregate(avg_rating=Avg('rating'))
-        return round(avg['avg_rating'], 2) if avg['avg_rating'] else None
+        review = self._get_order_review(obj)
+        if review is None:
+            return None
+        return round(float(review.rating), 2)
 
     def get_location_precision(self, obj):
         return 'exact'

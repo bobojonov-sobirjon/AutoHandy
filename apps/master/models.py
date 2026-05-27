@@ -14,6 +14,15 @@ class MasterServiceAreaRadiusMiles(models.IntegerChoices):
     MILES_100 = 100, '100 miles (extended)'
 
 
+class MasterIdentityVerificationStatus(models.TextChoices):
+    NOT_STARTED = 'not_started', 'Not started'
+    PENDING = 'pending', 'Pending'
+    VERIFIED = 'verified', 'Verified'
+    REQUIRES_INPUT = 'requires_input', 'Requires input'
+    CANCELED = 'canceled', 'Canceled'
+    FAILED = 'failed', 'Failed'
+
+
 class Master(models.Model):
     """Master (workshop) model"""
     user = models.ForeignKey(
@@ -66,6 +75,31 @@ class Master(models.Model):
         default='',
         verbose_name='Stripe Connect account id',
         help_text='acct_… — destination for marketplace payouts.',
+    )
+    stripe_identity_verification_session_id = models.CharField(
+        max_length=128,
+        blank=True,
+        default='',
+        verbose_name='Stripe Identity verification session id',
+        help_text='vs_… — document/selfie verification session (no PII stored locally).',
+    )
+    identity_verification_status = models.CharField(
+        max_length=32,
+        choices=MasterIdentityVerificationStatus.choices,
+        default=MasterIdentityVerificationStatus.NOT_STARTED,
+        verbose_name='Identity verification status',
+    )
+    identity_verified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Identity verified at',
+    )
+    identity_last_error_code = models.CharField(
+        max_length=64,
+        blank=True,
+        default='',
+        verbose_name='Identity last error code',
+        help_text='Stripe error code only — no document or SSN data.',
     )
 
     class Meta:

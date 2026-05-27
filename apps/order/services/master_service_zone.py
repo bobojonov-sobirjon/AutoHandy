@@ -10,16 +10,9 @@ if TYPE_CHECKING:
     from apps.order.models import Order
 
 
-def order_within_master_acceptance_zone(order: 'Order', master_pk: int) -> bool:
-    """
-    True if order coordinates lie inside the master's work zone
-    (distance from order to master's pin <= max_order_distance_km).
-    """
+def order_within_master_acceptance_zone_for_master(order: 'Order', master: Master) -> bool:
+    """Same as ``order_within_master_acceptance_zone`` but reuses a loaded ``Master`` row."""
     if order.latitude is None or order.longitude is None:
-        return False
-    try:
-        master = Master.objects.get(pk=master_pk)
-    except Master.DoesNotExist:
         return False
     wlat, wlon = master.get_work_location_for_distance()
     if wlat is None:
@@ -31,3 +24,17 @@ def order_within_master_acceptance_zone(order: 'Order', master_pk: int) -> bool:
         wlon,
     )
     return dist_km <= float(master.max_order_distance_km())
+
+
+def order_within_master_acceptance_zone(order: 'Order', master_pk: int) -> bool:
+    """
+    True if order coordinates lie inside the master's work zone
+    (distance from order to master's pin <= max_order_distance_km).
+    """
+    if order.latitude is None or order.longitude is None:
+        return False
+    try:
+        master = Master.objects.get(pk=master_pk)
+    except Master.DoesNotExist:
+        return False
+    return order_within_master_acceptance_zone_for_master(order, master)

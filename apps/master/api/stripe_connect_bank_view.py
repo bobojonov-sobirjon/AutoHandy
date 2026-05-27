@@ -17,6 +17,7 @@ from apps.payment.services.stripe_connect_bank import (
     ensure_master_connect_and_add_bank,
 )
 from apps.payment.services.stripe_connect_setup import StripeConnectSetupError, complete_connect_account_setup
+from apps.payment.services.stripe_identity import StripeIdentityError
 
 _CONNECT_SETUP_FIELDS_DESCRIPTION = """
 ### Bank (direct deposit)
@@ -182,9 +183,8 @@ class MasterStripeConnectBankAccountView(APIView):
     @extend_schema(
         summary='Direct deposit — save bank account (routing + account)',
         description=(
-            'Instacart-style: master enters routing and account number in the app; '
-            'backend attaches the bank account to their Stripe Connect account and submits '
-            'identity/agreement data to Stripe so the account can become **Enabled**.\n'
+            'Requires **Stripe Identity verified** first (POST/GET `stripe-identity/`). '
+            'Then master enters routing and account number; backend attaches bank to Connect.\n'
             f'{_CONNECT_SETUP_FIELDS_DESCRIPTION}'
         ),
         tags=['Stripe — Master'],
@@ -241,6 +241,8 @@ class MasterStripeConnectBankAccountView(APIView):
                 dob_day=ser.validated_data.get('dob_day'),
                 ssn_last4=(ser.validated_data.get('ssn_last4') or '').strip() or None,
             )
+        except StripeIdentityError as e:
+            return Response({'error': e.message, 'code': 'identity_verification_required'}, status=status.HTTP_403_FORBIDDEN)
         except StripeConnectBankError as e:
             return Response({'error': e.message}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -352,6 +354,13 @@ class MasterStripeConnectCompleteSetupView(APIView):
         ser.is_valid(raise_exception=True)
         if not ser.validated_data.get('accept_agreement', True):
             return Response({'error': 'accept_agreement must be true.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.payment.services.stripe_identity import assert_identity_verified_for_payout
+
+        try:
+            assert_identity_verified_for_payout(master=master)
+        except StripeIdentityError as e:
+            return Response({'error': e.message, 'code': 'identity_verification_required'}, status=status.HTTP_403_FORBIDDEN)
 
         try:
             setup = complete_connect_account_setup(

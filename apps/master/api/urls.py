@@ -8,6 +8,10 @@ from apps.master.api.stripe_connect_bank_view import (
     MasterStripeConnectBankAccountView,
     MasterStripeConnectCompleteSetupView,
 )
+from apps.master.api.stripe_identity_view import (
+    MasterStripeIdentityStartView,
+    MasterStripeIdentityStatusView,
+)
 from apps.master.api.views import (
     MasterProfileView, MasterDetailsView, MasterListView,
     MasterFilterChoicesView, MastersByUserView,
@@ -20,6 +24,17 @@ from apps.master.api.views import (
 )
 
 urlpatterns = [
+    # --- Stripe Master: Identity verification ---
+    path(
+        'stripe-identity/status/',
+        MasterStripeIdentityStatusView.as_view(),
+        name='master-stripe-identity-status',
+    ),
+    path(
+        'stripe-identity/start/',
+        MasterStripeIdentityStartView.as_view(),
+        name='master-stripe-identity-start',
+    ),
     # --- Stripe Master: primary (Instacart-style direct deposit) ---
     path(
         'stripe-connect/bank-account/',

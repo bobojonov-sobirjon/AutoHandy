@@ -20,6 +20,7 @@ import secrets
 
 from apps.categories.query import order_by_order_category_smart_q
 from apps.order.services.completion_pin import clear_completion_pin, issue_completion_pin
+from apps.order.api.order_list_query import optimize_orders_list_queryset, prepare_orders_page_for_serialization
 from apps.order.services.offer_expiry import expire_stale_master_offers
 from apps.order.services.master_offer import activate_pending_master_offer
 from apps.order.services.status_workflow import (
@@ -1768,18 +1769,7 @@ GET /api/order/by-user/?order_type=standard&status=pending
     )
     def get(self, request):
         """Получить заказы текущего пользователя"""
-        expire_stale_master_offers()
-        orders = Order.objects.filter(user=request.user).prefetch_related(
-            'images',
-            'category',
-            'car',
-            Prefetch(
-                'custom_request_offers',
-                queryset=CustomRequestOffer.objects.only(
-                    'id', 'order_id', 'master_id', 'price', 'created_at', 'updated_at'
-                ),
-            ),
-        )
+        orders = Order.objects.filter(user=request.user)
         
         # Фильтр по статусу
         status_filter = request.query_params.get('status')
@@ -1840,16 +1830,18 @@ GET /api/order/by-user/?order_type=standard&status=pending
             )
         
         # Убираем дубликаты и сортируем
-        orders = orders.distinct().order_by('-created_at')
-        
-        # Применяем пагинацию
+        orders = optimize_orders_list_queryset(orders.distinct().order_by('-created_at'))
+
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(orders, request)
         if page is not None:
+            prepare_orders_page_for_serialization(list(page))
             serializer = OrderSerializer(page, many=True, context={'request': request})
             return paginator.get_paginated_response(serializer.data)
-        
-        serializer = OrderSerializer(orders, many=True, context={'request': request})
+
+        order_list = list(orders)
+        prepare_orders_page_for_serialization(order_list)
+        serializer = OrderSerializer(order_list, many=True, context={'request': request})
         return Response(serializer.data)
 
 
@@ -2008,7 +2000,6 @@ GET /api/order/by-master/?order_type=standard&status=pending
     )
     def get(self, request):
         """Получить заказы текущего мастера (custom request без назначенного master FK не включаются)."""
-        expire_stale_master_offers()
         # Проверяем, что пользователь является мастером
         try:
             master = request.user.master_profiles.first()
@@ -2105,28 +2096,18 @@ GET /api/order/by-master/?order_type=standard&status=pending
                 **area_filter
             )
         
-        # Убираем дубликаты и сортируем
-        orders = orders.distinct().order_by('-created_at')
-        orders = orders.prefetch_related(
-            'images',
-            'category',
-            'car',
-            Prefetch(
-                'custom_request_offers',
-                queryset=CustomRequestOffer.objects.only(
-                    'id', 'order_id', 'master_id', 'price', 'created_at', 'updated_at'
-                ),
-            ),
-        )
-        
-        # Применяем пагинацию
+        orders = optimize_orders_list_queryset(orders.distinct().order_by('-created_at'))
+
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(orders, request)
         if page is not None:
+            prepare_orders_page_for_serialization(list(page))
             serializer = OrderSerializer(page, many=True, context={'request': request})
             return paginator.get_paginated_response(serializer.data)
-        
-        serializer = OrderSerializer(orders, many=True, context={'request': request})
+
+        order_list = list(orders)
+        prepare_orders_page_for_serialization(order_list)
+        serializer = OrderSerializer(order_list, many=True, context={'request': request})
         return Response(serializer.data)
 
 

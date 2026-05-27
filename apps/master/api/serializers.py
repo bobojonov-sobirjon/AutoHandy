@@ -125,32 +125,51 @@ class MasterSerializer(serializers.ModelSerializer):
     
     def get_services(self, obj):
         """Get master services"""
+        cache = getattr(obj, '_prefetched_objects_cache', None) or {}
+        if 'master_services' in cache:
+            services = list(cache['master_services'])
+            fid = self.context.get('filter_service_category_id')
+            if fid is not None:
+                services = [
+                    s
+                    for s in services
+                    if any(getattr(it, 'category_id', None) == fid for it in s.master_service_items.all())
+                ]
+            return MasterServiceSerializer(services, many=True, context=self.context).data
         qs = MasterService.objects.filter(master=obj)
         fid = self.context.get('filter_service_category_id')
         if fid is not None:
             qs = qs.filter(master_service_items__category_id=fid).distinct()
         return MasterServiceSerializer(qs, many=True, context=self.context).data
-    
+
     def get_images(self, obj):
         """Get master images"""
-        master_images = MasterImage.objects.filter(master=obj)
+        cache = getattr(obj, '_prefetched_objects_cache', None) or {}
+        if 'master_images' in cache:
+            master_images = cache['master_images']
+        else:
+            master_images = MasterImage.objects.filter(master=obj)
         return MasterImageSerializer(master_images, many=True, context=self.context).data
-    
+
     def get_rating_data(self, obj):
         """Get rating data for master"""
         return self._get_rating_data_for_master(obj)
-    
+
     def _get_rating_data_for_master(self, master):
         """Get rating data for master"""
-        ratings = Rating.objects.filter(master=master)
-        if not ratings.exists():
+        cache = getattr(master, '_prefetched_objects_cache', None) or {}
+        if 'ratings' in cache:
+            ratings = list(cache['ratings'])
+        else:
+            ratings = list(Rating.objects.filter(master=master).select_related('user'))
+        if not ratings:
             return {
                 'average_rating': 0,
                 'total_ratings': 0,
                 'ratings': []
             }
         
-        total_ratings = ratings.count()
+        total_ratings = len(ratings)
         average_rating = sum(r.rating for r in ratings) / total_ratings
         
         return {
@@ -187,29 +206,42 @@ class MasterSerializer(serializers.ModelSerializer):
         hours = float(d_mi) / 30.0
         return max(1, int(round(hours * 60)))
 
+    def _master_service_items_cached(self, obj) -> list:
+        cache = getattr(obj, '_prefetched_objects_cache', None) or {}
+        if 'master_services' in cache:
+            items: list = []
+            for svc in cache['master_services']:
+                items.extend(list(svc.master_service_items.all()))
+            return items
+        return list(MasterServiceItems.objects.filter(master_service__master=obj).select_related('category'))
+
     def get_min_service_price_for_category(self, obj):
         fid = self.context.get('filter_service_category_id')
         embed = self.context.get('embed_order_min_price')
-        from django.db.models import Min
+        from apps.order.api.request_cache import request_serializer_cache
 
-        def _min_price(qs):
-            m = qs.aggregate(m=Min('price')).get('m')
-            return float(m) if m is not None else None
+        price_cache = request_serializer_cache(self.context, 'master_min_price')
+        cache_key = (obj.pk, fid, bool(embed))
+        if cache_key in price_cache:
+            return price_cache[cache_key]
 
+        items = self._master_service_items_cached(obj)
+        prices = [float(it.price) for it in items if it.price is not None]
         if fid is not None:
-            v = _min_price(
-                MasterServiceItems.objects.filter(master_service__master=obj, category_id=fid)
-            )
-            if v is not None:
-                return v
-        if embed:
-            return _min_price(MasterServiceItems.objects.filter(master_service__master=obj))
+            cat_prices = [float(it.price) for it in items if it.category_id == fid and it.price is not None]
+            if cat_prices:
+                price_cache[cache_key] = min(cat_prices)
+                return price_cache[cache_key]
+        if embed and prices:
+            price_cache[cache_key] = min(prices)
+            return price_cache[cache_key]
+        price_cache[cache_key] = None
         return None
 
     def get_skills_profile(self, obj):
-        items = MasterServiceItems.objects.filter(master_service__master=obj)
-        count = items.count()
-        parent_ids = set(items.values_list('category__parent_id', flat=True))
+        items = self._master_service_items_cached(obj)
+        count = len(items)
+        parent_ids = {it.category.parent_id for it in items if getattr(it, 'category_id', None)}
         parent_groups = len([p for p in parent_ids if p is not None])
         recommendation = None
         if count < 3:
@@ -267,10 +299,18 @@ class MasterSerializer(serializers.ModelSerializer):
             return {'linked': False, 'message': 'Stripe Connect account not linked.'}
         from apps.payment.services.connect_balance import try_fetch_connect_balance
 
+        from apps.order.api.request_cache import request_serializer_cache
+
+        balance_cache = request_serializer_cache(self.context, 'stripe_balance_by_acct')
+        if acct in balance_cache:
+            return balance_cache[acct]
         data = try_fetch_connect_balance(acct)
         if data is None:
-            return {'linked': True, 'stripe_connect_account_id': acct, 'load_error': True}
-        return {'linked': True, **data}
+            payload = {'linked': True, 'stripe_connect_account_id': acct, 'load_error': True}
+        else:
+            payload = {'linked': True, **data}
+        balance_cache[acct] = payload
+        return payload
 
 
 @extend_schema_serializer(

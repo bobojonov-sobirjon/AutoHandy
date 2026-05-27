@@ -199,6 +199,7 @@ def build_master_payout_profile(*, master: Master) -> dict[str, Any]:
     Payout screen payload: Connect status + default bank mask (Instacart-style).
     """
     from django.conf import settings
+    from apps.payment.services.stripe_identity import build_identity_verification_block
 
     acct = (getattr(master, 'stripe_connect_account_id', None) or '').strip()
     pk = (getattr(settings, 'STRIPE_PUBLISHABLE_KEY', '') or '').strip()
@@ -207,6 +208,7 @@ def build_master_payout_profile(*, master: Master) -> dict[str, Any]:
         'stripe_connect_account_id': acct or None,
         'stripe_publishable_key': pk,
         'connected_account_agreement_url': STRIPE_CONNECTED_ACCOUNT_AGREEMENT_URL,
+        'identity_verification': build_identity_verification_block(master=master),
         'account': None,
         'onboarding_complete': False,
         'bank_account': None,
@@ -304,6 +306,9 @@ def ensure_master_connect_and_add_bank(
     from django.db import transaction
 
     from apps.payment.services.stripe_connect_onboarding import ensure_express_connect_account_for_master
+    from apps.payment.services.stripe_identity import assert_identity_verified_for_payout
+
+    assert_identity_verified_for_payout(master=master)
 
     ext = build_external_account_payload(
         routing_number=routing_number,

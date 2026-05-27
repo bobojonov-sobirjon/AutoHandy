@@ -10,7 +10,10 @@ from django.utils import timezone
 
 from apps.order.models import Order, OrderStatus, OrderType
 from apps.master.models import Master
-from apps.order.services.master_service_zone import order_within_master_acceptance_zone
+from apps.order.services.master_service_zone import (
+    order_within_master_acceptance_zone,
+    order_within_master_acceptance_zone_for_master,
+)
 
 if TYPE_CHECKING:
     from django.http import HttpRequest
@@ -154,6 +157,11 @@ def current_sos_offered_master_id(order: Order) -> int | None:
 def order_ids_sos_currently_offered_to_master(master_pk: int, *, now=None) -> list[int]:
     """Order PKs for pending SOS broadcast where this master may still accept (active deadline only)."""
     now = now or timezone.now()
+    if not master_meets_emergency_offer_thresholds(master_pk):
+        return []
+    master = Master.objects.filter(pk=master_pk).first()
+    if not master:
+        return []
     ids: list[int] = []
     qs = (
         Order.objects.filter(
@@ -167,8 +175,13 @@ def order_ids_sos_currently_offered_to_master(master_pk: int, *, now=None) -> li
         .only('id', 'sos_offer_queue', 'sos_declined_master_ids', 'latitude', 'longitude')
     )
     for o in qs.iterator(chunk_size=200):
-        if master_eligible_for_pending_sos_offer(o, master_pk):
-            ids.append(o.pk)
+        if master_pk not in _queue_master_ids(o):
+            continue
+        if master_pk in sos_declined_master_ids_list(o):
+            continue
+        if not order_within_master_acceptance_zone_for_master(o, master):
+            continue
+        ids.append(o.pk)
     return ids
 
 

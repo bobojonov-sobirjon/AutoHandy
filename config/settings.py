@@ -388,6 +388,26 @@ WORK_COMPLETION_MAX_IMAGES_PER_REQUEST = int(
 
 STRIPE_SECRET_KEY = (os.environ.get('STRIPE_SECRET_KEY') or '').strip()
 STRIPE_PUBLISHABLE_KEY = (os.environ.get('STRIPE_PUBLISHABLE_KEY') or '').strip()
+STRIPE_WEBHOOK_SECRET = (os.environ.get('STRIPE_WEBHOOK_SECRET') or '').strip()
+# Stripe Identity (document + ID number + selfie). Webhook optional — mobile polls GET stripe-identity/status/.
+STRIPE_IDENTITY_REQUIRE_ID_NUMBER = os.environ.get('STRIPE_IDENTITY_REQUIRE_ID_NUMBER', 'true').lower() in (
+    '1',
+    'true',
+    'yes',
+)
+STRIPE_IDENTITY_REQUIRE_MATCHING_SELFIE = os.environ.get(
+    'STRIPE_IDENTITY_REQUIRE_MATCHING_SELFIE', 'true'
+).lower() in ('1', 'true', 'yes')
+STRIPE_IDENTITY_REQUIRE_LIVE_CAPTURE = os.environ.get('STRIPE_IDENTITY_REQUIRE_LIVE_CAPTURE', 'true').lower() in (
+    '1',
+    'true',
+    'yes',
+)
+STRIPE_IDENTITY_ENFORCE_BEFORE_PAYOUT = os.environ.get('STRIPE_IDENTITY_ENFORCE_BEFORE_PAYOUT', 'true').lower() in (
+    '1',
+    'true',
+    'yes',
+)
 STRIPE_CHARGE_CURRENCY = (os.environ.get('STRIPE_CHARGE_CURRENCY') or 'usd').strip().lower()
 STRIPE_CONNECT_EXTRA_APPLICATION_FEE_BPS = int(os.environ.get('STRIPE_CONNECT_EXTRA_APPLICATION_FEE_BPS', '0'))
 STRIPE_CONNECT_ACCOUNT_DEFAULT_COUNTRY = (os.environ.get('STRIPE_CONNECT_ACCOUNT_DEFAULT_COUNTRY') or '').strip().upper()
@@ -585,6 +605,42 @@ LOGGING = {
             'level': 'WARNING',
             'propagate': True,
         },
+        # Stripe SDK + HTTP — avoid DEBUG body dumps on every API call (very slow in dev).
+        'stripe': {
+            'level': os.environ.get('STRIPE_LOG_LEVEL', 'WARNING'),
+            'handlers': ['console'],
+            'propagate': False,
+        },
+        'urllib3': {
+            'level': 'WARNING',
+            'handlers': ['console'],
+            'propagate': False,
+        },
+        'daphne': {
+            'level': os.environ.get('DAPHNE_LOG_LEVEL', 'WARNING'),
+            'handlers': ['console'],
+            'propagate': False,
+        },
+        'daphne.http_protocol': {
+            'level': os.environ.get('DAPHNE_LOG_LEVEL', 'WARNING'),
+            'handlers': ['console'],
+            'propagate': False,
+        },
+        'django.channels.server': {
+            'level': os.environ.get('CHANNELS_SERVER_LOG_LEVEL', 'INFO'),
+            'handlers': ['console'],
+            'propagate': False,
+        },
+        'django.db.backends': {
+            'level': os.environ.get('DJANGO_SQL_LOG_LEVEL', 'WARNING'),
+            'handlers': ['console'],
+            'propagate': False,
+        },
+        'django.utils.autoreload': {
+            'level': 'INFO',
+            'handlers': ['console'],
+            'propagate': False,
+        },
     },
     'root': {
         'handlers': _ROOT_HANDLER_NAMES,
@@ -632,7 +688,15 @@ SPECTACULAR_SETTINGS = {
         {'name': 'FAQ', 'description': 'Frequently asked questions'},
         {'name': 'User Profile', 'description': 'User profile and registration'},
         {'name': 'Stripe — Driver', 'description': 'Driver (order owner): Stripe Customer, client saved cards, order card attach, checkout preview.'},
-        {'name': 'Stripe — Master', 'description': 'Master: Connect link/onboarding, balance, checkout history (Stripe Connect payouts).'},
+        {
+            'name': 'Master Stripe Identity',
+            'description': (
+                'Master: Stripe Identity (government ID + ID number + selfie). '
+                'POST start → mobile SDK → GET status (poll). Once verified (`identity_locked`), '
+                're-verification is blocked; then use Stripe — Master for bank/Connect.'
+            ),
+        },
+        {'name': 'Stripe — Master', 'description': 'Master: Connect bank account, balance, checkout history (Stripe Connect payouts).'},
     ],
     'PREPROCESSING_HOOKS': [],
     'POSTPROCESSING_HOOKS': [],
