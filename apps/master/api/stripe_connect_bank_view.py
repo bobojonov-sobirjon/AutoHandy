@@ -35,11 +35,11 @@ _CONNECT_SETUP_FIELDS_DESCRIPTION = """
 | `dob_year` | Test: no / Live: yes | Birth **year** (e.g. `1990`). Used for Stripe identity (representative). |
 | `dob_month` | Test: no / Live: yes | Birth **month** `1`–`12` (e.g. `1` = January). |
 | `dob_day` | Test: no / Live: yes | Birth **day** `1`–`31` (e.g. `15`). Together: date of birth `1990-01-15`. |
-| `ssn_last4` | Test: no / Live: often yes | US tax ID: in **test** mode omit (server uses Stripe test value). In **live** mode send **9-digit SSN** (digits only). Never stored in AutoHandy DB. |
+| `ssn_last4` | Test: no / **Live: yes** | US **Social Security Number**. Test: omit (server uses Stripe test value). **Live: required — send all 9 digits** (e.g. `123456789`). Placeholders like `0000` are rejected by Stripe. Sent to Stripe only, **never stored** in AutoHandy DB. |
 
 **Test mode** (`sk_test_…`): only `routing_number`, `account_number`, and `accept_agreement: true` are enough; DOB/SSN are auto-filled server-side.
 
-**Live mode**: provide real DOB; SSN may be required by Stripe for payouts.
+**Live mode** (`sk_live_…`): `dob_year`, `dob_month`, `dob_day`, and **`ssn_last4` (9 digits)** are **required**. Missing SSN returns `400` from the API before Stripe is called.
 """
 
 
@@ -96,8 +96,10 @@ class MasterBankAccountCreateSerializer(serializers.Serializer):
         allow_blank=True,
         max_length=9,
         help_text=(
-            'US SSN for Stripe identity verification. Test mode: leave empty. '
-            'Live mode: 9 digits only (e.g. 123456789). Sent to Stripe only, not saved in DB.'
+            'US SSN for Stripe tax/identity verification. '
+            'Test mode (`sk_test_…`): leave empty. '
+            'Live mode (`sk_live_…`): **required** — 9 digits only (e.g. `123456789`). '
+            'Do not send `0000` or `000000000`. Sent to Stripe only, not saved in DB.'
         ),
     )
 
@@ -129,7 +131,10 @@ class MasterConnectSetupSerializer(serializers.Serializer):
         required=False,
         allow_blank=True,
         max_length=9,
-        help_text='9-digit US SSN (live). Empty in test mode. Not stored in DB.',
+        help_text=(
+            'US SSN (9 digits). Test mode: omit. Live mode: **required** (e.g. `123456789`). '
+            'Not stored in DB.'
+        ),
     )
 
 
@@ -198,6 +203,21 @@ class MasterStripeConnectBankAccountView(APIView):
                     'account_holder_name': 'Jane Doe',
                     'account_holder_type': 'individual',
                     'accept_agreement': True,
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Live mode — bank + DOB + SSN',
+                value={
+                    'routing_number': '121000358',
+                    'account_number': '000123456789',
+                    'account_holder_name': 'Jane Doe',
+                    'account_holder_type': 'individual',
+                    'accept_agreement': True,
+                    'dob_year': 1987,
+                    'dob_month': 3,
+                    'dob_day': 2,
+                    'ssn_last4': '123456789',
                 },
                 request_only=True,
             ),
@@ -328,12 +348,23 @@ class MasterStripeConnectCompleteSetupView(APIView):
                 request_only=True,
             ),
             OpenApiExample(
-                'With date of birth',
+                'With date of birth (test / optional live)',
                 value={
                     'accept_agreement': True,
                     'dob_year': 1990,
                     'dob_month': 1,
                     'dob_day': 15,
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Live mode — DOB + SSN (required)',
+                value={
+                    'accept_agreement': True,
+                    'dob_year': 1987,
+                    'dob_month': 3,
+                    'dob_day': 2,
+                    'ssn_last4': '123456789',
                 },
                 request_only=True,
             ),

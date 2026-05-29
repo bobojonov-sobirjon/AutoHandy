@@ -62,6 +62,33 @@ def _statement_descriptor(first: str, last: str) -> str:
     return (base[:22] if base else 'AUTOHANDY') or 'AUTOHANDY'
 
 
+def _resolve_ssn_for_stripe(ssn_last4: str | None) -> dict[str, str]:
+    """
+    Map API ``ssn_last4`` to Stripe ``individual`` tax fields.
+
+    Test mode uses Stripe test values. Live mode requires a real 9-digit US SSN
+    (sent as ``id_number``; never the placeholder ``0000``).
+    """
+    if _stripe_test_mode():
+        return {'id_number': '000000000'}
+
+    raw = re.sub(r'\D', '', (ssn_last4 or '').strip())
+    if len(raw) == 9:
+        if raw == '000000000':
+            raise StripeConnectSetupError('Invalid SSN for live mode.')
+        return {'id_number': raw}
+    if len(raw) == 4:
+        if raw == '0000':
+            raise StripeConnectSetupError(
+                'Invalid SSN last 4 for live mode. Send the full 9-digit US SSN in ssn_last4.'
+            )
+        return {'ssn_last_4': raw}
+
+    raise StripeConnectSetupError(
+        'US SSN is required in live mode (send 9 digits in ssn_last4 on POST bank-account).'
+    )
+
+
 def _individual_payload(
     *,
     user,
@@ -93,17 +120,8 @@ def _individual_payload(
             'postal_code': '94111',
             'country': 'US',
         },
-        'ssn_last_4': '0000',
+        **_resolve_ssn_for_stripe(ssn_last4),
     }
-
-    if _stripe_test_mode():
-        payload['id_number'] = '000000000'
-    else:
-        raw = re.sub(r'\D', '', (ssn_last4 or '').strip())
-        if len(raw) == 9:
-            payload['id_number'] = raw
-        elif len(raw) == 4:
-            payload['ssn_last_4'] = raw
 
     return payload
 
