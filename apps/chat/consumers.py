@@ -85,35 +85,43 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     messages = [message]
                 else:
                     # New WS-native message. For multiple images, save_message may return a list.
-                    messages = await self.save_message(data)
+                    try:
+                        messages, extra_system = await self.save_message(data)
+                    except ValueError as exc:
+                        await self.send(
+                            text_data=json.dumps({'type': 'error', 'message': str(exc)})
+                        )
+                        return
                     if not messages:
                         await self.send(
                             text_data=json.dumps({'type': 'error', 'message': 'Message validation failed'})
                         )
                         return
+                    if extra_system:
+                        messages = list(messages) + list(extra_system)
 
                 payloads = []
                 for message in messages:
-                    # Push to the other participant (best-effort)
-                    await self.push_other_participant(message)
+                    if not getattr(message, 'is_system', False):
+                        await self.push_other_participant(message)
                     payloads.append(await self.message_to_dict(message))
 
                 # If this is a WS multi-image send, return/broadcast a single "gallery" object
-                # with `images: [...]` (as requested by the mobile client).
+                image_payloads = [p for p in payloads if p.get('message_type') == 'image' and not p.get('is_system')]
                 is_gallery = (
                     not msg_id
                     and isinstance(data.get('images'), list)
                     and (data.get('message_type') or '').strip() == 'image'
-                    and len(payloads) > 1
+                    and len(image_payloads) > 1
                 )
                 if is_gallery:
                     gallery = {
-                        'id': payloads[0].get('id'),
-                        'room_id': payloads[0].get('room_id'),
-                        'sender': payloads[0].get('sender'),
-                        'sender_type': payloads[0].get('sender_type'),
+                        'id': image_payloads[0].get('id'),
+                        'room_id': image_payloads[0].get('room_id'),
+                        'sender': image_payloads[0].get('sender'),
+                        'sender_type': image_payloads[0].get('sender_type'),
                         'message_type': 'image',
-                        'text': payloads[0].get('text') or '',
+                        'text': image_payloads[0].get('text') or '',
                         'file': None,
                         'image': None,
                         'audio': None,
@@ -123,12 +131,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
                                 'image': p.get('image'),
                                 'image_name': p.get('image_name'),
                             }
-                            for p in payloads
+                            for p in image_payloads
                         ],
                         'is_read': False,
-                        'created_at': payloads[0].get('created_at'),
+                        'is_system': False,
+                        'system_code': None,
+                        'created_at': image_payloads[0].get('created_at'),
                     }
-                    payloads_to_send = [gallery]
+                    system_payloads = [p for p in payloads if p.get('is_system')]
+                    payloads_to_send = [gallery] + system_payloads
                 else:
                     payloads_to_send = payloads
 
@@ -250,9 +261,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def save_message(self, data):
-        """Save message(s) to DB. Returns a list of ChatMessage."""
+        """Save message(s) to DB. Returns (list[ChatMessage], list[ChatMessage extras])."""
         from django.conf import settings
         from django.core.files.base import ContentFile
+
+        from apps.chat.services import (
+            ChatMessagingClosedError,
+            after_user_message_saved,
+            assert_room_allows_messaging,
+        )
 
         def _max_bytes() -> int:
             return int(getattr(settings, 'CHAT_WS_MAX_UPLOAD_BYTES', 5 * 1024 * 1024))
@@ -273,6 +290,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
             return ContentFile(blob, name=filename or 'upload.bin')
 
         room = ChatRoom.objects.get(id=self.room_id)
+        try:
+            assert_room_allows_messaging(room=room)
+        except ChatMessagingClosedError as exc:
+            raise ValueError(exc.message) from exc
+
         mtype = (data.get('message_type') or 'text').strip()
         text = data.get('text', '') or ''
 
@@ -316,7 +338,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
             created.append(ChatMessage.objects.create(**kwargs))
 
         room.save()
-        return created
+        extras: list = []
+        for msg in created:
+            extras.extend(after_user_message_saved(room=room, message=msg))
+        return created, extras
 
     @database_sync_to_async
     def get_message_if_allowed(self, message_id):
@@ -414,14 +439,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
         return {
             'id': message.id,
             'room_id': message.room.id,
-            'sender': {
+            'sender': None if message.sender_id is None else {
                 'id': message.sender.id,
                 'full_name': message.sender.get_full_name() or message.sender.email,
                 'email': message.sender.email,
                 'avatar': _abs(message.sender.avatar.url) if message.sender.avatar else None
             },
-            # Mobile clients expect this field; keep it stable for now.
-            'sender_type': 'initiator',
+            'sender_type': 'system' if message.is_system or message.sender_id is None else 'initiator',
             'message_type': message.message_type,
             'text': message.text,
             'file': _abs(message.file.url) if message.file else None,
@@ -429,6 +453,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'image_name': os.path.basename(message.image.name) if message.image else None,
             'audio': _abs(message.audio.url) if message.audio else None,
             'is_read': message.is_read,
+            'is_system': bool(message.is_system),
+            'system_code': (message.system_code or '') or None,
             'created_at': message.created_at.isoformat()
         }
 

@@ -31,6 +31,17 @@ class ChatRoom(models.Model):
         auto_now=True,
         verbose_name='Updated at'
     )
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name='Messaging active',
+        help_text='When false, participants can read history but cannot send new messages.',
+    )
+    closes_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Messaging closes at',
+        help_text='After order completion: grace period end (default +2h). Then is_active becomes false.',
+    )
 
     class Meta:
         verbose_name = 'Chat room'
@@ -57,6 +68,16 @@ class ChatRoom(models.Model):
             return 'initiator'
         return 'receiver'
 
+    def messaging_is_open(self) -> bool:
+        """True while participants may send new messages."""
+        from django.utils import timezone
+
+        if not self.is_active:
+            return False
+        if self.closes_at and timezone.now() >= self.closes_at:
+            return False
+        return True
+
 
 class ChatMessage(models.Model):
     """
@@ -67,6 +88,7 @@ class ChatMessage(models.Model):
         ('image', 'Image'),
         ('file', 'File'),
         ('audio', 'Audio'),
+        ('system', 'System'),
     ]
 
     room = models.ForeignKey(
@@ -79,7 +101,9 @@ class ChatMessage(models.Model):
         User,
         on_delete=models.CASCADE,
         related_name='sent_messages',
-        verbose_name='Sender'
+        verbose_name='Sender',
+        null=True,
+        blank=True,
     )
     message_type = models.CharField(
         max_length=10,
@@ -114,6 +138,17 @@ class ChatMessage(models.Model):
         default=False,
         verbose_name='Read'
     )
+    is_system = models.BooleanField(
+        default=False,
+        verbose_name='System message',
+        help_text='Platform-generated message (safety, warnings, conversation closed).',
+    )
+    system_code = models.CharField(
+        max_length=64,
+        blank=True,
+        default='',
+        verbose_name='System message code',
+    )
     created_at = models.DateTimeField(
         auto_now_add=True,
         verbose_name='Sent at',
@@ -126,4 +161,7 @@ class ChatMessage(models.Model):
         ordering = ['created_at']
 
     def __str__(self):
-        return f"Message from {self.sender.get_full_name()} at {self.created_at}"
+        if self.is_system:
+            return f'System message in room {self.room_id} at {self.created_at}'
+        name = self.sender.get_full_name() if self.sender_id else 'System'
+        return f"Message from {name} at {self.created_at}"

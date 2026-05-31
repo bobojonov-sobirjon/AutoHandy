@@ -13,12 +13,62 @@ from .serializers import (
     CreateChatRoomSerializer, SendMessageSerializer, ChatRoomDetailSerializer,
     build_chat_messages_api_payload,
 )
+from .services import (
+    ChatMessagingClosedError,
+    after_user_message_saved,
+    assert_room_allows_messaging,
+    broadcast_chat_messages,
+    post_safety_welcome_if_needed,
+    refresh_room_messaging_state,
+)
 
 
 class ChatPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 100
+
+
+def _finalize_outgoing_chat_message(*, room, message, request):
+    """Push notification + WS broadcast for user message and any system follow-ups."""
+    import logging
+
+    from apps.order.services.notifications import notify_chat_message
+
+    chat_log = logging.getLogger(__name__)
+    result_serializer = ChatMessageSerializer(message, context={'request': request})
+    payloads = [result_serializer.data]
+
+    extras = after_user_message_saved(room=room, message=message)
+    for extra in extras:
+        payloads.append(ChatMessageSerializer(extra, context={'request': request}).data)
+
+    other = room.get_other_participant(request.user)
+    if other and not message.is_system:
+        sender_name = (
+            request.user.get_full_name()
+            or request.user.email
+            or request.user.phone_number
+            or f'User {request.user.id}'
+        )
+        sent = notify_chat_message(
+            recipient_user_id=other.id,
+            room_id=room.id,
+            message_id=message.id,
+            message_type=message.message_type,
+            text=message.text,
+            sender_display=str(sender_name),
+        )
+        chat_log.warning(
+            'chat_rest_push room_id=%s message_id=%s to_user_id=%s success=%s',
+            room.id,
+            message.id,
+            other.id,
+            sent,
+        )
+
+    broadcast_chat_messages(room_id=room.id, messages=payloads)
+    return result_serializer, payloads
 
 
 class ChatRoomListCreateView(APIView):
@@ -134,8 +184,9 @@ If chat already exists, returns the existing chat.
             result_serializer = ChatRoomSerializer(existing_room, context={'request': request})
             return Response(result_serializer.data, status=status.HTTP_200_OK)
 
-        room = ChatRoom.objects.create(initiator=request.user)
+        room = ChatRoom.objects.create(initiator=request.user, is_active=True)
         room.participants.add(request.user, participant_id)
+        post_safety_welcome_if_needed(room=room)
 
         result_serializer = ChatRoomSerializer(room, context={'request': request})
         return Response(result_serializer.data, status=status.HTTP_201_CREATED)
@@ -174,6 +225,7 @@ class ChatRoomDetailView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
+            refresh_room_messaging_state(room=room, ensure_closed_banner=True)
             serializer = ChatRoomDetailSerializer(room, context={'request': request})
             return Response(serializer.data)
         except Exception:  # noqa: BLE001
@@ -235,6 +287,7 @@ Returns list of messages with pagination.
                     status=status.HTTP_403_FORBIDDEN
                 )
 
+            refresh_room_messaging_state(room=room, ensure_closed_banner=True)
             messages = room.messages.select_related('sender').order_by('-created_at')
 
             paginator = self.pagination_class()
@@ -297,6 +350,11 @@ image: <file>
                     status=status.HTTP_403_FORBIDDEN
                 )
 
+            try:
+                assert_room_allows_messaging(room=room)
+            except ChatMessagingClosedError as e:
+                return Response({'error': e.message}, status=status.HTTP_403_FORBIDDEN)
+
             data = request.data.copy()
             data['room'] = room.id
 
@@ -308,57 +366,11 @@ image: <file>
 
             room.save()
 
-            result_serializer = ChatMessageSerializer(message, context={'request': request})
-            try:
-                # Realtime broadcast for REST-sent attachments + push notification
-                import logging
-
-                from asgiref.sync import async_to_sync
-                from channels.layers import get_channel_layer
-                from apps.order.services.notifications import notify_chat_message
-
-                chat_log = logging.getLogger(__name__)
-                other = room.get_other_participant(request.user)
-                if other:
-                    sender_name = (
-                        request.user.get_full_name()
-                        or request.user.email
-                        or request.user.phone_number
-                        or f'User {request.user.id}'
-                    )
-                    sent = notify_chat_message(
-                        recipient_user_id=other.id,
-                        room_id=room.id,
-                        message_id=message.id,
-                        message_type=message.message_type,
-                        text=message.text,
-                        sender_display=str(sender_name),
-                    )
-                    chat_log.warning(
-                        'chat_rest_push room_id=%s message_id=%s to_user_id=%s success=%s',
-                        room.id,
-                        message.id,
-                        other.id,
-                        sent,
-                    )
-                else:
-                    chat_log.warning(
-                        'chat_rest_push_skip room_id=%s message_id=%s reason=no_other_participant',
-                        room.id,
-                        message.id,
-                    )
-
-                layer = get_channel_layer()
-                if layer:
-                    async_to_sync(layer.group_send)(
-                        f'chat_{room.id}',
-                        {
-                            'type': 'chat_message',
-                            'message': result_serializer.data,
-                        },
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logging.getLogger(__name__).exception('chat_rest_push_failed room_id=%s: %s', room_id, exc)
+            result_serializer, _payloads = _finalize_outgoing_chat_message(
+                room=room,
+                message=message,
+                request=request,
+            )
             return Response(result_serializer.data, status=status.HTTP_201_CREATED)
 
         except ChatRoom.DoesNotExist:

@@ -491,6 +491,10 @@ CELERY_BEAT_SCHEDULE = {
             minute=STRIPE_CONNECT_PAYOUT_REMINDER_MINUTE,
         ),
     },
+    'close-expired-chat-rooms': {
+        'task': 'apps.chat.tasks.close_expired_chat_rooms_task',
+        'schedule': crontab(minute='*/5'),
+    },
 }
 
 ORDER_DEADLINE_WARN_MINUTES = int(os.getenv('ORDER_DEADLINE_WARN_MINUTES', '3'))
@@ -498,6 +502,7 @@ ORDER_DEADLINE_WARN_MINUTES = int(os.getenv('ORDER_DEADLINE_WARN_MINUTES', '3'))
 PUSH_ANDROID_CHANNEL_ID = os.getenv('PUSH_ANDROID_CHANNEL_ID', 'high_importance_channel')
 
 CHAT_WS_MAX_UPLOAD_BYTES = int(os.getenv('CHAT_WS_MAX_UPLOAD_BYTES', str(5 * 1024 * 1024)))
+CHAT_CLOSE_HOURS_AFTER_ORDER_COMPLETE = int(os.getenv('CHAT_CLOSE_HOURS_AFTER_ORDER_COMPLETE', '2'))
 
 CLIENT_CANCEL_NO_PENALTY_AFTER_ON_THE_WAY_HOURS = int(
     os.getenv('CLIENT_CANCEL_NO_PENALTY_AFTER_ON_THE_WAY_HOURS', '2')

@@ -30,12 +30,14 @@ class ChatMessageSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'room', 'sender', 'sender_type', 'message_type', 'text',
             'file', 'file_url', 'image', 'image_url', 'audio', 'audio_url',
-            'is_read', 'created_at'
+            'is_read', 'is_system', 'system_code', 'created_at'
         ]
         read_only_fields = ['id', 'sender', 'created_at']
 
     def get_sender_type(self, obj):
         """Determine sender type relative to current user"""
+        if obj.is_system or obj.sender_id is None:
+            return 'system'
         request = self.context.get('request')
         if request and request.user:
             if obj.sender == request.user:
@@ -73,8 +75,16 @@ def _chat_message_api_dict(*, msg: ChatMessage, request) -> dict:
     Messages API output (used by room details last_message and messages list).
     NOTE: This is separate from WebSocket payloads to allow grouping images into a gallery object.
     """
-    sender_data = ChatParticipantSerializer(msg.sender, context={'request': request}).data
-    sender_type = 'initiator' if request and msg.sender_id == getattr(request.user, 'id', None) else 'receiver'
+    sender_data = None
+    if msg.sender_id:
+        sender_data = ChatParticipantSerializer(msg.sender, context={'request': request}).data
+    sender_type = 'system'
+    if msg.is_system or msg.sender_id is None:
+        sender_type = 'system'
+    elif request and msg.sender_id == getattr(request.user, 'id', None):
+        sender_type = 'initiator'
+    elif msg.sender_id:
+        sender_type = 'receiver'
 
     # absolute URLs via request.build_absolute_uri (same behavior as ChatMessageSerializer)
     def _abs(url: str | None) -> str | None:
@@ -99,6 +109,8 @@ def _chat_message_api_dict(*, msg: ChatMessage, request) -> dict:
         'image': image_url,
         'audio': audio_url,
         'is_read': bool(msg.is_read),
+        'is_system': bool(msg.is_system),
+        'system_code': (msg.system_code or '') or None,
         'created_at': msg.created_at.isoformat() if msg.created_at else None,
     }
 
@@ -174,14 +186,19 @@ class ChatRoomSerializer(serializers.ModelSerializer):
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
     other_participant = serializers.SerializerMethodField()
+    is_messaging_open = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatRoom
         fields = [
             'id', 'participants', 'other_participant', 'last_message',
-            'unread_count', 'created_at', 'updated_at'
+            'unread_count', 'is_active', 'is_messaging_open', 'closes_at',
+            'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'is_messaging_open']
+
+    def get_is_messaging_open(self, obj):
+        return obj.messaging_is_open()
 
     def get_last_message(self, obj):
         last_msg = obj.messages.order_by('-created_at').first()
@@ -192,7 +209,7 @@ class ChatRoomSerializer(serializers.ModelSerializer):
     def get_unread_count(self, obj):
         request = self.context.get('request')
         if request and request.user:
-            return obj.messages.filter(is_read=False).exclude(sender=request.user).count()
+            return obj.messages.filter(is_read=False, is_system=False).exclude(sender=request.user).count()
         return 0
 
     def get_other_participant(self, obj):
@@ -228,11 +245,19 @@ class ChatRoomDetailSerializer(serializers.ModelSerializer):
     receiver = serializers.SerializerMethodField()
     order = serializers.SerializerMethodField()
     last_message = serializers.SerializerMethodField()
+    is_messaging_open = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatRoom
-        fields = ['id', 'initiator', 'receiver', 'order', 'last_message', 'created_at', 'updated_at']
+        fields = [
+            'id', 'initiator', 'receiver', 'order', 'last_message',
+            'is_active', 'is_messaging_open', 'closes_at',
+            'created_at', 'updated_at',
+        ]
         read_only_fields = fields
+
+    def get_is_messaging_open(self, obj):
+        return obj.messaging_is_open()
 
     def get_receiver(self, obj):
         init = obj.initiator

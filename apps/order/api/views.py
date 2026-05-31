@@ -3019,7 +3019,7 @@ class AcceptOrderView(APIView):
                 from apps.chat.services import get_or_create_order_chat_room
 
                 if order.chat_room_id is None and order.master_id:
-                    room = get_or_create_order_chat_room(
+                    room, _created = get_or_create_order_chat_room(
                         master_user=request.user,
                         customer_user=order.user,
                     )
@@ -3387,6 +3387,12 @@ class CompleteOrderView(APIView):
                         'stripe_payment_error',
                     ]
                 )
+                try:
+                    from apps.chat.services import schedule_order_chat_grace_period
+
+                    schedule_order_chat_grace_period(order=order)
+                except Exception:  # noqa: BLE001
+                    pass
 
         except Order.DoesNotExist:
             return Response(
