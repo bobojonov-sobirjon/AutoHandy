@@ -1268,8 +1268,8 @@ class OrderServiceSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OrderService
-        fields = ['id', 'order', 'master_service_item', 'count', 'service_details', 'created_at']
-        read_only_fields = ['id', 'created_at']
+        fields = ['id', 'order', 'master_service_item', 'count', 'unit_price', 'service_details', 'created_at']
+        read_only_fields = ['id', 'unit_price', 'created_at']
 
     def get_service_details(self, obj):
         """Get service details"""

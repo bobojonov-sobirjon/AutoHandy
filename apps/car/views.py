@@ -35,8 +35,10 @@ class CarListCreateView(APIView):
     @extend_schema(
         summary="Создать новую машину",
         description=(
-            "Используйте **multipart/form-data**: поля `category` (id), `brand`, `model`, `year`, "
-            "файл `image`. Числа в форме передаются строками. JSON без файла тоже поддерживается."
+            "Create a car. **All fields are optional** — send only what the user filled in.\n\n"
+            "**multipart/form-data** (recommended): `brand`, `model`, `year`, optional `category` (id), "
+            "optional `image`. Empty optional fields can be omitted or sent as blank.\n\n"
+            "**JSON** also supported (without file upload)."
         ),
         request=CarWriteSerializer,
         responses={

@@ -198,6 +198,7 @@ class OrderServiceInline(admin.TabularInline):
     model = OrderService
     extra = 0
     raw_id_fields = ['master_service_item']
+    fields = ['master_service_item', 'count', 'unit_price', 'created_at']
     readonly_fields = ['created_at']
 
 

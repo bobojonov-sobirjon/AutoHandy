@@ -17,6 +17,28 @@ def _q(x: Any) -> Decimal:
     return Decimal(str(x)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
+def _apply_stripe_locked_total_if_completed(order, bd: dict[str, Any]) -> dict[str, Any]:
+    """
+    Completed card orders: customer ``total`` must match the Stripe capture stored on the order.
+    Protects historical rows when line snapshots were missing or master prices changed later.
+    """
+    from apps.order.models import OrderStatus, OrderStripePaymentStatus
+
+    if getattr(order, 'status', None) != OrderStatus.COMPLETED:
+        return bd
+    cents = getattr(order, 'stripe_payment_amount_cents', None)
+    if not cents or int(cents) <= 0:
+        return bd
+    if getattr(order, 'stripe_payment_status', None) != OrderStripePaymentStatus.SUCCEEDED:
+        return bd
+    locked = _q(Decimal(int(cents)) / Decimal('100'))
+    if locked == _q(bd.get('total', 0)):
+        return bd
+    out = dict(bd)
+    out['total'] = locked
+    return out
+
+
 def _order_penalty_total(order) -> Decimal:
     """Persisted penalties (cancel fees, etc.); non-negative for pricing."""
     try:
@@ -71,7 +93,9 @@ def _custom_request_offer_subtotal(order) -> Decimal | None:
 
 def compute_order_price_breakdown(order) -> dict[str, Any]:
     """
-    Sum prices from OrderService → master_service_item.price.
+    Sum prices from ``OrderService`` lines using **locked** ``unit_price`` when set.
+
+    Falls back to live ``master_service_item.price`` only for legacy rows without a snapshot.
 
     **Custom request:** if ``order.master`` is set and a ``CustomRequestOffer`` exists for that
     order+master, **subtotal** is the offer price only (not multiplied by car count); discount
@@ -86,6 +110,8 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
     Penalties: ``order.order_penalty_total`` (non-negative) is added on top of the job total.
     Returned ``work_total`` is the job line (subtotal − discount + extra_money); ``total`` includes penalties.
     """
+    from apps.order.services.order_service_pricing import order_service_unit_price
+
     extra_money = _q(getattr(order, 'extra_money', 0) or 0)
     offer_price = _custom_request_offer_subtotal(order)
     if offer_price is not None:
@@ -105,7 +131,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
             svc_count = int(getattr(os_row, 'count', 1) or 1)
             if svc_count < 1:
                 svc_count = 1
-            base_u = _q(item.price or 0)
+            base_u = order_service_unit_price(os_row, item)
             line_gross = _q(base_u * car_count * svc_count)
             services_subtotal += line_gross
             rows.append(
@@ -259,7 +285,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
         svc_count = int(getattr(os_row, 'count', 1) or 1)
         if svc_count < 1:
             svc_count = 1
-        base_p = _q(item.price or 0)
+        base_p = order_service_unit_price(os_row, item)
         line_base_gross = _q(base_p * car_count * svc_count)
         base_subtotal += line_base_gross
         rows.append(
@@ -373,7 +399,10 @@ def get_cached_order_pricing(order, context: dict) -> dict[str, Any]:
     cache = context.setdefault('_order_pricing_by_id', {})
     key = order.pk if getattr(order, 'pk', None) is not None else id(order)
     if key not in cache:
-        cache[key] = compute_order_price_breakdown(order)
+        cache[key] = _apply_stripe_locked_total_if_completed(
+            order,
+            compute_order_price_breakdown(order),
+        )
     return cache[key]
 
 

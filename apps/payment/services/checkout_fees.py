@@ -147,6 +147,17 @@ def build_order_marketplace_fee_display(order) -> dict[str, Any]:
     platform_fee = ck['platform_fee']
     master_platform_fee = ck['master_platform_fee']
 
+    customer_total = ck['customer_total']
+    from apps.order.models import OrderStatus, OrderStripePaymentStatus
+
+    cents = getattr(order, 'stripe_payment_amount_cents', None) or 0
+    if (
+        getattr(order, 'status', None) == OrderStatus.COMPLETED
+        and getattr(order, 'stripe_payment_status', None) == OrderStripePaymentStatus.SUCCEEDED
+        and int(cents) > 0
+    ):
+        customer_total = format(_q(Decimal(int(cents)) / Decimal('100')), 'f')
+
     return {
         'platform_fee': platform_fee,
         'pricing_mode': pricing_mode,
@@ -175,7 +186,7 @@ def build_order_marketplace_fee_display(order) -> dict[str, Any]:
             'service_fee': ck['service_fee'],
             'platform_fee': platform_fee,
             'penalty_total': ck['penalty_total'],
-            'total': ck['customer_total'],
+            'total': customer_total,
         },
         'stripe_charge_alignment': {
             'customer_charge_matches': 'client.total (when paid by card on complete)',

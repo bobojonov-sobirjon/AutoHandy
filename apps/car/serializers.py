@@ -91,6 +91,7 @@ class CarWriteSerializer(serializers.ModelSerializer):
         queryset=Category.objects.all(),
         allow_null=True,
         required=False,
+        help_text='Optional. Vehicle type category (by_car). Omit or send null if not selected.',
     )
     year = OptionalIntegerField(required=False, allow_null=True)
     image = serializers.ImageField(

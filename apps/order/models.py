@@ -1013,6 +1013,17 @@ class OrderService(models.Model):
         verbose_name='Count',
         help_text='How many times this service is applied within the order (per service item).',
     )
+    unit_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name='Locked unit price',
+        help_text=(
+            'Per-car base price frozen when the line is added (or on order completion). '
+            'Master profile price changes must not alter past orders.'
+        ),
+    )
     created_at = models.DateTimeField(
         auto_now_add=True,
         verbose_name='Added at',

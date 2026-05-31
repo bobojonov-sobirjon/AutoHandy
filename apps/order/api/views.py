@@ -3353,6 +3353,7 @@ class CompleteOrderView(APIView):
 
                 from apps.payment.services.order_charge import StripeChargeError, charge_order_on_completion
                 from apps.payment.services.checkout_fees import customer_charge_cents
+                from apps.order.services.order_service_pricing import lock_order_service_prices
 
                 connect_acct = ''
                 if order.master_id:
@@ -3367,6 +3368,7 @@ class CompleteOrderView(APIView):
 
 
                 try:
+                    lock_order_service_prices(order)
                     charge_order_on_completion(order)
                 except StripeChargeError as e:
                     return Response({'error': e.message}, status=status.HTTP_400_BAD_REQUEST)
@@ -4170,14 +4172,15 @@ class AddServicesToOrderView(APIView):
         
         from collections import Counter
 
+        from apps.order.services.order_service_pricing import get_or_create_order_service_locked
+
         counts = Counter(int(x) for x in services_list)
         for service_id, add_n in counts.items():
             try:
                 service_item = MasterServiceItems.objects.get(id=service_id)
-                # Используем get_or_create чтобы избежать дубликатов
-                order_service, created = OrderService.objects.get_or_create(
+                order_service, created = get_or_create_order_service_locked(
                     order=order,
-                    master_service_item=service_item
+                    master_service_item=service_item,
                 )
                 if created:
                     # Default = 1; if the client sent duplicates, apply them.
@@ -4681,11 +4684,13 @@ class OrderServiceAddRequestApproveView(APIView):
                 valid_items = {
                     x.id: x for x in MasterServiceItems.objects.filter(id__in=list(counts.keys()))
                 }
+                from apps.order.services.order_service_pricing import get_or_create_order_service_locked
+
                 for sid, add_n in counts.items():
                     svc = valid_items.get(sid)
                     if not svc:
                         continue
-                    os_row, created = OrderService.objects.get_or_create(
+                    os_row, created = get_or_create_order_service_locked(
                         order=order,
                         master_service_item=svc,
                     )

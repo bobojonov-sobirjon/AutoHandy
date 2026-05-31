@@ -21,7 +21,6 @@ def sync_order_services_from_order_categories(order: 'Order') -> int:
     that already existed).
     """
     from apps.master.models import MasterServiceItems
-    from apps.order.models import OrderService
 
     master_id = order.master_id
     if not master_id:
@@ -35,11 +34,10 @@ def sync_order_services_from_order_categories(order: 'Order') -> int:
         master_service__master_id=master_id,
         category_id__in=cat_ids,
     )
+    from apps.order.services.order_service_pricing import get_or_create_order_service_locked
+
     n = 0
     for item in items:
-        OrderService.objects.get_or_create(
-            order=order,
-            master_service_item=item,
-        )
+        get_or_create_order_service_locked(order=order, master_service_item=item)
         n += 1
     return n
