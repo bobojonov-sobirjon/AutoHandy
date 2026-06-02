@@ -344,6 +344,10 @@ SMS_SERVICE = 'twilio'
 SMS_SEND_CODE_IN_RESPONSE_IF_FAIL = True
 SMS_DEBUG_IN_RESPONSE = os.environ.get('SMS_DEBUG_IN_RESPONSE', '').lower() in ['1', 'true', 'yes']
 
+# App Store / Google Play review: comma-separated E.164 phones + fixed OTP (e.g. 4242).
+STORE_REVIEW_PHONES = os.environ.get('STORE_REVIEW_PHONES', '')
+STORE_REVIEW_OTP = os.environ.get('STORE_REVIEW_OTP', '')
+
 SMSC_LOGIN = os.environ.get('SMSC_LOGIN', '')
 SMSC_PASSWORD = os.environ.get('SMSC_PASSWORD', '')
 SMSC_API_URL = 'https://smsc.ru/sys/send.php'

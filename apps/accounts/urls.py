@@ -5,6 +5,7 @@ from .views import (
     LoginView,
     CheckSMSCodeView,
     SMSServiceStatusView,
+    AccountDeleteView,
     UserDetailsView,
     UserLocationUpdateView,
     UserDetailsByIdView,
@@ -37,6 +38,7 @@ urlpatterns = [
     
     # User details endpoints
     path('user/', UserDetailsView.as_view(), name='user_details'),
+    path('account/delete/', AccountDeleteView.as_view(), name='account_delete'),
     path('user/location/', UserLocationUpdateView.as_view(), name='user_location'),
     path('user/<int:user_id>/', UserDetailsByIdView.as_view(), name='user_details_by_id'),
     path('stripe-customer/', StripeCustomerView.as_view(), name='stripe_customer'),

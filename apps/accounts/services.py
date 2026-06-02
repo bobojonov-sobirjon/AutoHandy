@@ -18,6 +18,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework import status
 from rest_framework.response import Response
 from .models import UserSMSCode
+from .store_review import (
+    get_store_review_otp,
+    is_store_review_otp,
+    is_store_review_phone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -296,17 +301,29 @@ class SMSService:
                     'status_code': status.HTTP_400_BAD_REQUEST
                 }
 
-            sms_code = str(random.randint(1000, 9999))
-            sms_sent = False
-            sms_error = None
-            sms_debug = {}
+            store_review = (
+                identifier_type == 'phone'
+                and phone_number
+                and is_store_review_phone(phone_number)
+            )
+            if store_review:
+                sms_code = get_store_review_otp()
+                sms_sent = False
+                sms_error = None
+                sms_debug = {'store_review': True}
+                logger.info('Store review login: fixed OTP for %s (SMS not sent)', phone_number)
+            else:
+                sms_code = str(random.randint(1000, 9999))
+                sms_sent = False
+                sms_error = None
+                sms_debug = {}
 
             if identifier_type == 'email':
                 email_result = SMSService.send_email_code(identifier, sms_code)
                 if not email_result['success']:
                     return {'success': False, 'error': email_result['error'], 'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR}
                 sms_sent = True
-            else:
+            elif not store_review:
                 twilio_result = SMSService.send_sms_via_twilio(phone_number, f'Verification code to log in to the Autohandy mobile app: {sms_code}. This code will expire in 5 minutes. Do not share this code with anyone.')
                 sms_sent = twilio_result.get('success', False)
                 sms_error = twilio_result.get('error')
@@ -417,24 +434,47 @@ class SMSService:
             phone_number = SMSService.format_phone_to_e164(identifier) if identifier_type == 'phone' else None
             cache_id = _phone_cache_id(identifier_type, identifier, phone_number)
 
-            # Get code from database (primary source)
-            try:
-                if identifier_type == 'phone':
-                    sms_code_obj = UserSMSCode.objects.filter(
-                        identifier_type=identifier_type,
-                        identifier__in=[identifier, phone_number],
-                        code=sms_code,
-                        is_used=False,
-                    ).order_by('-created_at').first()
-                else:
-                    sms_code_obj = UserSMSCode.objects.filter(
-                        identifier=identifier,
-                        identifier_type=identifier_type,
-                        code=sms_code,
-                        is_used=False,
-                    ).order_by('-created_at').first()
+            store_review_verified = (
+                identifier_type == 'phone'
+                and phone_number
+                and is_store_review_phone(phone_number)
+                and is_store_review_otp(sms_code)
+            )
 
-                if not sms_code_obj:
+            # Get code from database (primary source); store-review phones use fixed OTP instead.
+            if not store_review_verified:
+                try:
+                    if identifier_type == 'phone':
+                        sms_code_obj = UserSMSCode.objects.filter(
+                            identifier_type=identifier_type,
+                            identifier__in=[identifier, phone_number],
+                            code=sms_code,
+                            is_used=False,
+                        ).order_by('-created_at').first()
+                    else:
+                        sms_code_obj = UserSMSCode.objects.filter(
+                            identifier=identifier,
+                            identifier_type=identifier_type,
+                            code=sms_code,
+                            is_used=False,
+                        ).order_by('-created_at').first()
+
+                    if not sms_code_obj:
+                        cache_key = f'sms_code_{identifier_type}_{cache_id}'
+                        stored_code = cache.get(cache_key)
+                        if (not stored_code or stored_code != sms_code) and identifier_type == 'phone':
+                            stored_code = cache.get(f'sms_code_{identifier_type}_{identifier}')
+
+                        if not stored_code or stored_code != sms_code:
+                            return {'success': False, 'error': 'Invalid SMS code', 'status_code': status.HTTP_400_BAD_REQUEST}
+                    else:
+                        if sms_code_obj.is_expired():
+                            return {'success': False, 'error': 'SMS code expired', 'status_code': status.HTTP_400_BAD_REQUEST}
+                        sms_code_obj.mark_as_used()
+                        logger.info(f"SMS code verified for {identifier}")
+
+                except Exception as e:
+                    logger.error(f"Error verifying SMS code: {str(e)}")
                     cache_key = f'sms_code_{identifier_type}_{cache_id}'
                     stored_code = cache.get(cache_key)
                     if (not stored_code or stored_code != sms_code) and identifier_type == 'phone':
@@ -442,21 +482,8 @@ class SMSService:
 
                     if not stored_code or stored_code != sms_code:
                         return {'success': False, 'error': 'Invalid SMS code', 'status_code': status.HTTP_400_BAD_REQUEST}
-                else:
-                    if sms_code_obj.is_expired():
-                        return {'success': False, 'error': 'SMS code expired', 'status_code': status.HTTP_400_BAD_REQUEST}
-                    sms_code_obj.mark_as_used()
-                    logger.info(f"SMS code verified for {identifier}")
-
-            except Exception as e:
-                logger.error(f"Error verifying SMS code: {str(e)}")
-                cache_key = f'sms_code_{identifier_type}_{cache_id}'
-                stored_code = cache.get(cache_key)
-                if (not stored_code or stored_code != sms_code) and identifier_type == 'phone':
-                    stored_code = cache.get(f'sms_code_{identifier_type}_{identifier}')
-
-                if not stored_code or stored_code != sms_code:
-                    return {'success': False, 'error': 'Invalid SMS code', 'status_code': status.HTTP_400_BAD_REQUEST}
+            else:
+                logger.info('Store review OTP accepted for %s', phone_number)
 
             # Find or create user
             user_exists = cache.get(f'user_exists_{identifier_type}_{cache_id}', False)

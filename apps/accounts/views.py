@@ -583,6 +583,42 @@ class UserDetailsView(APIView):
         )
 
 
+class AccountDeleteView(APIView):
+    """Dedicated endpoint for permanent account deletion (same as DELETE /api/auth/user/)."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Delete account',
+        description=(
+            'Permanently deletes the authenticated user and related data (CASCADE). '
+            'Requires JWT. Cannot be undone. Alias of DELETE /api/auth/user/.'
+        ),
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'success': {'type': 'boolean', 'example': True},
+                    'message': {'type': 'string', 'example': 'Account deleted'},
+                },
+            },
+            401: {
+                'type': 'object',
+                'properties': {
+                    'detail': {'type': 'string', 'example': 'Authentication credentials were not provided.'},
+                },
+            },
+        },
+        tags=['User Profile'],
+    )
+    def delete(self, request):
+        request.user.delete()
+        return Response(
+            {'success': True, 'message': 'Account deleted'},
+            status=status.HTTP_200_OK,
+        )
+
+
 class UserLocationUpdateView(APIView):
     """Update latitude/longitude/address for the authenticated user (from JWT)."""
 
