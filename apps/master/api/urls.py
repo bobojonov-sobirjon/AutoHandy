@@ -21,6 +21,7 @@ from apps.master.api.views import (
     MasterBusySlotListCreateView, MasterBusySlotDetailView,
     MasterServiceCardsView,
     MasterServiceCategorySuggestionsView,
+    MasterTowingPricingView,
 )
 
 urlpatterns = [
@@ -76,4 +77,5 @@ urlpatterns = [
     path('busy-slots/', MasterBusySlotListCreateView.as_view(), name='master-busy-slots'),
     path('busy-slots/<int:pk>/', MasterBusySlotDetailView.as_view(), name='master-busy-slot-detail'),
     path('service-cards/', MasterServiceCardsView.as_view(), name='master-service-cards'),
+    path('towing-pricing/', MasterTowingPricingView.as_view(), name='master-towing-pricing'),
 ]

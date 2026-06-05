@@ -214,8 +214,8 @@ def sweep_accepted_no_departure(*, now=None, order_id: int | None = None) -> int
             if _handle_custom_request_no_departure(order, now):
                 touched += 1
             continue
-        if order.order_type == OrderType.STANDARD:
-            if order_has_scheduled_start(order):
+        if order.order_type in (OrderType.STANDARD, OrderType.TOWING):
+            if order.order_type == OrderType.STANDARD and order_has_scheduled_start(order):
                 continue
             if _handle_standard_no_departure(order, now):
                 touched += 1

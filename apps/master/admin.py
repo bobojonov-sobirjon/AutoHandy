@@ -11,6 +11,7 @@ from .models import (
     MasterScheduleDay,
     MasterService,
     MasterServiceItems,
+    MasterTowingPricing,
 )
 
 
@@ -57,7 +58,13 @@ class MasterServiceItemsInline(NestedTabularInline):
     model = MasterServiceItems
     extra = 1
     ordering = ('-created_at',)
-    fields = ('category_icon_preview', 'category', 'price')
+    fields = (
+        'category_icon_preview',
+        'category',
+        'price',
+        'has_gas_container_2gal',
+        'has_diesel_container_2gal',
+    )
     readonly_fields = ('category_icon_preview',)
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
@@ -137,3 +144,10 @@ class MasterAdmin(NestedModelAdmin):
         return obj.phone_number
 
     phone_number.short_description = 'Phone'
+
+
+@admin.register(MasterTowingPricing)
+class MasterTowingPricingAdmin(admin.ModelAdmin):
+    list_display = ('master', 'base_fee', 'price_per_mile', 'minimum_fee', 'is_active', 'updated_at')
+    list_filter = ('is_active',)
+    search_fields = ('master__user__username', 'master__user__email')

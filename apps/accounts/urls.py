@@ -8,9 +8,11 @@ from .views import (
     AccountDeleteView,
     UserDetailsView,
     UserLocationUpdateView,
+    UserWorkshopComplianceView,
     UserDetailsByIdView,
     UserProfileRegistrationView,
     EmailVerificationConfirmView,
+    EmailVerificationResendView,
     FAQListView,
     HealthCheckView,
     AppVersionView,
@@ -40,6 +42,11 @@ urlpatterns = [
     path('user/', UserDetailsView.as_view(), name='user_details'),
     path('account/delete/', AccountDeleteView.as_view(), name='account_delete'),
     path('user/location/', UserLocationUpdateView.as_view(), name='user_location'),
+    path(
+        'user/workshop-compliance/',
+        UserWorkshopComplianceView.as_view(),
+        name='user_workshop_compliance',
+    ),
     path('user/<int:user_id>/', UserDetailsByIdView.as_view(), name='user_details_by_id'),
     path('stripe-customer/', StripeCustomerView.as_view(), name='stripe_customer'),
     path(
@@ -51,6 +58,11 @@ urlpatterns = [
         'email-verification/',
         EmailVerificationConfirmView.as_view(),
         name='email_verification_confirm',
+    ),
+    path(
+        'email-verification/resend/',
+        EmailVerificationResendView.as_view(),
+        name='email_verification_resend',
     ),
     
     

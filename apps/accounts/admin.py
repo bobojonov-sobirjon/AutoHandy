@@ -58,8 +58,8 @@ class EmailVerificationTokenInline(admin.TabularInline):
     """Inline for email verification tokens"""
     model = EmailVerificationToken
     extra = 0
-    readonly_fields = ('token', 'email', 'created_at', 'expires_at', 'is_used')
-    fields = ('token', 'email', 'created_at', 'expires_at', 'is_used')
+    readonly_fields = ('token', 'code', 'email', 'created_at', 'expires_at', 'is_used')
+    fields = ('code', 'email', 'created_at', 'expires_at', 'is_used')
     can_delete = False
     max_num = 0  # Display only, no editing
     

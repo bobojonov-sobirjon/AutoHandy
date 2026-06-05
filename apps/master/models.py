@@ -210,6 +210,16 @@ class MasterServiceItems(models.Model):
         validators=[MinValueValidator(0)],
         verbose_name='Price',
     )
+    has_gas_container_2gal = models.BooleanField(
+        default=False,
+        verbose_name='Has separate 2-gallon gas container',
+        help_text='Required for Fuel Delivery: master confirms a dedicated gasoline container.',
+    )
+    has_diesel_container_2gal = models.BooleanField(
+        default=False,
+        verbose_name='Has separate 2-gallon diesel container',
+        help_text='Required for Fuel Delivery: master confirms a dedicated diesel container.',
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Added at')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
 
@@ -226,6 +236,19 @@ class MasterServiceItems(models.Model):
 
     def __str__(self):
         return f'{self.category.name} – {self.price}'
+
+    @property
+    def fuel_delivery_equipment_confirmed(self) -> bool:
+        return bool(self.has_gas_container_2gal and self.has_diesel_container_2gal)
+
+    def fuel_delivery_is_active(self) -> bool:
+        from apps.categories.services.fuel_delivery_catalog import is_fuel_delivery_category
+
+        if not self.category_id:
+            return False
+        if not is_fuel_delivery_category(self.category):
+            return True
+        return self.fuel_delivery_equipment_confirmed
 
 
 class MasterScheduleDay(models.Model):
@@ -332,3 +355,52 @@ class MasterBusySlot(models.Model):
 
     def __str__(self):
         return f'{self.master_id} {self.date} {self.start_time}-{self.end_time}'
+
+
+class MasterTowingPricing(models.Model):
+    """Per-master towing tariff: base fee + per-mile rate + optional minimum total."""
+
+    master = models.OneToOneField(
+        Master,
+        on_delete=models.CASCADE,
+        related_name='towing_pricing',
+        verbose_name='Master',
+    )
+    base_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        verbose_name='Base fee',
+        help_text='Flat fee charged for every towing job (e.g. $80).',
+    )
+    price_per_mile = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        verbose_name='Price per mile',
+        help_text='Additional charge per mile (e.g. $5).',
+    )
+    minimum_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        verbose_name='Minimum total',
+        help_text='Final price will not be lower than this amount.',
+    )
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name='Active',
+        help_text='When false, master is hidden from towing estimates.',
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
+
+    class Meta:
+        verbose_name = 'Master towing pricing'
+        verbose_name_plural = 'Master towing pricing'
+
+    def __str__(self):
+        return f'Towing pricing for master {self.master_id}'

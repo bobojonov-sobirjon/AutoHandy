@@ -12,6 +12,7 @@ from apps.master.models import (
     MasterScheduleDay,
     MasterService,
     MasterServiceItems,
+    MasterTowingPricing,
 )
 from apps.categories.models import Category
 from apps.master.services.validation import validate_skill_category
@@ -677,6 +678,7 @@ class MasterServiceItemsSerializer(serializers.ModelSerializer):
     parent_category_id = serializers.IntegerField(source='category.parent_id', read_only=True, allow_null=True)
     parent_category_name = serializers.SerializerMethodField()
     parent_category_icon = serializers.SerializerMethodField()
+    fuel_delivery_active = serializers.SerializerMethodField()
     price = serializers.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -696,6 +698,9 @@ class MasterServiceItemsSerializer(serializers.ModelSerializer):
             'parent_category_name',
             'parent_category_icon',
             'price',
+            'has_gas_container_2gal',
+            'has_diesel_container_2gal',
+            'fuel_delivery_active',
             'created_at',
             'updated_at',
         ]
@@ -724,6 +729,9 @@ class MasterServiceItemsSerializer(serializers.ModelSerializer):
         if not obj.category_id or not obj.category.parent_id:
             return None
         return self._abs_media(obj.category.parent.icon)
+
+    def get_fuel_delivery_active(self, obj):
+        return obj.fuel_delivery_is_active()
 
     def validate_category(self, value):
         validate_skill_category(value)
@@ -763,6 +771,9 @@ def master_service_item_line_dict(item, request):
         'type_category': cat.type_category,
         'icon': _absolute_media_url(request, cat.icon),
         'price': item.price,
+        'has_gas_container_2gal': item.has_gas_container_2gal,
+        'has_diesel_container_2gal': item.has_diesel_container_2gal,
+        'fuel_delivery_active': item.fuel_delivery_is_active(),
         'created_at': item.created_at,
         'updated_at': item.updated_at,
     }
@@ -833,6 +844,8 @@ class MasterServiceSerializer(serializers.ModelSerializer):
         return list(groups.values())
 
     def validate_master_items(self, value):
+        from apps.master.services.fuel_delivery import validate_fuel_delivery_equipment
+
         if not isinstance(value, list):
             raise serializers.ValidationError('master_items must be a list')
         for item in value:
@@ -845,6 +858,11 @@ class MasterServiceSerializer(serializers.ModelSerializer):
             except Category.DoesNotExist:
                 raise serializers.ValidationError(f"Category with ID {item['category']} not found")
             validate_skill_category(cat)
+            validate_fuel_delivery_equipment(
+                category=cat,
+                has_gas_container_2gal=bool(item.get('has_gas_container_2gal', False)),
+                has_diesel_container_2gal=bool(item.get('has_diesel_container_2gal', False)),
+            )
         return value
 
     def validate_master_id(self, value):
@@ -863,7 +881,11 @@ class MasterServiceSerializer(serializers.ModelSerializer):
             MasterServiceItems.objects.update_or_create(
                 master_service=master_service,
                 category_id=item_data['category'],
-                defaults={'price': item_data['price']},
+                defaults={
+                    'price': item_data['price'],
+                    'has_gas_container_2gal': bool(item_data.get('has_gas_container_2gal', False)),
+                    'has_diesel_container_2gal': bool(item_data.get('has_diesel_container_2gal', False)),
+                },
             )
         return master_service
 
@@ -876,6 +898,8 @@ class MasterServiceSerializer(serializers.ModelSerializer):
                     master_service=instance,
                     category_id=item_data['category'],
                     price=item_data['price'],
+                    has_gas_container_2gal=bool(item_data.get('has_gas_container_2gal', False)),
+                    has_diesel_container_2gal=bool(item_data.get('has_diesel_container_2gal', False)),
                 )
         return super().update(instance, validated_data)
 
@@ -888,6 +912,16 @@ class ServiceItemLineSerializer(serializers.Serializer):
         help_text='ID категории типа by_order (подкаталог услуги)',
     )
     price = serializers.FloatField(help_text='Цена (number, ≥ 0)')
+    has_gas_container_2gal = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text='Fuel Delivery only: confirm a separate 2-gallon gas container.',
+    )
+    has_diesel_container_2gal = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text='Fuel Delivery only: confirm a separate 2-gallon diesel container.',
+    )
 
     def validate_category(self, value):
         try:
@@ -895,6 +929,7 @@ class ServiceItemLineSerializer(serializers.Serializer):
         except Category.DoesNotExist:
             raise serializers.ValidationError('Category not found')
         validate_skill_category(cat)
+        self._category = cat
         return value
 
     def validate_price(self, value):
@@ -902,6 +937,22 @@ class ServiceItemLineSerializer(serializers.Serializer):
         if f < 0:
             raise serializers.ValidationError('Price must be >= 0')
         return Decimal(str(f))
+
+    def validate(self, attrs):
+        from apps.master.services.fuel_delivery import validate_fuel_delivery_equipment
+
+        cat = getattr(self, '_category', None)
+        if cat is None:
+            try:
+                cat = Category.objects.get(pk=attrs['category'])
+            except Category.DoesNotExist:
+                return attrs
+        validate_fuel_delivery_equipment(
+            category=cat,
+            has_gas_container_2gal=attrs.get('has_gas_container_2gal', False),
+            has_diesel_container_2gal=attrs.get('has_diesel_container_2gal', False),
+        )
+        return attrs
 
 
 @extend_schema_serializer(
@@ -982,7 +1033,12 @@ class UpdateServiceItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = MasterServiceItems
-        fields = ['price', 'category']
+        fields = [
+            'price',
+            'category',
+            'has_gas_container_2gal',
+            'has_diesel_container_2gal',
+        ]
 
     def validate_category(self, value):
         validate_skill_category(value)
@@ -995,6 +1051,30 @@ class UpdateServiceItemSerializer(serializers.ModelSerializer):
         if f < 0:
             raise serializers.ValidationError('Price must be >= 0')
         return Decimal(str(f))
+
+    def validate(self, attrs):
+        from apps.master.services.fuel_delivery import validate_fuel_delivery_equipment
+
+        instance = getattr(self, 'instance', None)
+        category = attrs.get('category')
+        if category is None and instance is not None:
+            category = instance.category
+        if category is None:
+            return attrs
+
+        has_gas = attrs.get('has_gas_container_2gal')
+        if has_gas is None and instance is not None:
+            has_gas = instance.has_gas_container_2gal
+        has_diesel = attrs.get('has_diesel_container_2gal')
+        if has_diesel is None and instance is not None:
+            has_diesel = instance.has_diesel_container_2gal
+
+        validate_fuel_delivery_equipment(
+            category=category,
+            has_gas_container_2gal=bool(has_gas),
+            has_diesel_container_2gal=bool(has_diesel),
+        )
+        return attrs
 
 
 class FlexibleTimeField(serializers.Field):
@@ -1239,3 +1319,65 @@ class ServiceCardGroupSerializer(serializers.Serializer):
 
 class ServiceCardsResponseSerializer(serializers.Serializer):
     groups = ServiceCardGroupSerializer(many=True)
+
+
+class MasterTowingPricingSerializer(serializers.ModelSerializer):
+    master_id = serializers.IntegerField(required=False, allow_null=True, write_only=True)
+
+    class Meta:
+        model = MasterTowingPricing
+        fields = [
+            'master_id',
+            'base_fee',
+            'price_per_mile',
+            'minimum_fee',
+            'is_active',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            raise serializers.ValidationError('Authentication required.')
+        user = request.user
+        mid = attrs.pop('master_id', None)
+        if mid in (None, ''):
+            qs = Master.objects.filter(user=user)
+            n = qs.count()
+            if n == 0:
+                raise serializers.ValidationError({
+                    'master_id': 'Master profile not found. Create a master profile first.',
+                })
+            if n > 1:
+                raise serializers.ValidationError({
+                    'master_id': 'Provide master_id: you have multiple master profiles.',
+                })
+            attrs['_master'] = qs.first()
+        else:
+            try:
+                master = Master.objects.get(id=int(mid))
+            except (ValueError, TypeError, Master.DoesNotExist):
+                raise serializers.ValidationError({'master_id': 'Master not found'})
+            if master.user_id != user.id:
+                raise serializers.ValidationError({'master_id': 'No access to this master profile'})
+            attrs['_master'] = master
+        return attrs
+
+    def create(self, validated_data):
+        master = validated_data.pop('_master')
+        validated_data.pop('master_id', None)
+        obj, _ = MasterTowingPricing.objects.update_or_create(
+            master=master,
+            defaults=validated_data,
+        )
+        return obj
+
+    def update(self, instance, validated_data):
+        validated_data.pop('_master', None)
+        validated_data.pop('master_id', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        return instance

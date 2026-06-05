@@ -22,6 +22,7 @@ def preferred_slot_blocked_message(
     master_id: int,
     preferred_date: date,
     preferred_time_start: time,
+    exclude_order_id: int | None = None,
 ) -> str | None:
     """
     If the chosen instant is unavailable, return a short API message; else ``None``.
@@ -42,6 +43,8 @@ def preferred_slot_blocked_message(
     ).only('id', 'preferred_time_start', 'preferred_time_end')
 
     for o in accepted:
+        if exclude_order_id is not None and o.id == exclude_order_id:
+            continue
         ost = o.preferred_time_start
         if ost is None:
             continue

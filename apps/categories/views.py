@@ -13,12 +13,31 @@ def _main_categories_queryset():
     return Category.objects.filter(parent__isnull=True)
 
 
+def _parse_bool_query(value) -> bool | None:
+    if value is None or value == '':
+        return None
+    return str(value).strip().lower() in ('1', 'true', 'yes')
+
+
 def _exclude_custom_request_catalog(qs, request):
-    """Masters must not see the client-only Custom Request category in public lists."""
+    """Masters must not see client-only Custom Request / Towing entries in public lists."""
     user = getattr(request, 'user', None)
     if user and user.is_authenticated and user.groups.filter(name='Master').exists():
-        return qs.filter(is_custom_request_entry=False)
+        return qs.filter(is_custom_request_entry=False, is_towing_entry=False)
     return qs
+
+
+def _apply_truck_catalog_filter(qs, request):
+    """
+    Default lists hide semi-truck-only categories (regular car app).
+    Pass ``?is_truck=true`` to list truck roadside catalog only.
+    """
+    truck_only = _parse_bool_query(request.query_params.get('is_truck'))
+    if truck_only is True:
+        return qs.filter(is_truck=True)
+    if truck_only is False:
+        return qs.filter(is_truck=False)
+    return qs.filter(is_truck=False)
 
 
 class CategoryListAPIView(APIView):
@@ -30,23 +49,30 @@ class CategoryListAPIView(APIView):
         Возвращает только **основные (main) категории** — у которых нет родителя (`parent` = null).
         Подкатегории смотрите в `GET /api/categories/subcategories/?parent_id=...`.
 
-        **Фильтрация:**
-        - Параметр `type` — по типу (TypeCategory): `by_car`, `by_order`
-        - Без `type` — все основные категории
+        **Filtering:**
+        - `type` — `by_car` or `by_order`
+        - `is_truck` — `true` for **Emergency Roadside for Semi Trucks** catalog only; default hides truck categories
 
-        **Примеры:**
-        - `/api/categories/categories/` — все main-категории
-        - `/api/categories/categories/?type=by_order` — main по заказам / услугам
+        **Examples:**
+        - `/api/categories/categories/?type=by_order` — car/service main categories
+        - `/api/categories/categories/?type=by_order&is_truck=true` — semi-truck roadside main category
         """,
         parameters=[
             OpenApiParameter(
                 name='type',
                 type=str,
                 location=OpenApiParameter.QUERY,
-                description='Фильтр по типу категории: by_car — машина, by_order — заказы/услуги.',
+                description='Filter by category type: by_car or by_order.',
                 required=False,
                 enum=['by_car', 'by_order']
-            )
+            ),
+            OpenApiParameter(
+                name='is_truck',
+                type=bool,
+                location=OpenApiParameter.QUERY,
+                description='true = semi-truck services only; omitted/false = regular (non-truck) catalog.',
+                required=False,
+            ),
         ],
         responses={
             200: CategorySerializer(many=True)
@@ -68,6 +94,7 @@ class CategoryListAPIView(APIView):
             categories = base
 
         categories = _exclude_custom_request_catalog(categories, request)
+        categories = _apply_truck_catalog_filter(categories, request)
         categories = categories.order_by('-created_at')
         serializer = CategorySerializer(categories, many=True, context={'request': request})
         return Response(serializer.data)
@@ -119,18 +146,30 @@ class SubCategoryListAPIView(APIView):
                 {'detail': 'Main category not found.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        user = getattr(request, 'user', None)
-        if user and user.is_authenticated and user.groups.filter(name='Master').exists():
-            if Category.objects.filter(pk=parent_pk, is_custom_request_entry=True).exists():
-                return Response(
-                    {'detail': 'Main category not found.'},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
+        parent = Category.objects.filter(pk=parent_pk).first()
+        if not parent:
+            return Response(
+                {'detail': 'Main category not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if parent.is_custom_request_entry or parent.is_towing_entry:
+            return Response(
+                {'detail': 'Main category not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         subs = Category.objects.filter(parent_id=parent_pk)
         subs = _exclude_custom_request_catalog(subs, request)
-        subs = subs.filter(
-            ~Q(parent__is_custom_request_entry=True),
-        ).order_by('-created_at')
+        subs = subs.filter(~Q(parent__is_custom_request_entry=True))
+        truck_only = _parse_bool_query(request.query_params.get('is_truck'))
+        if truck_only is True:
+            subs = subs.filter(is_truck=True)
+        elif truck_only is False:
+            subs = subs.filter(is_truck=False)
+        elif parent and parent.is_truck:
+            subs = subs.filter(is_truck=True)
+        else:
+            subs = subs.filter(is_truck=False)
+        subs = subs.order_by('-created_at')
         serializer = CategorySerializer(subs, many=True, context={'request': request})
         return Response(serializer.data)

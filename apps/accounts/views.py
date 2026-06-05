@@ -20,6 +20,7 @@ from .serializers import (
     UserProfileRegistrationSerializer,
     UserLimitedProfileUpdateSerializer,
     UserLocationUpdateSerializer,
+    UserWorkshopComplianceUpdateSerializer,
     EmailVerificationConfirmSerializer,
     FAQSerializer,
     AppVersionSerializer,
@@ -30,7 +31,7 @@ from .serializers import (
 )
 from .services import SMSService
 from .models import AppVersion, CustomUser, FAQ, EmailVerificationToken
-from .email_verification import build_verification_url, send_email_verification_message
+from .email_verification import issue_and_send_email_verification
 
 
 class HealthCheckView(APIView):
@@ -619,6 +620,55 @@ class AccountDeleteView(APIView):
         )
 
 
+class UserWorkshopComplianceView(APIView):
+    """PUT: master confirms required tools and licenses (request.user only)."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, FormParser]
+
+    @extend_schema(
+        summary='Confirm workshop tools and licenses',
+        description=(
+            'Master only. JSON body: `has_tools_confirmed`, `has_licenses_confirmed` (both must be `true`). '
+            'Updates `request.user` only. Fields are returned on GET `/api/auth/user/`.'
+        ),
+        request=UserWorkshopComplianceUpdateSerializer,
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'success': {'type': 'boolean'},
+                    'message': {'type': 'string'},
+                    'user': {'type': 'object'},
+                },
+            },
+            400: {'type': 'object'},
+            401: {'type': 'object'},
+        },
+        tags=['User Profile'],
+    )
+    def put(self, request):
+        serializer = UserWorkshopComplianceUpdateSerializer(
+            request.user,
+            data=request.data,
+            partial=False,
+            context={'request': request},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            request.user.refresh_from_db()
+            detail = UserDetailsSerializer(request.user, context={'request': request})
+            return Response(
+                {
+                    'success': True,
+                    'message': 'Workshop compliance confirmed',
+                    'user': detail.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        return Response({'success': False, 'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
 class UserLocationUpdateView(APIView):
     """Update latitude/longitude/address for the authenticated user (from JWT)."""
 
@@ -676,8 +726,8 @@ class UserProfileRegistrationView(APIView):
         summary="Register / complete profile + email verification",
         description=(
             "multipart/form-data. Updates profile for request.user. "
-            "If email is not verified yet, sends HTML email with link "
-            "`{FRONTEND_BASE}/email-verification/token={uuid}`. "
+            "If email is not verified yet, sends a 4-digit verification code to the email. "
+            "Confirm in-app via POST /api/auth/email-verification/ with `code`. "
             "If already verified, returns a message that you are already registered."
         ),
         request=UserProfileRegistrationSerializer,
@@ -737,17 +787,8 @@ class UserProfileRegistrationView(APIView):
             user.avatar = data['avatar']
         user.save()
 
-        hours = getattr(settings, 'EMAIL_VERIFICATION_TOKEN_HOURS', 48)
-        expires_at = timezone.now() + timedelta(hours=hours)
-        EmailVerificationToken.objects.filter(user=user, is_used=False).update(is_used=True)
-        token_obj = EmailVerificationToken.objects.create(
-            user=user,
-            email=email,
-            expires_at=expires_at,
-        )
-        url = build_verification_url(token_obj.token)
         try:
-            send_email_verification_message(email, url)
+            token_obj = issue_and_send_email_verification(user, email=email)
         except Exception as exc:
             return Response(
                 {
@@ -759,27 +800,33 @@ class UserProfileRegistrationView(APIView):
             )
 
         detail = UserDetailsSerializer(user, context={'request': request})
-        return Response(
-            {
-                'success': True,
-                'message': 'Profile saved. Please check your email to verify your AutoHandy address.',
-                'user': detail.data,
-            },
-            status=status.HTTP_200_OK,
-        )
+        payload = {
+            'success': True,
+            'message': 'Profile saved. Enter the verification code sent to your email.',
+            'user': detail.data,
+        }
+        if getattr(settings, 'DEBUG', False) or getattr(settings, 'EMAIL_DEBUG_IN_RESPONSE', False):
+            payload['verification_code'] = token_obj.code
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class EmailVerificationConfirmView(APIView):
-    """POST JSON or form: token (UUID) — marks email verified if token is valid."""
-    permission_classes = [AllowAny]
+    """POST JSON: verification code from email (authenticated user)."""
+
+    permission_classes = [IsAuthenticated]
+    allow_without_email_verification = True
 
     @extend_schema(
-        summary="Confirm email verification",
-        description="Body: `token` (UUID from email link). Sets is_email_verified and is_verified.",
+        summary='Confirm email verification (code)',
+        description=(
+            'Body: `code` — 4-digit code from the verification email. '
+            'Requires JWT (`request.user`). No external link / domain click needed.'
+        ),
         request=EmailVerificationConfirmSerializer,
         responses={
             200: {'type': 'object', 'properties': {'success': {'type': 'boolean'}, 'message': {'type': 'string'}}},
             400: {'type': 'object'},
+            401: {'type': 'object'},
         },
         tags=['User Profile'],
     )
@@ -787,22 +834,26 @@ class EmailVerificationConfirmView(APIView):
         ser = EmailVerificationConfirmSerializer(data=request.data)
         if not ser.is_valid():
             return Response({'success': False, 'errors': ser.errors}, status=status.HTTP_400_BAD_REQUEST)
-        token_uuid = ser.validated_data['token']
-        try:
-            rec = EmailVerificationToken.objects.select_related('user').get(token=token_uuid)
-        except EmailVerificationToken.DoesNotExist:
-            return Response(
-                {'success': False, 'error': 'Invalid or unknown verification token.'},
-                status=status.HTTP_400_BAD_REQUEST,
+
+        code = str(ser.validated_data['code']).strip()
+        rec = (
+            EmailVerificationToken.objects.filter(
+                user=request.user,
+                code=code,
+                is_used=False,
             )
-        if rec.is_used:
+            .select_related('user')
+            .order_by('-created_at')
+            .first()
+        )
+        if not rec:
             return Response(
-                {'success': False, 'error': 'This verification link has already been used.'},
+                {'success': False, 'error': 'Invalid verification code.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if rec.is_expired():
             return Response(
-                {'success': False, 'error': 'This verification link has expired. Request a new one from the app.'},
+                {'success': False, 'error': 'Verification code expired. Request a new code from the app.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         u = rec.user
@@ -816,10 +867,80 @@ class EmailVerificationConfirmView(APIView):
         u.is_email_verified = True
         u.is_verified = True
         u.save(update_fields=['is_email_verified', 'is_verified'])
+        detail = UserDetailsSerializer(u, context={'request': request})
         return Response(
-            {'success': True, 'message': 'Your email has been verified successfully.'},
+            {
+                'success': True,
+                'message': 'Your email has been verified successfully.',
+                'user': detail.data,
+            },
             status=status.HTTP_200_OK,
         )
+
+
+class EmailVerificationResendView(APIView):
+    """Resend verification email to the authenticated user (driver or master)."""
+
+    permission_classes = [IsAuthenticated]
+    allow_without_email_verification = True
+
+    @extend_schema(
+        summary='Resend email verification code',
+        description=(
+            'Sends a new 4-digit verification code to the user email on file. '
+            'Available while `is_email_verified` is false. Complete profile via '
+            'POST /api/auth/user/register-profile/ first if email is not set.'
+        ),
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'success': {'type': 'boolean'},
+                    'message': {'type': 'string'},
+                },
+            },
+            400: {'type': 'object'},
+            401: {'type': 'object'},
+        },
+        tags=['User Profile'],
+    )
+    def post(self, request):
+        from django.conf import settings
+
+        user = request.user
+        if getattr(user, 'is_email_verified', False):
+            return Response(
+                {'success': False, 'message': 'Your email is already verified.'},
+                status=status.HTTP_200_OK,
+            )
+        if not (user.email or '').strip():
+            return Response(
+                {
+                    'success': False,
+                    'error': 'email_not_set',
+                    'message': 'Add your email via POST /api/auth/user/register-profile/ first.',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            token_obj = issue_and_send_email_verification(user)
+        except Exception as exc:
+            return Response(
+                {
+                    'success': False,
+                    'error': 'email_send_failed',
+                    'message': 'Verification email could not be sent.',
+                    'detail': str(exc),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        payload = {
+            'success': True,
+            'message': 'Verification code sent. Please check your inbox.',
+        }
+        if getattr(settings, 'DEBUG', False) or getattr(settings, 'EMAIL_DEBUG_IN_RESPONSE', False):
+            payload['verification_code'] = token_obj.code
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class FAQListView(APIView):

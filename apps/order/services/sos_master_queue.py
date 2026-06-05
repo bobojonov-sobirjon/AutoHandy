@@ -4,6 +4,7 @@ from __future__ import annotations
 from django.db.models import Q
 
 from apps.categories.models import Category
+from apps.categories.services.fuel_delivery_catalog import fuel_delivery_category_id_set
 from apps.master.services.geo import haversine_distance_km
 from apps.master.models import Master
 
@@ -27,9 +28,17 @@ def build_sos_master_id_queue(
     if not by_order_ids:
         return []
 
+    fuel_delivery_ids = fuel_delivery_category_id_set()
     q_items = Q()
     for cid in by_order_ids:
-        q_items |= Q(master_services__master_service_items__category_id=cid)
+        if cid in fuel_delivery_ids:
+            q_items |= Q(
+                master_services__master_service_items__category_id=cid,
+                master_services__master_service_items__has_gas_container_2gal=True,
+                master_services__master_service_items__has_diesel_container_2gal=True,
+            )
+        else:
+            q_items |= Q(master_services__master_service_items__category_id=cid)
 
     masters = (
         Master.objects.filter(q_items)

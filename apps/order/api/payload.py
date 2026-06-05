@@ -163,6 +163,10 @@ def normalize_review_create_request_data(request) -> dict:
     data = _flatten_request_data(request.data)
     if 'tags' in data:
         data['tags'] = _coerce_tag_string_list(data['tags'])
+    if 'tip_only' in data:
+        data['tip_only'] = _coerce_bool(data.get('tip_only'))
+    if 'decline_tip' in data:
+        data['decline_tip'] = _coerce_bool(data.get('decline_tip'))
     return data
 
 

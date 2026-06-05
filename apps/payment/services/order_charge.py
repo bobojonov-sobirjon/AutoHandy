@@ -1,10 +1,13 @@
 """Off-session PaymentIntent when master completes a card-paid order."""
 from __future__ import annotations
 
+from decimal import Decimal
+
 from django.conf import settings
+from django.utils import timezone
 
 from apps.order.models import Order, OrderStripePaymentStatus
-from apps.payment.services.checkout_fees import customer_charge_cents, master_payout_cents
+from apps.payment.services.checkout_fees import customer_charge_cents, master_payout_cents, money_to_cents
 from apps.payment.services.stripe_client import stripe_configured, stripe_sdk
 
 
@@ -164,3 +167,72 @@ def charge_order_on_completion(order: Order) -> None:
     order.stripe_payment_amount_cents = amount_cents
     order.stripe_payment_currency = currency
     order.stripe_payment_error = ''
+
+
+def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
+    """
+    Off-session tip after completion. Full amount is transferred to the assigned master
+    (no platform fee on tips). Updates order tip_* fields on success.
+    """
+    if not order.saved_card_id:
+        raise StripeChargeError('No saved card on this order.')
+    if not stripe_configured():
+        raise StripeChargeError('Stripe is not configured on the server.')
+
+    amount = Decimal(str(tip_amount))
+    if amount <= 0:
+        raise StripeChargeError('Tip amount must be positive.')
+
+    card = order.saved_card
+    if card.user_id != order.user_id:
+        raise StripeChargeError('Saved card does not belong to the order owner.')
+    if not card.is_active:
+        raise StripeChargeError('Saved card is inactive.')
+
+    amount_cents = money_to_cents(amount)
+    currency = (getattr(settings, 'STRIPE_CHARGE_CURRENCY', 'usd') or 'usd').lower()
+    dest = ''
+    if order.master_id:
+        try:
+            dest = (order.master.stripe_connect_account_id or '').strip()
+        except Exception:
+            dest = ''
+    if not dest:
+        raise StripeChargeError('Master has no Stripe Connect account for tip payout.')
+
+    stripe = stripe_sdk()
+    _assert_connect_destination_can_receive_transfers(stripe, dest)
+
+    idem = f'autohandy_order_{order.pk}_tip_v1'
+    params: dict = {
+        'amount': amount_cents,
+        'currency': currency,
+        'customer': card.stripe_customer_id,
+        'payment_method': card.stripe_payment_method_id,
+        'confirm': True,
+        'off_session': True,
+        'metadata': {
+            'order_id': str(order.pk),
+            'user_id': str(order.user_id),
+            'kind': 'tip',
+        },
+        'idempotency_key': idem,
+        'transfer_data': {'destination': dest},
+    }
+
+    try:
+        pi = stripe.PaymentIntent.create(**params)
+    except Exception as exc:  # noqa: BLE001
+        msg = str(getattr(exc, 'user_message', None) or getattr(exc, 'message', None) or exc)
+        friendly = _friendly_stripe_destination_error(msg)
+        raise StripeChargeError(friendly or msg) from exc
+
+    st = getattr(pi, 'status', '') or ''
+    if st != 'succeeded':
+        raise StripeChargeError(f'Tip PaymentIntent status={st}')
+
+    order.tip_amount = amount
+    order.tip_stripe_payment_intent_id = str(pi.id)
+    order.tip_stripe_payment_status = OrderStripePaymentStatus.SUCCEEDED
+    order.tip_declined = False
+    order.tip_paid_at = timezone.now()

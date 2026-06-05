@@ -63,6 +63,18 @@ def _order_car_count(order) -> int:
     return max(1, n)
 
 
+def _towing_subtotal(order) -> Decimal | None:
+    """Towing orders use locked ``towing_total`` snapshot (not multiplied by car count)."""
+    from apps.order.models import OrderType
+
+    if getattr(order, 'order_type', None) != OrderType.TOWING:
+        return None
+    total = getattr(order, 'towing_total', None)
+    if total is None:
+        return None
+    return _q(total)
+
+
 def _custom_request_offer_subtotal(order) -> Decimal | None:
     """If custom-request order has assigned master and their offer row, use offer price as subtotal base."""
     from apps.order.models import CustomRequestOffer, OrderType
@@ -113,6 +125,48 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
     from apps.order.services.order_service_pricing import order_service_unit_price
 
     extra_money = _q(getattr(order, 'extra_money', 0) or 0)
+    towing_price = _towing_subtotal(order)
+    if towing_price is not None:
+        subtotal = towing_price
+        raw = _q(order.discount or 0)
+        if raw < 0:
+            raw = Decimal('0')
+        use_percent = bool(getattr(settings, 'ORDER_DISCOUNT_IS_PERCENT', False))
+        if raw == 0:
+            mode = 'none'
+            discount_applied = Decimal('0')
+        elif use_percent and raw <= Decimal('100'):
+            mode = 'percent'
+            discount_applied = _q(subtotal * raw / Decimal('100'))
+        else:
+            mode = 'amount'
+            discount_applied = _q(min(raw, subtotal))
+        work_total = _q(max(subtotal - discount_applied + extra_money, Decimal('0')))
+        penalty_total = _order_penalty_total(order)
+        total = _q(max(work_total + penalty_total, Decimal('0')))
+        return {
+            'offer_price': towing_price,
+            'offer_discount_allocated': discount_applied,
+            'services_subtotal': Decimal('0'),
+            'subtotal': subtotal,
+            'extra_money': extra_money,
+            'discount_raw': raw,
+            'discount_mode': mode,
+            'discount_applied': discount_applied,
+            'work_total': work_total,
+            'penalty_total': penalty_total,
+            'total': total,
+            'car_count': _order_car_count(order),
+            'lines_by_order_service_id': {},
+            'emergency': {
+                'is_emergency': False,
+                'time_zone': None,
+                'time_bucket': None,
+                'coefficient': _q(Decimal('1.0')),
+                'note': None,
+            },
+        }
+
     offer_price = _custom_request_offer_subtotal(order)
     if offer_price is not None:
         # Custom-request pricing:

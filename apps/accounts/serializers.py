@@ -128,14 +128,23 @@ class UserSerializer(serializers.ModelSerializer):
     """User data serializer"""
     roles = serializers.SerializerMethodField()
     balance = serializers.SerializerMethodField()
-    
+    requires_email_verification = serializers.SerializerMethodField()
+
     class Meta:
         model = CustomUser
         fields = [
             'id', 'private_id', 'phone_number', 'first_name', 'last_name', 'email',
-            'is_verified', 'is_email_verified', 'created_at', 'roles', 'balance',
+            'is_verified', 'is_email_verified', 'requires_email_verification',
+            'created_at', 'roles', 'balance',
         ]
         read_only_fields = ['id', 'private_id', 'created_at', 'roles', 'balance']
+
+    def get_requires_email_verification(self, obj):
+        from django.conf import settings
+
+        if not getattr(settings, 'REQUIRE_EMAIL_VERIFICATION', True):
+            return False
+        return not bool(getattr(obj, 'is_email_verified', False))
     
     def get_roles(self, obj):
         """Get all user roles with full info"""
@@ -212,6 +221,7 @@ class UserDetailsSerializer(serializers.ModelSerializer):
     completed_orders = serializers.SerializerMethodField()
     acceptance_rate = serializers.SerializerMethodField()
     completion_rate = serializers.SerializerMethodField()
+    requires_email_verification = serializers.SerializerMethodField()
     
     class Meta:
         model = CustomUser
@@ -221,14 +231,24 @@ class UserDetailsSerializer(serializers.ModelSerializer):
             'longitude', 'latitude', 'is_verified', 'is_email_verified', 'roles', 'balance',
             'reviews', 'rating', 'reviews_count', 'completed_orders',
             'acceptance_rate', 'completion_rate',
+            'has_tools_confirmed', 'has_licenses_confirmed', 'workshop_compliance_confirmed_at',
+            'requires_email_verification',
             'created_at', 'updated_at', 'description',
         ]
         read_only_fields = [
             'id', 'private_id', 'email', 'phone_number', 'is_verified', 'is_email_verified', 'roles', 'balance',
             'reviews', 'rating', 'reviews_count', 'completed_orders',
             'acceptance_rate', 'completion_rate',
+            'has_tools_confirmed', 'has_licenses_confirmed', 'workshop_compliance_confirmed_at',
             'created_at', 'updated_at',
         ]
+
+    def get_requires_email_verification(self, obj):
+        from django.conf import settings
+
+        if not getattr(settings, 'REQUIRE_EMAIL_VERIFICATION', True):
+            return False
+        return not bool(getattr(obj, 'is_email_verified', False))
     
     def get_roles(self, obj):
         """Get all user roles with full info"""
@@ -427,6 +447,35 @@ class UserLimitedProfileUpdateSerializer(serializers.ModelSerializer):
         }
 
 
+class UserWorkshopComplianceUpdateSerializer(serializers.ModelSerializer):
+    """PUT only: master workshop tools + licenses self-confirmation."""
+
+    class Meta:
+        model = CustomUser
+        fields = ['has_tools_confirmed', 'has_licenses_confirmed']
+
+    def validate_has_tools_confirmed(self, value):
+        if not value:
+            raise serializers.ValidationError('You must confirm that you have the required tools.')
+        return value
+
+    def validate_has_licenses_confirmed(self, value):
+        if not value:
+            raise serializers.ValidationError(
+                'You must confirm that you hold legally required licenses, if applicable.'
+            )
+        return value
+
+    def update(self, instance, validated_data):
+        from django.utils import timezone
+
+        instance = super().update(instance, validated_data)
+        if instance.has_tools_confirmed and instance.has_licenses_confirmed:
+            instance.workshop_compliance_confirmed_at = timezone.now()
+            instance.save(update_fields=['workshop_compliance_confirmed_at', 'updated_at'])
+        return instance
+
+
 class UserLocationUpdateSerializer(serializers.ModelSerializer):
     """JSON/FORM PUT: latitude, longitude and optional address."""
 
@@ -480,7 +529,7 @@ class UserDeviceActivePatchSerializer(serializers.Serializer):
 
 
 class EmailVerificationConfirmSerializer(serializers.Serializer):
-    token = serializers.UUIDField(required=True)
+    code = serializers.CharField(min_length=4, max_length=10, required=True, help_text='4-digit code from email')
 
 
 class UserUpdateSerializer(serializers.ModelSerializer):

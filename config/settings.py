@@ -57,6 +57,7 @@ INSTALLED_APPS = [
 ]
 
 LOCAL_MIDDLEWARE = [
+    'config.middleware.email_verification.EmailVerificationMiddleware',
     'config.middleware.middleware.JsonErrorResponseMiddleware',
     'config.middleware.middleware.Custom404Middleware',
 ]
@@ -177,10 +178,12 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
+        'apps.accounts.permissions.EmailVerifiedRequired',
     ],
     "PAGE_SIZE": 100,
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.LimitOffsetPagination',
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'EXCEPTION_HANDLER': 'config.exceptions.custom_exception_handler',
 }
 
 SIMPLE_JWT = {
@@ -329,11 +332,14 @@ EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 EMAIL_HOST_USER = 'sobirbobojonov2000@gmail.com'
-EMAIL_HOST_PASSWORD = 'harntaefuxuvlqqw'
+EMAIL_HOST_PASSWORD = 'ksgechcsptomxanp'
 DEFAULT_FROM_EMAIL = 'sobirbobojonov2000@gmail.com'
 
 EMAIL_VERIFICATION_PUBLIC_BASE = os.getenv('EMAIL_VERIFICATION_PUBLIC_BASE', 'https://autohandy.app')
 EMAIL_VERIFICATION_TOKEN_HOURS = int(os.getenv('EMAIL_VERIFICATION_TOKEN_HOURS', '48'))
+EMAIL_VERIFICATION_CODE_MINUTES = int(os.getenv('EMAIL_VERIFICATION_CODE_MINUTES', '15'))
+EMAIL_DEBUG_IN_RESPONSE = os.environ.get('EMAIL_DEBUG_IN_RESPONSE', '').lower() in ('1', 'true', 'yes')
+REQUIRE_EMAIL_VERIFICATION = os.environ.get('REQUIRE_EMAIL_VERIFICATION', 'true').lower() in ('1', 'true', 'yes')
 
 TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
 TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
@@ -347,6 +353,9 @@ SMS_DEBUG_IN_RESPONSE = os.environ.get('SMS_DEBUG_IN_RESPONSE', '').lower() in [
 # App Store / Google Play review: comma-separated E.164 phones + fixed OTP (e.g. 4242).
 STORE_REVIEW_PHONES = os.environ.get('STORE_REVIEW_PHONES', '')
 STORE_REVIEW_OTP = os.environ.get('STORE_REVIEW_OTP', '')
+
+# Post-completion tip modal presets (USD); client may also send a custom amount.
+TIP_PRESET_AMOUNTS = os.environ.get('TIP_PRESET_AMOUNTS', '5,10,20')
 
 SMSC_LOGIN = os.environ.get('SMSC_LOGIN', '')
 SMSC_PASSWORD = os.environ.get('SMSC_PASSWORD', '')
@@ -384,6 +393,7 @@ EMERGENCY_LOW_TIER_DELAY_SECONDS = int(os.environ.get('EMERGENCY_LOW_TIER_DELAY_
 SOS_WEBSOCKET_STALE_SWEEP_SEC = int(os.environ.get('SOS_WEBSOCKET_STALE_SWEEP_SEC', '8'))
 
 CUSTOM_REQUEST_BROADCAST_RADIUS_MILES = float(os.environ.get('CUSTOM_REQUEST_BROADCAST_RADIUS_MILES', '10'))
+TOWING_ESTIMATE_RADIUS_MILES = float(os.environ.get('TOWING_ESTIMATE_RADIUS_MILES', '50'))
 CUSTOM_REQUEST_MIN_IMAGES = int(os.environ.get('CUSTOM_REQUEST_MIN_IMAGES', '2'))
 CUSTOM_REQUEST_MAX_IMAGES = int(os.environ.get('CUSTOM_REQUEST_MAX_IMAGES', '10'))
 WORK_COMPLETION_MAX_IMAGES_PER_REQUEST = int(

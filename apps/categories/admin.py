@@ -39,8 +39,8 @@ class MainCategoryAdmin(admin.ModelAdmin):
 
     get_icon.short_description = 'Icon'
 
-    list_display = ['get_icon', 'name', 'type_category', 'created_at']
-    list_filter = ['type_category', 'created_at']
+    list_display = ['get_icon', 'name', 'type_category', 'is_truck', 'created_at']
+    list_filter = ['type_category', 'is_truck', 'created_at']
     search_fields = ['name']
     ordering = ['-created_at']
 
@@ -48,7 +48,14 @@ class MainCategoryAdmin(admin.ModelAdmin):
         (
             'Main information',
             {
-                'fields': ('name', 'type_category', 'icon', 'is_custom_request_entry'),
+                'fields': (
+                    'name',
+                    'type_category',
+                    'icon',
+                    'is_custom_request_entry',
+                    'is_towing_entry',
+                    'is_truck',
+                ),
                 'description': 'Main categories have no parent. Create subcategories under Sub categories.',
             },
         ),
@@ -92,8 +99,8 @@ class SubCategoryAdmin(admin.ModelAdmin):
 
     get_icon.short_description = 'Icon'
 
-    list_display = ['get_icon', 'name', 'parent', 'type_category', 'created_at']
-    list_filter = ['type_category', SubCategoryParentMainOnlyFilter, 'created_at']
+    list_display = ['get_icon', 'name', 'parent', 'type_category', 'is_truck', 'created_at']
+    list_filter = ['type_category', 'is_truck', SubCategoryParentMainOnlyFilter, 'created_at']
     search_fields = ['name', 'parent__name']
     ordering = ['-created_at']
 
@@ -101,7 +108,7 @@ class SubCategoryAdmin(admin.ModelAdmin):
         (
             'Main information',
             {
-                'fields': ('parent', 'name', 'icon', 'is_custom_request_entry'),
+                'fields': ('parent', 'name', 'icon', 'is_custom_request_entry', 'is_towing_entry', 'is_truck'),
                 'description': 'Category type is taken from the selected main category automatically.',
             },
         ),

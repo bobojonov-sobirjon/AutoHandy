@@ -104,6 +104,22 @@ class CustomUser(AbstractUser):
         verbose_name='Stripe customer id',
         help_text='cus_… for saved cards / off-session charges (client).',
     )
+    has_tools_confirmed = models.BooleanField(
+        default=False,
+        verbose_name='Required tools confirmed',
+        help_text='Master confirms they have the tools needed for offered services.',
+    )
+    has_licenses_confirmed = models.BooleanField(
+        default=False,
+        verbose_name='Required licenses confirmed',
+        help_text='Master confirms they hold legally required licenses, if any.',
+    )
+    workshop_compliance_confirmed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Workshop compliance confirmed at',
+        help_text='Set when tools and licenses confirmations are saved via profile API.',
+    )
 
     # Use email as the username field
     USERNAME_FIELD = 'email'
@@ -314,7 +330,7 @@ class UserSMSCode(models.Model):
 
 
 class EmailVerificationToken(models.Model):
-    """One-time token sent by email to verify address (profile registration flow)."""
+    """One-time code sent by email to verify address (profile registration flow)."""
     user = models.ForeignKey(
         'CustomUser',
         on_delete=models.CASCADE,
@@ -322,6 +338,13 @@ class EmailVerificationToken(models.Model):
         verbose_name="User",
     )
     token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False, db_index=True)
+    code = models.CharField(
+        max_length=10,
+        blank=True,
+        default='',
+        verbose_name='Verification code',
+        help_text='Numeric code entered in the app (e.g. 4 digits).',
+    )
     email = models.EmailField(
         verbose_name="Email to verify",
         help_text="Snapshot of email this token was issued for.",

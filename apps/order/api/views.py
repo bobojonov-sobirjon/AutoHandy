@@ -66,6 +66,8 @@ from apps.order.models import (
     OrderType,
     OrderExtraMoneyRequest,
     ExtraMoneyRequestStatus,
+    OrderTimeChangeRequest,
+    TimeChangeRequestStatus,
     OrderServiceAddRequest,
     ServiceAddRequestStatus,
     OrderWorkCompletionImage,
@@ -85,6 +87,8 @@ from apps.order.api.serializers import (
     OrderSerializer,
     OrderCreateSerializer,
     CustomRequestCreateSerializer,
+    TowingEstimateRequestSerializer,
+    TowingCreateSerializer,
     CustomRequestOfferCreateSerializer,
     CustomRequestOfferSerializer,
     CustomRequestOfferWithMasterSerializer,
@@ -100,6 +104,9 @@ from apps.order.api.serializers import (
     OrderExtraMoneyRequestCreateSerializer,
     OrderExtraMoneyRequestDecisionSerializer,
     OrderExtraMoneyRequestSerializer,
+    OrderTimeChangeRequestCreateSerializer,
+    OrderTimeChangeRequestDecisionSerializer,
+    OrderTimeChangeRequestSerializer,
     OrderServiceAddRequestCreateSerializer,
     OrderServiceAddRequestDecisionSerializer,
     OrderServiceAddRequestSerializer,
@@ -1122,6 +1129,78 @@ Broadcast to masters within **`CUSTOM_REQUEST_BROADCAST_RADIUS_MILES`** runs asy
         )
 
 
+class TowingEstimateView(APIView):
+    """Estimate towing price per master before order creation."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Estimate towing price by mileage',
+        description=(
+            'Returns nearby masters with towing pricing and calculated totals. '
+            'Send pickup coordinates plus delivery coordinates **or** `distance_miles`. '
+            'Formula: `total = max(base_fee + distance_miles × price_per_mile, minimum_fee)`.'
+        ),
+        tags=[STAG_ORDER_DRIVER_CREATE],
+        request=TowingEstimateRequestSerializer,
+        responses={200: {'type': 'object'}},
+    )
+    def post(self, request):
+        from apps.order.services.towing_pricing import build_towing_estimates_for_masters
+
+        ser = TowingEstimateRequestSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = ser.validated_data
+        payload = build_towing_estimates_for_masters(
+            pickup_lat=float(data['latitude']),
+            pickup_lon=float(data['longitude']),
+            delivery_lat=float(data['delivery_latitude']) if data.get('delivery_latitude') is not None else None,
+            delivery_lon=float(data['delivery_longitude']) if data.get('delivery_longitude') is not None else None,
+            distance_miles=data.get('distance_miles'),
+            radius_miles=data.get('radius_miles'),
+            request=request,
+        )
+        if payload['master_count'] == 0:
+            payload['note'] = 'No masters with towing pricing found within the search radius.'
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class TowingCreateView(APIView):
+    """Create towing order with selected master and locked mileage price."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    @extend_schema(
+        summary='Create towing order',
+        description=(
+            'Creates `order_type=towing` with server-side Towing category. '
+            'Client selects `master_id` from estimate results. '
+            'Price is calculated and frozen on the order (`towing_total`). '
+            'Master receives a standard pending-order offer (accept/decline).'
+        ),
+        tags=[STAG_ORDER_DRIVER_CREATE],
+        request=TowingCreateSerializer,
+        responses={201: {'type': 'object'}},
+    )
+    def post(self, request):
+        serializer = TowingCreateSerializer(data=request.data, context={'request': request})
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        order = serializer.save()
+        attach_order_images_from_request(order, request)
+        order_serializer = OrderSerializer(order, context={'request': request})
+        return Response(
+            {
+                'message': 'Your towing order has been sent to the selected master',
+                'order': order_serializer.data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
 class CustomRequestOfferListCreateView(APIView):
     """GET: driver (owner) or master lists offers + full order. POST: master submits one offer per order."""
 
@@ -1784,7 +1863,7 @@ GET /api/order/by-user/?order_type=standard&status=pending
         # Фильтр по типу заказа (standard / sos; legacy scheduled → standard)
         order_type_filter = _normalize_order_type_query_param(request.query_params.get('order_type'))
         if order_type_filter:
-            if order_type_filter in (OrderType.STANDARD, OrderType.SOS, OrderType.CUSTOM_REQUEST):
+            if order_type_filter in (OrderType.STANDARD, OrderType.SOS, OrderType.CUSTOM_REQUEST, OrderType.TOWING):
                 orders = orders.filter(order_type=order_type_filter)
         
         # Smart фильтр по категории проблемы (Тип проблемы)
@@ -2050,7 +2129,7 @@ GET /api/order/by-master/?order_type=standard&status=pending
         # Фильтр по типу заказа (standard / sos; legacy scheduled → standard)
         order_type_filter = _normalize_order_type_query_param(request.query_params.get('order_type'))
         if order_type_filter:
-            if order_type_filter in (OrderType.STANDARD, OrderType.SOS, OrderType.CUSTOM_REQUEST):
+            if order_type_filter in (OrderType.STANDARD, OrderType.SOS, OrderType.CUSTOM_REQUEST, OrderType.TOWING):
                 orders = orders.filter(order_type=order_type_filter)
         
         # Smart фильтр по категории проблемы (Тип проблемы)
@@ -3408,10 +3487,16 @@ class CompleteOrderView(APIView):
         try:
             from apps.order.services.notifications import notify_user_order_kind
 
+            from apps.order.services.post_completion import build_post_completion_payload
+
             pay_extra = {'status': str(order.status)}
             if order.stripe_payment_amount_cents:
                 pay_extra['amount_cents'] = str(order.stripe_payment_amount_cents)
                 pay_extra['currency'] = (order.stripe_payment_currency or '').strip()
+            pc = build_post_completion_payload(order)
+            if pc:
+                pay_extra['needs_review'] = '1' if pc.get('needs_review') else '0'
+                pay_extra['needs_tip_prompt'] = '1' if pc.get('needs_tip_prompt') else '0'
             notify_user_order_kind(
                 order,
                 kind='order_completed',
@@ -3497,21 +3582,32 @@ class UploadOrderWorkCompletionImageView(APIView):
 
 
 class CreateReviewView(APIView):
-    """POST review: multipart (tags) or JSON. Work photos use **`POST .../work-completion-image/`** only."""
+    """
+    Post-completion flow (same endpoint):
+    - Review + rating (+ optional tip)
+    - Tip only ($5 / $10 / $20 / custom) or decline tip (No Thanks)
+    """
 
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     @extend_schema(
-        summary='Create order review (multipart or JSON; multiple tags)',
+        summary='Post-completion: review, rating, and/or tip',
         description="""
-Submit as **`multipart/form-data`** or JSON:
+Submit as **`multipart/form-data`** or JSON.
 
-- **`order_id`**, **`rating`**, **`tags`** (one or more — JSON string array, CSV, or repeated form fields), optional **`comment`**.
+**Review + rating** (after order `completed`):
+- **`order_id`**, **`rating`**, **`tags`** (one or more), optional **`comment`**, optional **`tip_amount`**.
 
-Work completion photos are **not** attached here — use **`POST /api/order/{order_id}/work-completion-image/`** with repeated **`images`**.
+**Tip modal only** (e.g. after review screen):
+- **`order_id`**, **`tip_only`: true**, **`tip_amount`** (`5`, `10`, `20`, or custom).
 
-Response: **`tags`**, **`tags_detail`**, absolute URLs on nested media where applicable.
+**No Thanks** on tip modal:
+- **`order_id`**, **`tip_only`: true**, **`decline_tip`: true**.
+
+Tips are charged off-session to the order's saved card; 100% goes to the assigned master via Stripe Connect.
+
+Order detail / complete responses include **`post_completion`** for the driver (needs_review, needs_tip_prompt, tip_presets).
         """,
         tags=[STAG_ORDER_DRIVER_REVIEWS],
         request=ReviewCreateSerializer,
@@ -3550,7 +3646,57 @@ Response: **`tags`**, **`tags_detail`**, absolute URLs on nested media where app
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         order_id = serializer.validated_data['order_id']
-        order = Order.objects.get(id=order_id)
+        order = Order.objects.select_related('master', 'saved_card').get(id=order_id)
+        tip_only = bool(serializer.validated_data.get('tip_only'))
+        decline_tip = bool(serializer.validated_data.get('decline_tip'))
+        tip_amount = serializer.validated_data.get('tip_amount')
+        review_data = None
+        tip_error = None
+
+        if tip_only and decline_tip:
+            order.tip_declined = True
+            order.save(update_fields=['tip_declined', 'updated_at'])
+            order.refresh_from_db()
+            from apps.order.services.post_completion import build_post_completion_payload
+
+            return Response(
+                {
+                    'message': 'Tip declined',
+                    'post_completion': build_post_completion_payload(order),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if tip_only:
+            from apps.payment.services.order_charge import StripeChargeError, charge_order_tip
+
+            try:
+                charge_order_tip(order, tip_amount)
+                order.save(
+                    update_fields=[
+                        'tip_amount',
+                        'tip_stripe_payment_intent_id',
+                        'tip_stripe_payment_status',
+                        'tip_declined',
+                        'tip_paid_at',
+                        'updated_at',
+                    ]
+                )
+            except StripeChargeError as exc:
+                return Response({'error': exc.message}, status=status.HTTP_400_BAD_REQUEST)
+
+            order.refresh_from_db()
+            from apps.order.services.post_completion import build_post_completion_payload
+
+            return Response(
+                {
+                    'message': 'Tip processed successfully',
+                    'tip_amount': format(tip_amount, 'f'),
+                    'post_completion': build_post_completion_payload(order),
+                },
+                status=status.HTTP_200_OK,
+            )
+
         rating = serializer.validated_data['rating']
         comment = serializer.validated_data.get('comment') or ''
         tags = serializer.validated_data['tags']
@@ -3565,6 +3711,25 @@ Response: **`tags`**, **`tags_detail`**, absolute URLs on nested media where app
 
         review = Review.objects.select_related('order', 'reviewer').get(pk=review.pk)
         result_serializer = ReviewSerializer(review, context={'request': request})
+        review_data = result_serializer.data
+
+        if tip_amount is not None and tip_amount > 0:
+            from apps.payment.services.order_charge import StripeChargeError, charge_order_tip
+
+            try:
+                charge_order_tip(order, tip_amount)
+                order.save(
+                    update_fields=[
+                        'tip_amount',
+                        'tip_stripe_payment_intent_id',
+                        'tip_stripe_payment_status',
+                        'tip_declined',
+                        'tip_paid_at',
+                        'updated_at',
+                    ]
+                )
+            except StripeChargeError as exc:
+                tip_error = exc.message
 
         # Best-effort push to assigned master: customer left a review.
         try:
@@ -3590,13 +3755,20 @@ Response: **`tags`**, **`tags_detail`**, absolute URLs on nested media where app
         except Exception:  # noqa: BLE001
             pass
 
-        return Response(
-            {
-                'message': 'Review created successfully. Rating applied to masters.',
-                'review': result_serializer.data,
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        order.refresh_from_db()
+        from apps.order.services.post_completion import build_post_completion_payload
+
+        payload = {
+            'message': 'Review created successfully. Rating applied to masters.',
+            'review': review_data,
+            'post_completion': build_post_completion_payload(order),
+        }
+        if tip_amount is not None and tip_amount > 0:
+            payload['tip_amount'] = format(tip_amount, 'f')
+        if tip_error:
+            payload['tip_error'] = tip_error
+
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 def _get_area_filter_for_orders(request):
@@ -3962,7 +4134,7 @@ GET /api/order/available/?master_id=5&radius=10&page=2&page_size=20
             master__isnull=True,
             latitude__isnull=False,
             longitude__isnull=False,
-        ).exclude(order_type=OrderType.CUSTOM_REQUEST)
+        ).exclude(order_type__in=[OrderType.CUSTOM_REQUEST, OrderType.TOWING])
         
         # Применяем дополнительные фильтры
         category_filter = request.query_params.get('category')
@@ -4558,6 +4730,258 @@ class PendingExtraMoneyRequestsForClientView(APIView):
             .order_by('-created_at')
         )
         return Response(OrderExtraMoneyRequestSerializer(qs, many=True).data, status=status.HTTP_200_OK)
+
+
+class OrderTimeChangeRequestCreateView(APIView):
+    """Assigned master proposes a new service date/time; client must approve."""
+
+    permission_classes = [IsAuthenticated, IsOrderOwnerOrMaster]
+
+    @extend_schema(
+        summary='Propose order time change (requires client approval)',
+        description=(
+            'Assigned master only. Creates a pending request; order schedule is updated '
+            'only after the client approves.'
+        ),
+        tags=[STAG_ORDER_DETAILS],
+        parameters=[
+            OpenApiParameter(
+                name='order_id',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.PATH,
+                description='Order ID',
+                required=True,
+            ),
+        ],
+        request=OrderTimeChangeRequestCreateSerializer,
+        responses={
+            201: OrderTimeChangeRequestSerializer,
+            400: {'description': 'Validation error'},
+            403: {'description': 'Forbidden'},
+            404: {'description': 'Not found'},
+        },
+    )
+    def post(self, request, order_id: int):
+        try:
+            order = Order.objects.select_related('master').get(pk=order_id)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        self.check_object_permissions(request, order)
+
+        master = request.user.master_profiles.first() if hasattr(request.user, 'master_profiles') else None
+        if not master or order.master_id != master.id:
+            return Response({'error': 'Only the assigned master can propose a time change'}, status=status.HTTP_403_FORBIDDEN)
+
+        ser = OrderTimeChangeRequestCreateSerializer(data=request.data, context={'order': order})
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        req = OrderTimeChangeRequest.objects.create(
+            order=order,
+            master=master,
+            previous_preferred_date=order.preferred_date,
+            previous_preferred_time_start=order.preferred_time_start,
+            previous_preferred_time_end=order.preferred_time_end,
+            proposed_preferred_date=ser.validated_data['proposed_preferred_date'],
+            proposed_preferred_time_start=ser.validated_data['proposed_preferred_time_start'],
+            proposed_preferred_time_end=ser.validated_data.get('proposed_preferred_time_end'),
+            master_comment=(ser.validated_data.get('comment') or '').strip(),
+            status=TimeChangeRequestStatus.PENDING,
+        )
+
+        payload = OrderTimeChangeRequestSerializer(req, context={'request': request}).data
+
+        try:
+            from apps.order.services.notifications import notify_user_order_kind, push_order_event_to_user_websocket
+
+            push_order_event_to_user_websocket(
+                user_id=order.user_id,
+                event_type='time_change_request',
+                payload=payload,
+            )
+            notify_user_order_kind(
+                order,
+                kind='time_change_request',
+                extra_data={
+                    'request_id': str(req.id),
+                    'proposed_date': str(req.proposed_preferred_date),
+                    'proposed_time_start': req.proposed_preferred_time_start.isoformat(timespec='seconds'),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class OrderTimeChangeRequestApproveView(APIView):
+    """Client approves pending time change; order schedule updates automatically."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Approve order time change',
+        tags=[STAG_ORDER_DETAILS],
+        request=OrderTimeChangeRequestDecisionSerializer,
+        responses={
+            200: OrderTimeChangeRequestSerializer,
+            400: {'description': 'Validation error'},
+            403: {'description': 'Forbidden'},
+            404: {'description': 'Not found'},
+        },
+    )
+    def post(self, request, request_id: int):
+        ser = OrderTimeChangeRequestDecisionSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.order.services.order_time_change import apply_approved_time_change
+
+        try:
+            with transaction.atomic():
+                req = (
+                    OrderTimeChangeRequest.objects.select_for_update()
+                    .select_related('order', 'master')
+                    .get(pk=request_id)
+                )
+                if req.order.user_id != request.user.id:
+                    return Response({'error': 'Only the order owner can approve'}, status=status.HTTP_403_FORBIDDEN)
+                if req.status != TimeChangeRequestStatus.PENDING:
+                    return Response({'error': 'Request is not pending'}, status=status.HTTP_400_BAD_REQUEST)
+
+                apply_approved_time_change(req.order, req)
+
+                req.status = TimeChangeRequestStatus.APPROVED
+                req.client_comment = (ser.validated_data.get('comment') or '').strip()
+                req.decided_at = timezone.now()
+                req.save(update_fields=['status', 'client_comment', 'decided_at', 'updated_at'])
+        except OrderTimeChangeRequest.DoesNotExist:
+            return Response({'error': 'Request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        payload = OrderTimeChangeRequestSerializer(req, context={'request': request}).data
+        order_payload = OrderSerializer(req.order, context={'request': request}).data
+
+        try:
+            from apps.order.services.notifications import notify_master_order_kind, push_order_event_to_master_websocket
+
+            push_order_event_to_master_websocket(
+                master_user_id=req.master.user_id,
+                event_type='time_change_decision',
+                payload=payload,
+            )
+            notify_master_order_kind(
+                master_user_id=req.master.user_id,
+                order_id=req.order_id,
+                kind='time_change_approved',
+                extra_data={
+                    'request_id': str(req.id),
+                    'proposed_date': str(req.proposed_preferred_date),
+                    'proposed_time_start': req.proposed_preferred_time_start.isoformat(timespec='seconds'),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        return Response(
+            {
+                'request': payload,
+                'order': order_payload,
+                'message': 'Order time updated',
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class OrderTimeChangeRequestRejectView(APIView):
+    """Client rejects pending time change proposal."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Reject order time change',
+        tags=[STAG_ORDER_DETAILS],
+        request=OrderTimeChangeRequestDecisionSerializer,
+        responses={
+            200: OrderTimeChangeRequestSerializer,
+            400: {'description': 'Validation error'},
+            403: {'description': 'Forbidden'},
+            404: {'description': 'Not found'},
+        },
+    )
+    def post(self, request, request_id: int):
+        ser = OrderTimeChangeRequestDecisionSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        comment = (ser.validated_data.get('comment') or '').strip()
+        if not comment:
+            return Response({'comment': 'Comment is required when rejecting.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                req = (
+                    OrderTimeChangeRequest.objects.select_for_update()
+                    .select_related('order', 'master')
+                    .get(pk=request_id)
+                )
+                if req.order.user_id != request.user.id:
+                    return Response({'error': 'Only the order owner can reject'}, status=status.HTTP_403_FORBIDDEN)
+                if req.status != TimeChangeRequestStatus.PENDING:
+                    return Response({'error': 'Request is not pending'}, status=status.HTTP_400_BAD_REQUEST)
+
+                req.status = TimeChangeRequestStatus.REJECTED
+                req.client_comment = comment
+                req.decided_at = timezone.now()
+                req.save(update_fields=['status', 'client_comment', 'decided_at', 'updated_at'])
+        except OrderTimeChangeRequest.DoesNotExist:
+            return Response({'error': 'Request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        payload = OrderTimeChangeRequestSerializer(req, context={'request': request}).data
+
+        try:
+            from apps.order.services.notifications import notify_master_order_kind, push_order_event_to_master_websocket
+
+            push_order_event_to_master_websocket(
+                master_user_id=req.master.user_id,
+                event_type='time_change_decision',
+                payload=payload,
+            )
+            notify_master_order_kind(
+                master_user_id=req.master.user_id,
+                order_id=req.order_id,
+                kind='time_change_rejected',
+                extra_data={'request_id': str(req.id)},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class PendingTimeChangeRequestsForClientView(APIView):
+    """Client lists all pending time-change proposals."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='List pending time change requests (client)',
+        tags=[STAG_ORDER_DETAILS],
+        responses={200: OrderTimeChangeRequestSerializer(many=True)},
+    )
+    def get(self, request):
+        qs = (
+            OrderTimeChangeRequest.objects.filter(
+                order__user_id=request.user.id,
+                status=TimeChangeRequestStatus.PENDING,
+            )
+            .select_related('order', 'master', 'master__user')
+            .order_by('-created_at')
+        )
+        return Response(
+            OrderTimeChangeRequestSerializer(qs, many=True, context={'request': request}).data,
+            status=status.HTTP_200_OK,
+        )
 
 
 class OrderServiceAddRequestCreateView(APIView):

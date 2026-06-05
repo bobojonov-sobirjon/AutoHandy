@@ -8,6 +8,8 @@ from apps.order.models import (
     OrderStatus,
     OrderPriority,
     OrderType,
+    FuelDeliveryType,
+    OrderStripePaymentStatus,
     CustomRequestOffer,
     Rating,
     OrderService,
@@ -17,9 +19,12 @@ from apps.order.models import (
     LocationSource,
     OrderExtraMoneyRequest,
     ExtraMoneyRequestStatus,
+    OrderTimeChangeRequest,
+    TimeChangeRequestStatus,
     OrderServiceAddRequest,
     ServiceAddRequestStatus,
 )
+from apps.order.services.post_completion import build_post_completion_payload
 from apps.car.models import Car
 from apps.categories.models import Category
 from apps.master.models import Master
@@ -50,6 +55,7 @@ from config.wgs84 import WGS84_COORD_DECIMAL_KWARGS
 User = get_user_model()
 
 CUSTOM_REQUEST_CATEGORY_MASK_MASTER = 'Incoming request'
+TOWING_CATEGORY_MASK_MASTER = 'Towing request'
 
 
 def review_tags_detail(tags):
@@ -307,6 +313,10 @@ class OrderSerializer(serializers.ModelSerializer):
     stripe_payment_status = serializers.SerializerMethodField()
     stripe_payment_amount_cents = serializers.SerializerMethodField()
     stripe_payment_currency = serializers.SerializerMethodField()
+    post_completion = serializers.SerializerMethodField()
+    towing = serializers.SerializerMethodField()
+    fuel_delivery_type_display = serializers.SerializerMethodField()
+    fuel_delivery_summary = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -315,6 +325,10 @@ class OrderSerializer(serializers.ModelSerializer):
             'car_data', 'category_data',
             'text', 'status', 'status_display', 'priority', 'priority_display',
             'location', 'latitude', 'longitude', 'location_precision',
+            'towing',
+            'fuel_delivery_type',
+            'fuel_delivery_type_display',
+            'fuel_delivery_summary',
             'parts_purchase_required',
             'parts_purchase_required_json',
             'preferred_date', 'preferred_time_start', 'preferred_time_end',
@@ -333,6 +347,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'payment_type', 'saved_card',
             'stripe_payment_intent_id', 'stripe_payment_status',
             'stripe_payment_amount_cents', 'stripe_payment_currency',
+            'post_completion',
         ]
         read_only_fields = [
             'id',
@@ -370,6 +385,67 @@ class OrderSerializer(serializers.ModelSerializer):
 
     def get_stripe_payment_currency(self, obj):
         return obj.stripe_payment_currency if self._payment_privileged(obj) else None
+
+    def get_post_completion(self, obj):
+        """Driver post-completion flow: review, rating, tip modal."""
+        if not self._payment_privileged(obj):
+            return None
+        return build_post_completion_payload(obj)
+
+    def get_towing(self, obj):
+        if obj.order_type != OrderType.TOWING:
+            return None
+        return {
+            'pickup': {
+                'location': obj.location or '',
+                'latitude': obj.latitude,
+                'longitude': obj.longitude,
+            },
+            'delivery': {
+                'location': obj.delivery_location or '',
+                'latitude': obj.delivery_latitude,
+                'longitude': obj.delivery_longitude,
+            },
+            'distance_miles': (
+                format(Decimal(str(obj.towing_distance_miles)), 'f')
+                if obj.towing_distance_miles is not None
+                else None
+            ),
+            'base_fee': (
+                format(Decimal(str(obj.towing_base_fee)), 'f')
+                if obj.towing_base_fee is not None
+                else None
+            ),
+            'price_per_mile': (
+                format(Decimal(str(obj.towing_price_per_mile)), 'f')
+                if obj.towing_price_per_mile is not None
+                else None
+            ),
+            'minimum_fee': (
+                format(Decimal(str(obj.towing_minimum_fee)), 'f')
+                if obj.towing_minimum_fee is not None
+                else None
+            ),
+            'total_price': (
+                format(Decimal(str(obj.towing_total)), 'f')
+                if obj.towing_total is not None
+                else None
+            ),
+        }
+
+    def get_fuel_delivery_type_display(self, obj):
+        if not obj.fuel_delivery_type:
+            return None
+        try:
+            return str(FuelDeliveryType(obj.fuel_delivery_type).label)
+        except ValueError:
+            return obj.fuel_delivery_type
+
+    def get_fuel_delivery_summary(self, obj):
+        label = self.get_fuel_delivery_type_display(obj)
+        if not label:
+            return None
+        return f'Delivery of 2 gallons of fuel ({label})'
 
     def get_custom_request_selected_offer(self, obj):
         """
@@ -483,10 +559,20 @@ class OrderSerializer(serializers.ModelSerializer):
             categories = list(
                 obj.category.all().select_related('parent').order_by('parent_id', 'name')
             )
+        from apps.categories.services.fuel_delivery_catalog import is_fuel_delivery_category
+
+        fuel_type_by_category_id = {}
+        for os_row in obj.order_services.all().select_related('master_service_item__category'):
+            item = os_row.master_service_item
+            if not item or not item.category_id or not os_row.fuel_type:
+                continue
+            fuel_type_by_category_id[item.category_id] = os_row.fuel_type
+
         groups = {}
         mask_for_master = _request_user_is_master(request) and (
-            obj.order_type == OrderType.CUSTOM_REQUEST
+            obj.order_type in (OrderType.CUSTOM_REQUEST, OrderType.TOWING)
             or any(getattr(c, 'is_custom_request_entry', False) for c in categories)
+            or any(getattr(c, 'is_towing_entry', False) for c in categories)
         )
         for cat in categories:
             parent = cat.parent
@@ -494,30 +580,43 @@ class OrderSerializer(serializers.ModelSerializer):
             if gid not in groups:
                 p_block = None
                 if parent:
+                    parent_mask = None
+                    if mask_for_master:
+                        if parent.is_custom_request_entry:
+                            parent_mask = CUSTOM_REQUEST_CATEGORY_MASK_MASTER
+                        elif parent.is_towing_entry:
+                            parent_mask = TOWING_CATEGORY_MASK_MASTER
                     p_block = {
                         'id': parent.id,
-                        'name': (
-                            CUSTOM_REQUEST_CATEGORY_MASK_MASTER
-                            if mask_for_master and parent.is_custom_request_entry
-                            else parent.name
-                        ),
+                        'name': parent_mask or parent.name,
                         'icon': _absolute_media_url(request, parent.icon),
                     }
                 groups[gid] = {'parent': p_block, 'items': []}
-            item_name = (
-                CUSTOM_REQUEST_CATEGORY_MASK_MASTER
-                if mask_for_master
-                and (cat.is_custom_request_entry or (cat.parent and cat.parent.is_custom_request_entry))
-                else cat.name
-            )
-            groups[gid]['items'].append(
-                {
-                    'id': cat.id,
-                    'name': item_name,
-                    'type_category': cat.type_category,
-                    'icon': _absolute_media_url(request, cat.icon),
-                }
-            )
+            item_mask = None
+            if mask_for_master:
+                if cat.is_custom_request_entry or (cat.parent and cat.parent.is_custom_request_entry):
+                    item_mask = CUSTOM_REQUEST_CATEGORY_MASK_MASTER
+                elif cat.is_towing_entry or (cat.parent and cat.parent.is_towing_entry):
+                    item_mask = TOWING_CATEGORY_MASK_MASTER
+            item_name = item_mask or cat.name
+            item_payload = {
+                'id': cat.id,
+                'name': item_name,
+                'type_category': cat.type_category,
+                'icon': _absolute_media_url(request, cat.icon),
+            }
+            if is_fuel_delivery_category(cat):
+                ft = fuel_type_by_category_id.get(cat.id)
+                if ft:
+                    item_payload['fuel_type'] = ft
+                    try:
+                        item_payload['fuel_type_display'] = str(FuelDeliveryType(ft).label)
+                    except ValueError:
+                        item_payload['fuel_type_display'] = ft
+                    item_payload['fuel_delivery_summary'] = (
+                        f'Delivery of 2 gallons of fuel ({item_payload["fuel_type_display"]})'
+                    )
+            groups[gid]['items'].append(item_payload)
         return list(groups.values())
 
     def get_services(self, obj):
@@ -568,6 +667,15 @@ class OrderSerializer(serializers.ModelSerializer):
             line['order_service_id'] = os_row.id
             line['added_at'] = os_row.created_at
             line['count'] = int(getattr(os_row, 'count', 1) or 1)
+            if os_row.fuel_type:
+                line['fuel_type'] = os_row.fuel_type
+                try:
+                    line['fuel_type_display'] = str(FuelDeliveryType(os_row.fuel_type).label)
+                except ValueError:
+                    line['fuel_type_display'] = os_row.fuel_type
+                line['fuel_delivery_summary'] = (
+                    f'Delivery of 2 gallons of fuel ({line["fuel_type_display"]})'
+                )
             meta = br['lines_by_order_service_id'].get(os_row.id)
             if meta:
                 line['discount_allocated'] = format(meta['discount_allocated'], 'f')
@@ -761,6 +869,15 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         max_length=255,
         help_text='Optional: service name/label associated with average_price.',
     )
+    fuel_type = serializers.ChoiceField(
+        choices=FuelDeliveryType.choices,
+        required=False,
+        allow_null=True,
+        help_text=(
+            'Required when category_list includes Fuel Delivery: '
+            'gasoline or diesel (delivery of 2 gallons of fuel).'
+        ),
+    )
 
     class Meta:
         model = Order
@@ -770,6 +887,7 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             'average_service_name',
             'master_id',
             'car_list', 'category_list',
+            'fuel_type',
             'parts_purchase_required',
             'parts_purchase_required_json',
             'preferred_date', 'preferred_time_start',
@@ -792,6 +910,8 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             return OrderType.SOS
         if v == OrderType.CUSTOM_REQUEST:
             raise serializers.ValidationError("Use POST /api/order/custom-request/ for custom requests.")
+        if v == OrderType.TOWING:
+            raise serializers.ValidationError("Use POST /api/order/towing/ for towing orders.")
         raise serializers.ValidationError("order_type must be 'standard' or 'sos'.")
 
     def validate_master_id(self, value):
@@ -967,6 +1087,41 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             except Master.DoesNotExist:
                 pass
 
+        from apps.categories.services.fuel_delivery_catalog import categories_include_fuel_delivery
+        from apps.master.services.fuel_delivery import master_has_active_fuel_delivery
+
+        cats = attrs.get('category_list') or []
+        needs_fuel_type = categories_include_fuel_delivery([int(c) for c in cats])
+        fuel_type = attrs.get('fuel_type')
+        if needs_fuel_type:
+            if not fuel_type:
+                raise serializers.ValidationError({
+                    'fuel_type': (
+                        'Select fuel type (gasoline or diesel) for Fuel Delivery — '
+                        'delivery of 2 gallons of fuel.'
+                    ),
+                })
+            if fuel_type not in FuelDeliveryType.values:
+                raise serializers.ValidationError({
+                    'fuel_type': 'Invalid fuel type. Use gasoline or diesel.',
+                })
+            fuel_cat_ids = list(
+                Category.objects.filter(id__in=cats, name__iexact='Fuel Delivery').values_list('id', flat=True)
+            )
+            if master_id and fuel_cat_ids:
+                for cid in fuel_cat_ids:
+                    if not master_has_active_fuel_delivery(int(master_id), int(cid)):
+                        raise serializers.ValidationError({
+                            'master_id': (
+                                'Selected master has not activated Fuel Delivery '
+                                '(both 2-gallon fuel containers must be confirmed).'
+                            ),
+                        })
+        elif fuel_type:
+            raise serializers.ValidationError({
+                'fuel_type': 'fuel_type is only used when Fuel Delivery is in category_list.',
+            })
+
         return attrs
 
     def create(self, validated_data):
@@ -975,9 +1130,13 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         sos_queue = validated_data.pop('_sos_queue', None)
         car_list = validated_data.pop('car_list', [])
         category_list = validated_data.pop('category_list', [])
+        fuel_type = validated_data.pop('fuel_type', None)
 
         if master_id and validated_data.get('order_type') == OrderType.STANDARD:
             validated_data['master'] = Master.objects.get(id=master_id)
+
+        if fuel_type:
+            validated_data['fuel_delivery_type'] = fuel_type
 
         order = super().create(validated_data)
         if car_list:
@@ -1124,6 +1283,224 @@ class CustomRequestCreateSerializer(serializers.Serializer):
         return order
 
 
+class TowingEstimateRequestSerializer(serializers.Serializer):
+    """Pickup + delivery coords or explicit miles for price estimate."""
+
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, help_text='Pickup latitude')
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, help_text='Pickup longitude')
+    delivery_latitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
+        required=False,
+        allow_null=True,
+    )
+    delivery_longitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
+        required=False,
+        allow_null=True,
+    )
+    distance_miles = serializers.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=Decimal('0.01'),
+        help_text='Optional: override computed pickup→delivery distance.',
+    )
+    radius_miles = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=1,
+        max_value=200,
+        help_text='Search radius around pickup (default from settings).',
+    )
+
+    def validate(self, attrs):
+        miles = attrs.get('distance_miles')
+        dlat = attrs.get('delivery_latitude')
+        dlon = attrs.get('delivery_longitude')
+        if miles is None and (dlat is None or dlon is None):
+            raise serializers.ValidationError(
+                'Send delivery_latitude + delivery_longitude, or distance_miles.'
+            )
+        if (dlat is None) ^ (dlon is None):
+            raise serializers.ValidationError(
+                'delivery_latitude and delivery_longitude must be sent together.'
+            )
+        return attrs
+
+
+class TowingCreateSerializer(serializers.Serializer):
+    """Create towing order with pre-selected master and locked mileage price."""
+
+    master_id = serializers.IntegerField()
+    car_list = serializers.ListField(
+        child=serializers.IntegerField(),
+        allow_empty=False,
+    )
+    text = serializers.CharField(required=False, allow_blank=True, default='Towing service')
+    location = serializers.CharField(help_text='Pickup address')
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    delivery_location = serializers.CharField(required=False, allow_blank=True, default='')
+    delivery_latitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
+        required=False,
+        allow_null=True,
+    )
+    delivery_longitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
+        required=False,
+        allow_null=True,
+    )
+    distance_miles = serializers.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=Decimal('0.01'),
+    )
+
+    def validate_car_list(self, value):
+        user = self.context['request'].user
+        seen = []
+        for car_id in dict.fromkeys(value):
+            try:
+                car = Car.objects.get(id=car_id)
+            except Car.DoesNotExist:
+                raise serializers.ValidationError(f'Car with ID {car_id} not found')
+            if car.user_id != user.id:
+                raise serializers.ValidationError(f'Car {car_id} does not belong to you.')
+            seen.append(car_id)
+        return seen
+
+    def validate_master_id(self, value):
+        try:
+            Master.objects.get(id=value)
+        except Master.DoesNotExist:
+            raise serializers.ValidationError(f'Master with ID {value} not found')
+        return value
+
+    def validate(self, attrs):
+        from apps.master.models import MasterTowingPricing
+        from apps.order.services.towing_pricing import (
+            calculate_towing_price,
+            resolve_towing_distance_miles,
+        )
+
+        miles_in = attrs.get('distance_miles')
+        dlat = attrs.get('delivery_latitude')
+        dlon = attrs.get('delivery_longitude')
+        if miles_in is None and (dlat is None or dlon is None):
+            raise serializers.ValidationError(
+                'Send delivery_latitude + delivery_longitude, or distance_miles.'
+            )
+        if (dlat is None) ^ (dlon is None):
+            raise serializers.ValidationError(
+                'delivery_latitude and delivery_longitude must be sent together.'
+            )
+
+        master = Master.objects.get(id=attrs['master_id'])
+        try:
+            pricing = MasterTowingPricing.objects.get(master=master, is_active=True)
+        except MasterTowingPricing.DoesNotExist:
+            raise serializers.ValidationError({'master_id': 'This master has no active towing pricing.'})
+
+        pickup_lat = float(attrs['latitude'])
+        pickup_lon = float(attrs['longitude'])
+        wlat, wlon = master.get_work_location_for_distance()
+        if wlat is None:
+            raise serializers.ValidationError(
+                {'master_id': 'Selected master has no work location coordinates.'}
+            )
+        distance_km = haversine_distance_km(pickup_lat, pickup_lon, wlat, wlon)
+        max_km = master.max_order_distance_km()
+        if distance_km > max_km:
+            d_mi = km_to_miles(distance_km)
+            max_mi = km_to_miles(max_km)
+            raise serializers.ValidationError(
+                {
+                    'master_id': (
+                        f'Selected master is too far from pickup ({d_mi:.1f} mi; limit {max_mi:.1f} mi).'
+                    )
+                }
+            )
+
+        try:
+            distance_miles = resolve_towing_distance_miles(
+                pickup_lat=pickup_lat,
+                pickup_lon=pickup_lon,
+                delivery_lat=float(dlat) if dlat is not None else None,
+                delivery_lon=float(dlon) if dlon is not None else None,
+                distance_miles=miles_in,
+            )
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+        breakdown = calculate_towing_price(
+            base_fee=pricing.base_fee,
+            price_per_mile=pricing.price_per_mile,
+            minimum_fee=pricing.minimum_fee,
+            distance_miles=distance_miles,
+        )
+        attrs['_pricing'] = pricing
+        attrs['_distance_miles'] = distance_miles
+        attrs['_breakdown'] = breakdown
+        return attrs
+
+    def create(self, validated_data):
+        from apps.order.services.towing_catalog import get_towing_catalog_category
+
+        pricing = validated_data.pop('_pricing')
+        distance_miles = validated_data.pop('_distance_miles')
+        breakdown = validated_data.pop('_breakdown')
+        master_id = validated_data.pop('master_id')
+        car_list = validated_data.pop('car_list', [])
+        text = (validated_data.pop('text', None) or 'Towing service').strip() or 'Towing service'
+
+        cat = get_towing_catalog_category()
+        if cat is None:
+            raise serializers.ValidationError(
+                'Towing category is not configured. Set is_towing_entry on a main by_order category.'
+            )
+
+        master = Master.objects.get(id=master_id)
+        order = Order.objects.create(
+            user=self.context['request'].user,
+            master=master,
+            order_type=OrderType.TOWING,
+            status=OrderStatus.PENDING,
+            priority=OrderPriority.HIGH,
+            location_source=LocationSource.GPS_CUSTOM,
+            text=text,
+            location=validated_data['location'],
+            latitude=validated_data['latitude'],
+            longitude=validated_data['longitude'],
+            delivery_location=validated_data.get('delivery_location') or '',
+            delivery_latitude=validated_data.get('delivery_latitude'),
+            delivery_longitude=validated_data.get('delivery_longitude'),
+            towing_distance_miles=distance_miles,
+            towing_base_fee=pricing.base_fee,
+            towing_price_per_mile=pricing.price_per_mile,
+            towing_minimum_fee=pricing.minimum_fee,
+            towing_total=Decimal(breakdown['total_price']),
+            average_price=Decimal(breakdown['total_price']),
+            average_service_name='Towing',
+        )
+        if car_list:
+            order.car.set(list(dict.fromkeys(car_list)))
+        order.category.set([cat.pk])
+
+        if order.status == OrderStatus.PENDING:
+            activate_pending_master_offer(order, request=self.context.get('request'))
+            try:
+                from apps.order.services.towing_notifications import notify_towing_order_created
+
+                notify_towing_order_created(order, request=self.context.get('request'))
+            except Exception:  # noqa: BLE001
+                pass
+        return order
+
+
 class CustomRequestOfferCreateSerializer(serializers.Serializer):
     price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
 
@@ -1265,11 +1642,30 @@ class OrderStatusUpdateSerializer(serializers.Serializer):
 class OrderServiceSerializer(serializers.ModelSerializer):
     """Order service serializer"""
     service_details = serializers.SerializerMethodField()
+    fuel_type_display = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderService
-        fields = ['id', 'order', 'master_service_item', 'count', 'unit_price', 'service_details', 'created_at']
+        fields = [
+            'id',
+            'order',
+            'master_service_item',
+            'count',
+            'unit_price',
+            'fuel_type',
+            'fuel_type_display',
+            'service_details',
+            'created_at',
+        ]
         read_only_fields = ['id', 'unit_price', 'created_at']
+
+    def get_fuel_type_display(self, obj):
+        if not obj.fuel_type:
+            return None
+        try:
+            return str(FuelDeliveryType(obj.fuel_type).label)
+        except ValueError:
+            return obj.fuel_type
 
     def get_service_details(self, obj):
         """Get service details"""
@@ -1423,6 +1819,109 @@ class OrderExtraMoneyRequestSerializer(serializers.ModelSerializer):
             'order_number': getattr(o, 'order_number', None),
             'order_type': getattr(o, 'order_type', None),
             'status': getattr(o, 'status', None),
+        }
+
+
+class OrderTimeChangeRequestCreateSerializer(serializers.Serializer):
+    """Master proposes a new service date/time (pending client approval)."""
+
+    proposed_preferred_date = serializers.DateField()
+    proposed_preferred_time_start = LenientTimeField()
+    proposed_preferred_time_end = LenientTimeField(required=False, allow_null=True)
+    comment = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        from apps.order.services.order_time_change import (
+            has_pending_time_change,
+            order_allows_time_change_proposal,
+            validate_proposed_time_change,
+        )
+
+        order = self.context['order']
+        err = order_allows_time_change_proposal(order)
+        if err:
+            raise serializers.ValidationError({'order': err})
+        if has_pending_time_change(order.pk):
+            raise serializers.ValidationError({'order': 'A time change request is already pending for this order.'})
+
+        field_errors = validate_proposed_time_change(
+            order=order,
+            proposed_date=attrs['proposed_preferred_date'],
+            proposed_time_start=attrs['proposed_preferred_time_start'],
+            proposed_time_end=attrs.get('proposed_preferred_time_end'),
+        )
+        if field_errors:
+            raise serializers.ValidationError(field_errors)
+        return attrs
+
+
+class OrderTimeChangeRequestDecisionSerializer(serializers.Serializer):
+    comment = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class OrderTimeChangeRequestSerializer(serializers.ModelSerializer):
+    order_id = serializers.IntegerField(source='order.id', read_only=True)
+    master_id = serializers.IntegerField(source='master.id', read_only=True)
+    master_user_id = serializers.IntegerField(source='master.user_id', read_only=True)
+    master = serializers.SerializerMethodField()
+    order = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OrderTimeChangeRequest
+        fields = [
+            'id',
+            'order_id',
+            'master_id',
+            'master_user_id',
+            'master',
+            'order',
+            'previous_preferred_date',
+            'previous_preferred_time_start',
+            'previous_preferred_time_end',
+            'proposed_preferred_date',
+            'proposed_preferred_time_start',
+            'proposed_preferred_time_end',
+            'master_comment',
+            'status',
+            'client_comment',
+            'decided_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_master(self, obj):
+        m = getattr(obj, 'master', None)
+        if not m:
+            return None
+        u = getattr(m, 'user', None)
+        full_name = None
+        avatar = None
+        if u is not None:
+            try:
+                full_name = u.get_full_name() or getattr(u, 'email', None) or getattr(u, 'phone_number', None)
+            except Exception:  # noqa: BLE001
+                full_name = getattr(u, 'email', None) or getattr(u, 'phone_number', None)
+            avatar = _media_url(self.context.get('request') if isinstance(self.context, dict) else None, getattr(u, 'avatar', None))
+        return {
+            'id': getattr(m, 'id', None),
+            'user_id': getattr(m, 'user_id', None),
+            'full_name': full_name,
+            'avatar': avatar,
+        }
+
+    def get_order(self, obj):
+        o = getattr(obj, 'order', None)
+        if not o:
+            return None
+        return {
+            'id': getattr(o, 'id', None),
+            'order_number': getattr(o, 'order_number', None),
+            'order_type': getattr(o, 'order_type', None),
+            'status': getattr(o, 'status', None),
+            'preferred_date': getattr(o, 'preferred_date', None),
+            'preferred_time_start': getattr(o, 'preferred_time_start', None),
+            'preferred_time_end': getattr(o, 'preferred_time_end', None),
         }
 
 
@@ -1662,10 +2161,28 @@ class ReviewSerializer(serializers.ModelSerializer):
 
 
 class ReviewCreateSerializer(serializers.Serializer):
-    """Create review: multipart or JSON; multiple ``tags``. No images — use work-completion-image API."""
+    """
+    Post-completion feedback: review + rating (+ optional tip), or tip-only / decline tip.
+    Same endpoint: ``POST /api/order/reviews/create/``.
+    """
 
     order_id = serializers.IntegerField(help_text='Order ID')
-    rating = serializers.IntegerField(min_value=1, max_value=5, help_text='Rating from 1 to 5')
+    tip_only = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text='True to submit only a tip (or decline_tip) without a review.',
+    )
+    decline_tip = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text='Client chose "No Thanks" on the tip modal.',
+    )
+    rating = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        max_value=5,
+        help_text='Rating from 1 to 5 (required unless tip_only).',
+    )
     comment = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -1673,13 +2190,20 @@ class ReviewCreateSerializer(serializers.Serializer):
     )
     tags = serializers.ListField(
         child=serializers.ChoiceField(choices=ReviewTag.choices),
+        required=False,
         min_length=1,
         max_length=32,
-        help_text='One or more ReviewTag values (same as legacy single tag, but repeatable).',
+        help_text='One or more ReviewTag values (required unless tip_only).',
+    )
+    tip_amount = serializers.DecimalField(
+        required=False,
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal('0'),
+        help_text='Optional tip in USD ($5 / $10 / $20 / custom). Charged off-session to saved card.',
     )
 
     def validate_order_id(self, value):
-        """Check order exists, belongs to request user, and can be reviewed."""
         request = self.context.get('request')
         try:
             order = Order.objects.get(id=value)
@@ -1687,15 +2211,51 @@ class ReviewCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError(f'Order with ID {value} not found')
 
         if order.status != OrderStatus.COMPLETED:
-            raise serializers.ValidationError('Review can only be left for a completed order')
-
-        if Review.objects.filter(order=order).exists():
-            raise serializers.ValidationError('A review for this order has already been submitted')
+            raise serializers.ValidationError('Only completed orders support review/tip')
 
         if request and request.user.is_authenticated and order.user_id != request.user.id:
-            raise serializers.ValidationError('You can only review your own orders.')
+            raise serializers.ValidationError('You can only review or tip your own orders.')
 
         return value
+
+    def validate(self, attrs):
+        order = Order.objects.get(id=attrs['order_id'])
+        tip_only = bool(attrs.get('tip_only'))
+        decline_tip = bool(attrs.get('decline_tip'))
+        tip_amount = attrs.get('tip_amount')
+        has_review = Review.objects.filter(order=order).exists()
+        tip_paid = order.tip_stripe_payment_status == OrderStripePaymentStatus.SUCCEEDED
+
+        if tip_paid and (tip_amount is not None and tip_amount > 0):
+            raise serializers.ValidationError({'tip_amount': 'A tip has already been paid for this order.'})
+
+        if tip_only:
+            if decline_tip:
+                if tip_paid:
+                    raise serializers.ValidationError({'decline_tip': 'Tip already paid for this order.'})
+                if order.tip_declined:
+                    raise serializers.ValidationError({'decline_tip': 'Tip already declined for this order.'})
+                return attrs
+            if tip_amount is None or tip_amount <= 0:
+                raise serializers.ValidationError(
+                    {'tip_amount': 'Provide tip_amount > 0 or set decline_tip=true.'}
+                )
+            if tip_paid:
+                raise serializers.ValidationError({'tip_amount': 'Tip already paid for this order.'})
+            return attrs
+
+        if has_review:
+            raise serializers.ValidationError({'order_id': 'A review for this order has already been submitted'})
+
+        if not attrs.get('rating'):
+            raise serializers.ValidationError({'rating': 'Rating is required.'})
+        if not attrs.get('tags'):
+            raise serializers.ValidationError({'tags': 'At least one tag is required.'})
+
+        if tip_paid and tip_amount and tip_amount > 0:
+            raise serializers.ValidationError({'tip_amount': 'Tip already paid for this order.'})
+
+        return attrs
 
 
 class CancelOrderRequestSerializer(serializers.Serializer):

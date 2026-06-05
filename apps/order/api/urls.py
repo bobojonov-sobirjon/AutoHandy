@@ -8,6 +8,8 @@ urlpatterns = [
     path('standard/', views.StandardOrderCreateView.as_view(), name='standard-order-create'),
     path('sos/', views.SOSOrderCreateView.as_view(), name='sos-order-create'),
     path('custom-request/', views.CustomRequestCreateView.as_view(), name='custom-request-create'),
+    path('towing/estimate/', views.TowingEstimateView.as_view(), name='towing-estimate'),
+    path('towing/', views.TowingCreateView.as_view(), name='towing-create'),
     path(
         'emergency/estimate-price/',
         views.EmergencyPriceEstimateView.as_view(),
@@ -54,6 +56,26 @@ urlpatterns = [
         'extra-money/requests/pending/',
         views.PendingExtraMoneyRequestsForClientView.as_view(),
         name='order-extra-money-requests-pending',
+    ),
+    path(
+        '<int:order_id>/time-change/requests/',
+        views.OrderTimeChangeRequestCreateView.as_view(),
+        name='order-time-change-requests-create',
+    ),
+    path(
+        'time-change/requests/<int:request_id>/approve/',
+        views.OrderTimeChangeRequestApproveView.as_view(),
+        name='order-time-change-requests-approve',
+    ),
+    path(
+        'time-change/requests/<int:request_id>/reject/',
+        views.OrderTimeChangeRequestRejectView.as_view(),
+        name='order-time-change-requests-reject',
+    ),
+    path(
+        'time-change/requests/pending/',
+        views.PendingTimeChangeRequestsForClientView.as_view(),
+        name='order-time-change-requests-pending',
     ),
     path(
         '<int:order_id>/service-add/requests/',

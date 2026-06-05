@@ -333,8 +333,35 @@ def _pro_push_copy(
     order_type = (extra_data or {}).get('order_type') if extra_data else None
     push_source = (extra_data or {}).get('push_source') if extra_data else None
     oid = f'#{order_id}' if order_id else ''
+    is_towing = (order_type or '').strip().lower() == 'towing'
+    tow_price = (extra_data or {}).get('total_price') if extra_data else None
+    tow_miles = (extra_data or {}).get('distance_miles') if extra_data else None
+    tow_detail = ''
+    if tow_price and tow_miles:
+        tow_detail = f' ({tow_miles} mi — ${tow_price})'
+    elif tow_price:
+        tow_detail = f' (${tow_price})'
+    elif tow_miles:
+        tow_detail = f' ({tow_miles} mi)'
+
+    if k == 'towing_created' and audience == 'user':
+        if tow_price:
+            return (
+                'Towing request sent',
+                f'Your towing request {oid} was sent to the master{tow_detail}. '
+                f'We will notify you when they accept.',
+            )
+        return (
+            'Towing request sent',
+            f'Your towing request {oid} was sent. We will notify you when the master accepts.',
+        )
 
     if k == 'order_new' and audience == 'master':
+        if is_towing:
+            return (
+                'New towing request',
+                f'A customer needs towing{tow_detail}. Tap to accept or decline — {oid}'.strip(),
+            )
         if (order_type or '').lower() == 'sos':
             return (
                 'Emergency request',
@@ -345,16 +372,43 @@ def _pro_push_copy(
     if k == 'offer_expiring_soon':
         mins = (extra_data or {}).get('minutes_left') if extra_data else None
         if audience == 'user':
+            if is_towing:
+                if mins:
+                    return (
+                        'Towing update',
+                        f'Towing request {oid}: waiting for master response. About {mins} min left.'.strip(),
+                    )
+                return (
+                    'Towing update',
+                    f'Towing request {oid}: waiting for master response. The timer ends soon.'.strip(),
+                )
             if mins:
                 return 'Order update', f'Order {oid}: waiting for master response. About {mins} min left.'.strip()
             return 'Order update', f'Order {oid}: waiting for master response. The timer ends soon.'.strip()
+        if is_towing:
+            if mins:
+                return (
+                    'Towing response needed',
+                    f'Towing request {oid}: about {mins} min left to accept or decline.'.strip(),
+                )
+            return (
+                'Towing response needed',
+                f'Towing request {oid}: please accept or decline before the timer ends.'.strip(),
+            )
         if mins:
             return 'Response needed', f'Order {oid}: about {mins} min left to accept or decline.'.strip()
         return 'Response needed', f'Order {oid}: please accept or decline before the timer ends.'.strip()
 
     if k == 'offer_expired':
         if audience == 'user':
+            if is_towing:
+                return (
+                    'Towing request expired',
+                    f'Towing request {oid}: the master did not respond in time. Choose another master.'.strip(),
+                )
             return 'Order expired', f'Order {oid}: no master accepted in time. Please choose another master.'.strip()
+        if is_towing:
+            return 'Towing offer expired', f'Towing request {oid}: the response window ended.'.strip()
         return 'Offer expired', f'Order {oid}: the response window ended.'.strip()
 
     if k == 'sos_expiring_soon' and audience == 'user':
@@ -414,12 +468,31 @@ def _pro_push_copy(
         return 'New offer received', f'You received a new offer for your request {oid}. Tap to view.'.strip()
 
     if k == 'order_accepted' and audience == 'user':
+        if is_towing:
+            return (
+                'Towing accepted',
+                f'A master accepted your towing request {oid}. They will head to your pickup location soon.',
+            )
         return 'Order accepted', f'Good news — a master accepted your order {oid}. Tap to view details.'.strip()
 
     if k == 'order_declined' and audience == 'user':
+        if is_towing:
+            return (
+                'Towing declined',
+                f'Your towing request {oid} was declined. Choose another master or adjust your request.',
+            )
         return 'Order declined', f'Your order {oid} was declined. You can try again or choose another master.'.strip()
 
     if k == 'order_cancelled':
+        if is_towing:
+            if audience == 'user' and by == 'master':
+                return (
+                    'Towing cancelled',
+                    f'The master cancelled your towing request {oid}. Tap to see details.',
+                )
+            if audience == 'master' and by == 'user':
+                return 'Towing cancelled', f'The customer cancelled towing request {oid}.'.strip()
+            return 'Towing cancelled', f'Towing request {oid} was cancelled.'.strip()
         if audience == 'user' and by == 'master':
             return 'Order cancelled', f'The master cancelled your order {oid}. Tap to see details.'.strip()
         if audience == 'master' and by == 'user':
@@ -488,6 +561,16 @@ def _pro_push_copy(
                     amount_cents=cents,
                     currency=extra_data.get('currency'),
                 )
+        if is_towing:
+            if amt:
+                return (
+                    'Towing complete',
+                    f'Your vehicle was delivered. Towing request {oid} is complete. {amt} was charged. Thank you!',
+                )
+            return (
+                'Towing complete',
+                f'Your towing request {oid} is complete. Tap to review or rate your master.',
+            )
         if amt:
             return (
                 'Order completed',
@@ -539,6 +622,23 @@ def _pro_push_copy(
     if k == 'order_status_changed':
         st = ((extra_data or {}).get('status') or '').strip().lower()
         if audience == 'user':
+            if is_towing:
+                if st == 'on_the_way':
+                    return (
+                        'Master on the way',
+                        f'Your master is heading to the pickup location for towing request {oid}.',
+                    )
+                if st == 'arrived':
+                    return (
+                        'Master arrived',
+                        f'Your master arrived at the pickup location for towing request {oid}.',
+                    )
+                if st == 'in_progress':
+                    return (
+                        'Towing in progress',
+                        f'Your vehicle is being towed — request {oid}. Track progress in the app.',
+                    )
+                return fallback_title or 'Towing update', fallback_body or f'Towing request {oid} has an update.'.strip()
             if st == 'on_the_way':
                 return (
                     'Master is on the way',
@@ -555,6 +655,13 @@ def _pro_push_copy(
                     f'Work has started on order {oid}.'.strip(),
                 )
             return fallback_title or 'Order update', fallback_body or f'Your order {oid} has an update.'.strip()
+        if is_towing:
+            if st == 'on_the_way':
+                return 'En route to pickup', f'Towing request {oid}: customer notified you are on the way.'.strip()
+            if st == 'arrived':
+                return 'Arrived at pickup', f'Towing request {oid}: you marked arrived at pickup.'.strip()
+            if st == 'in_progress':
+                return 'Towing started', f'Towing request {oid}: towing in progress.'.strip()
         return fallback_title or 'Order update', fallback_body or f'Order {oid} has an update.'.strip()
 
     if k == 'scheduled_start_reminder':
@@ -627,6 +734,18 @@ def _pro_push_copy(
 
     if k == 'auto_cancel_no_departure':
         depart_min = int(getattr(settings, 'MASTER_NO_DEPARTURE_MINUTES', 30))
+        if is_towing:
+            if audience == 'user':
+                return (
+                    'Towing cancelled',
+                    f'Towing request {oid}: cancelled because the master did not mark "On the way" '
+                    f'within {depart_min} minutes. Please choose another master.',
+                )
+            return (
+                'Towing cancelled',
+                f'Towing request {oid}: cancelled because you did not start the trip within '
+                f'{depart_min} minutes of accepting.',
+            )
         if audience == 'user':
             return (
                 'Order cancelled',
@@ -739,6 +858,32 @@ def _pro_push_copy(
         return (
             'Extra charge declined',
             f'The customer declined your extra charge request for order {oid}.',
+        )
+
+    if k == 'time_change_request' and audience == 'user':
+        when = ''
+        if extra_data:
+            d = (extra_data.get('proposed_date') or '').strip()
+            t = (extra_data.get('proposed_time_start') or '').strip()
+            if d and t:
+                when = f' to {d} {t}'
+            elif d:
+                when = f' to {d}'
+        return (
+            'New time proposed',
+            f'Your provider proposed a different service time for order {oid}{when}. Approve or reject in the app.',
+        )
+
+    if k == 'time_change_approved' and audience == 'master':
+        return (
+            'Time change approved',
+            f'The customer approved your new service time for order {oid}.',
+        )
+
+    if k == 'time_change_rejected' and audience == 'master':
+        return (
+            'Time change declined',
+            f'The customer declined your proposed time change for order {oid}.',
         )
 
     if k == 'sos_all_declined' and audience == 'user':
@@ -1326,24 +1471,27 @@ def notify_master_new_order(order: 'Order', *, target_master_id: int | None = No
         logger.warning('notify_master_new_order: master lookup failed: %s', exc)
         return
 
+    extra = _merge_order_type_extra(order, {'order_type': str(getattr(order, 'order_type', '') or '')})
     title, body = _pro_push_copy(
         kind='order_new',
         order_id=order.id,
         audience='master',
-        extra_data={'order_type': str(getattr(order, 'order_type', '') or '')},
+        extra_data=extra,
         fallback_title='New order received',
         fallback_body=f'A new order is waiting for you. Tap to view — #{order.id}',
     )
+    data = {
+        'kind': 'order_new',
+        'order_id': str(order.id),
+        'order_type': str(getattr(order, 'order_type', '') or ''),
+    }
+    data.update({str(k): str(v) for k, v in extra.items() if k not in data})
     send_fcm_to_user_devices(
         user_id=master.user_id,
         firebase_kind='master',
         title=title,
         body=body,
-        data={
-            'kind': 'order_new',
-            'order_id': str(order.id),
-            'order_type': str(getattr(order, 'order_type', '') or ''),
-        },
+        data=data,
     )
 
 
@@ -1385,6 +1533,21 @@ def notify_user_order_payment_charged(
     )
 
 
+def _merge_order_type_extra(order: 'Order', extra_data: dict[str, str] | None) -> dict[str, str]:
+    merged = dict(extra_data or {})
+    merged.setdefault('order_type', str(getattr(order, 'order_type', '') or ''))
+    if str(merged.get('order_type', '')).lower() == 'towing':
+        if getattr(order, 'towing_total', None) is not None and 'total_price' not in merged:
+            from decimal import Decimal
+
+            merged['total_price'] = format(Decimal(str(order.towing_total)), 'f')
+        if getattr(order, 'towing_distance_miles', None) is not None and 'distance_miles' not in merged:
+            from decimal import Decimal
+
+            merged['distance_miles'] = format(Decimal(str(order.towing_distance_miles)), 'f')
+    return merged
+
+
 def notify_user_order_kind(
     order: 'Order',
     *,
@@ -1397,7 +1560,7 @@ def notify_user_order_kind(
         title='',
         body='',
         kind=kind,
-        extra_data=extra_data,
+        extra_data=_merge_order_type_extra(order, extra_data),
     )
 
 
@@ -1489,17 +1652,39 @@ def notify_master_order_event(
     kind: str,
     extra_data: dict[str, str] | None = None,
 ) -> int:
+    merged = dict(extra_data or {})
+    if 'order_type' not in merged:
+        try:
+            from apps.order.models import Order
+
+            row = Order.objects.only(
+                'order_type',
+                'towing_total',
+                'towing_distance_miles',
+            ).get(pk=order_id)
+            merged['order_type'] = str(row.order_type or '')
+            if str(row.order_type).lower() == 'towing':
+                if row.towing_total is not None and 'total_price' not in merged:
+                    from decimal import Decimal
+
+                    merged['total_price'] = format(Decimal(str(row.towing_total)), 'f')
+                if row.towing_distance_miles is not None and 'distance_miles' not in merged:
+                    from decimal import Decimal
+
+                    merged['distance_miles'] = format(Decimal(str(row.towing_distance_miles)), 'f')
+        except Exception:  # noqa: BLE001
+            pass
     title_out, body_out = _pro_push_copy(
         kind=kind,
         order_id=order_id,
         audience='master',
-        extra_data=extra_data,
+        extra_data=merged,
         fallback_title=title,
         fallback_body=body,
     )
     data = {'kind': kind, 'order_id': str(order_id)}
-    if extra_data:
-        data.update({str(k): str(v) for k, v in extra_data.items()})
+    if merged:
+        data.update({str(k): str(v) for k, v in merged.items()})
     return send_fcm_to_user_devices(
         user_id=master_user_id,
         firebase_kind='master',

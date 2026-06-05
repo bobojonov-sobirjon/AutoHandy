@@ -53,12 +53,18 @@ class OrderStripePaymentStatus(models.TextChoices):
     FAILED = 'failed', 'Failed'
 
 
+class FuelDeliveryType(models.TextChoices):
+    GASOLINE = 'gasoline', 'Gasoline'
+    DIESEL = 'diesel', 'Diesel'
+
+
 class OrderType(models.TextChoices):
     """Order types: standard (normal booking with a master) vs SOS (emergency)."""
 
     STANDARD = 'standard', 'Standard'
     SOS = 'sos', 'SOS / Emergency'
     CUSTOM_REQUEST = 'custom_request', 'Custom request'
+    TOWING = 'towing', 'Towing'
 
 
 class Order(models.Model):
@@ -193,6 +199,73 @@ class Order(models.Model):
         default=None,
         verbose_name='Average service name',
         help_text='Optional: service name/label associated with average_price (shown to client).',
+    )
+    fuel_delivery_type = models.CharField(
+        max_length=16,
+        choices=FuelDeliveryType.choices,
+        null=True,
+        blank=True,
+        verbose_name='Fuel delivery type',
+        help_text='Client-selected fuel for Fuel Delivery orders (gasoline or diesel).',
+    )
+    delivery_location = models.TextField(
+        blank=True,
+        default='',
+        verbose_name='Delivery location',
+        help_text='Towing: destination address where the vehicle should be delivered.',
+    )
+    delivery_latitude = models.DecimalField(
+        max_digits=22,
+        decimal_places=18,
+        null=True,
+        blank=True,
+        verbose_name='Delivery latitude',
+        help_text='Towing: destination GPS latitude.',
+    )
+    delivery_longitude = models.DecimalField(
+        max_digits=22,
+        decimal_places=18,
+        null=True,
+        blank=True,
+        verbose_name='Delivery longitude',
+        help_text='Towing: destination GPS longitude.',
+    )
+    towing_distance_miles = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name='Towing distance (miles)',
+        help_text='Distance used for towing price (pickup → delivery or client-provided miles).',
+    )
+    towing_base_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name='Towing base fee (snapshot)',
+    )
+    towing_price_per_mile = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name='Towing price per mile (snapshot)',
+    )
+    towing_minimum_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name='Towing minimum fee (snapshot)',
+    )
+    towing_total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name='Towing total (snapshot)',
+        help_text='Locked towing job price at order creation.',
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
@@ -378,6 +451,36 @@ class Order(models.Model):
         default='',
         verbose_name='Stripe last error',
     )
+    tip_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0.00,
+        verbose_name='Tip amount',
+        help_text='Optional gratuity left by the client after order completion.',
+    )
+    tip_declined = models.BooleanField(
+        default=False,
+        verbose_name='Tip declined',
+        help_text='Client chose "No Thanks" on the post-completion tip prompt.',
+    )
+    tip_stripe_payment_intent_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        verbose_name='Tip Stripe PaymentIntent id',
+    )
+    tip_stripe_payment_status = models.CharField(
+        max_length=32,
+        choices=OrderStripePaymentStatus.choices,
+        default=OrderStripePaymentStatus.NOT_APPLICABLE,
+        verbose_name='Tip Stripe payment status',
+    )
+    tip_paid_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Tip paid at',
+        help_text='When the tip charge succeeded.',
+    )
     completion_pin = models.CharField(
         max_length=4,
         blank=True,
@@ -523,6 +626,66 @@ class OrderExtraMoneyRequest(models.Model):
 
     def __str__(self):
         return f'ExtraMoneyRequest#{self.pk} order={self.order_id} amount={self.amount} status={self.status}'
+
+
+class TimeChangeRequestStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    APPROVED = 'approved', 'Approved'
+    REJECTED = 'rejected', 'Rejected'
+
+
+class OrderTimeChangeRequest(models.Model):
+    """
+    Master proposes a new service time; client approves before order schedule fields update.
+    """
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='time_change_requests',
+        verbose_name='Order',
+    )
+    master = models.ForeignKey(
+        'master.Master',
+        on_delete=models.CASCADE,
+        related_name='time_change_requests',
+        verbose_name='Master',
+    )
+    previous_preferred_date = models.DateField(null=True, blank=True, verbose_name='Previous date')
+    previous_preferred_time_start = models.TimeField(null=True, blank=True, verbose_name='Previous start')
+    previous_preferred_time_end = models.TimeField(null=True, blank=True, verbose_name='Previous end')
+    proposed_preferred_date = models.DateField(verbose_name='Proposed date')
+    proposed_preferred_time_start = models.TimeField(verbose_name='Proposed start')
+    proposed_preferred_time_end = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name='Proposed end',
+        help_text='Required for standard orders; optional for custom request.',
+    )
+    master_comment = models.TextField(blank=True, default='', verbose_name='Master comment')
+    status = models.CharField(
+        max_length=16,
+        choices=TimeChangeRequestStatus.choices,
+        default=TimeChangeRequestStatus.PENDING,
+        db_index=True,
+        verbose_name='Status',
+    )
+    client_comment = models.TextField(blank=True, default='', verbose_name='Client comment')
+    decided_at = models.DateTimeField(null=True, blank=True, verbose_name='Decided at')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
+
+    class Meta:
+        verbose_name = 'Order time change request'
+        verbose_name_plural = 'Order time change requests'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['order', 'status']),
+            models.Index(fields=['master', 'status']),
+        ]
+
+    def __str__(self):
+        return f'TimeChangeRequest#{self.pk} order={self.order_id} status={self.status}'
 
 
 class ServiceAddRequestStatus(models.TextChoices):
@@ -1024,6 +1187,14 @@ class OrderService(models.Model):
             'Master profile price changes must not alter past orders.'
         ),
     )
+    fuel_type = models.CharField(
+        max_length=16,
+        choices=FuelDeliveryType.choices,
+        null=True,
+        blank=True,
+        verbose_name='Fuel delivery type',
+        help_text='Client-selected fuel type for Fuel Delivery lines (gasoline or diesel).',
+    )
     created_at = models.DateTimeField(
         auto_now_add=True,
         verbose_name='Added at',
@@ -1143,4 +1314,28 @@ class CustomRequestOrder(Order):
     def save(self, *args, **kwargs):
         if not self.order_type:
             self.order_type = OrderType.CUSTOM_REQUEST
+        super().save(*args, **kwargs)
+
+
+class TowingOrderManager(models.Manager):
+    """Manager for towing orders (mile-based pricing)."""
+
+    def get_queryset(self):
+        return super().get_queryset().filter(order_type=OrderType.TOWING)
+
+
+class TowingOrder(Order):
+    """Proxy for towing orders (client picks master; price from mileage formula)."""
+
+    objects = TowingOrderManager()
+
+    class Meta:
+        proxy = True
+        verbose_name = 'Towing order'
+        verbose_name_plural = 'Towing orders'
+        ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        if not self.order_type:
+            self.order_type = OrderType.TOWING
         super().save(*args, **kwargs)

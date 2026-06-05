@@ -29,6 +29,22 @@ class Category(models.Model):
             'the public category catalog. Attach this main category to custom-request orders server-side.'
         ),
     )
+    is_towing_entry = models.BooleanField(
+        default=False,
+        verbose_name='Towing entry',
+        help_text=(
+            'If True: drivers see this as the client-only Towing entry; masters never see it in the '
+            'public category catalog. Attach this main category to towing orders server-side.'
+        ),
+    )
+    is_truck = models.BooleanField(
+        default=False,
+        verbose_name='Semi-truck service',
+        help_text=(
+            'If True: category is for Emergency Roadside / services for semi trucks only '
+            '(tire, jump start, fuel, lockout, repair, towing). Use is_truck=true in the API to list truck catalog.'
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
 

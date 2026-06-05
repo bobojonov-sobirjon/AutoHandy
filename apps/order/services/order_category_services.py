@@ -40,4 +40,11 @@ def sync_order_services_from_order_categories(order: 'Order') -> int:
     for item in items:
         get_or_create_order_service_locked(order=order, master_service_item=item)
         n += 1
+
+    fuel_type = getattr(order, 'fuel_delivery_type', None)
+    if fuel_type:
+        from apps.order.services.fuel_delivery_orders import apply_fuel_type_to_order_services
+
+        apply_fuel_type_to_order_services(order, fuel_type)
+
     return n

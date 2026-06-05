@@ -6,7 +6,15 @@ from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from django.db.models import Q
-from apps.master.models import Master, MasterBusySlot, MasterImage, MasterScheduleDay, MasterService, MasterServiceItems
+from apps.master.models import (
+    Master,
+    MasterBusySlot,
+    MasterImage,
+    MasterScheduleDay,
+    MasterService,
+    MasterServiceItems,
+    MasterTowingPricing,
+)
 from apps.master.api.serializers import (
     MasterSerializer, MasterCreateSerializer, MasterUpdateSerializer, MasterNearbySerializer,
     MasterServiceSerializer, MasterServiceItemsSerializer,
@@ -1471,7 +1479,11 @@ class AddServiceItemsView(APIView):
             item, _ = MasterServiceItems.objects.update_or_create(
                 master_service=master_service,
                 category_id=service_data['category'],
-                defaults={'price': service_data['price']},
+                defaults={
+                    'price': service_data['price'],
+                    'has_gas_container_2gal': bool(service_data.get('has_gas_container_2gal', False)),
+                    'has_diesel_container_2gal': bool(service_data.get('has_diesel_container_2gal', False)),
+                },
             )
             created_items.append(item)
         
@@ -2344,3 +2356,101 @@ class MasterServiceCardsView(APIView):
         # sort groups (most services first)
         out_groups.sort(key=lambda x: len(x['services']), reverse=True)
         return Response({'groups': out_groups}, status=status.HTTP_200_OK)
+
+
+class MasterTowingPricingView(APIView):
+    """Master towing tariff: base fee, price per mile, minimum total."""
+
+    permission_classes = [IsMasterGroup]
+
+    def _resolve_master(self, request, master_id=None):
+        if master_id in (None, ''):
+            qs = Master.objects.filter(user=request.user)
+            n = qs.count()
+            if n == 0:
+                return None, Response(
+                    {'error': 'Master profile not found.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            if n > 1:
+                return None, Response(
+                    {'error': 'Provide master_id query param: you have multiple master profiles.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            return qs.first(), None
+        try:
+            master = Master.objects.get(id=int(master_id), user=request.user)
+        except (ValueError, TypeError, Master.DoesNotExist):
+            return None, Response({'error': 'Master not found'}, status=status.HTTP_404_NOT_FOUND)
+        return master, None
+
+    @extend_schema(
+        summary='Get towing pricing',
+        description='Returns the towing mileage tariff for the authenticated master.',
+        tags=['Master Towing'],
+        parameters=[
+            OpenApiParameter(
+                name='master_id',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+            ),
+        ],
+        responses={200: {'type': 'object'}},
+    )
+    def get(self, request):
+        master, err = self._resolve_master(request, request.query_params.get('master_id'))
+        if err is not None:
+            return err
+        try:
+            pricing = master.towing_pricing
+        except MasterTowingPricing.DoesNotExist:
+            return Response(
+                {
+                    'configured': False,
+                    'master_id': master.id,
+                    'base_fee': '0.00',
+                    'price_per_mile': '0.00',
+                    'minimum_fee': '0.00',
+                    'is_active': False,
+                },
+                status=status.HTTP_200_OK,
+            )
+        from apps.master.api.serializers import MasterTowingPricingSerializer
+
+        data = MasterTowingPricingSerializer(pricing).data
+        data['configured'] = True
+        data['master_id'] = master.id
+        return Response(data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary='Set towing pricing',
+        description=(
+            'Upsert towing tariff for the master. Example: base_fee=80, price_per_mile=5, minimum_fee=100.'
+        ),
+        tags=['Master Towing'],
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'master_id': {'type': 'integer'},
+                    'base_fee': {'type': 'number', 'example': 80},
+                    'price_per_mile': {'type': 'number', 'example': 5},
+                    'minimum_fee': {'type': 'number', 'example': 100},
+                    'is_active': {'type': 'boolean', 'default': True},
+                },
+            }
+        },
+        responses={200: {'type': 'object'}},
+    )
+    def put(self, request):
+        from apps.master.api.serializers import MasterTowingPricingSerializer
+
+        serializer = MasterTowingPricingSerializer(data=request.data, context={'request': request})
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        pricing = serializer.save()
+        data = MasterTowingPricingSerializer(pricing).data
+        data['configured'] = True
+        data['master_id'] = pricing.master_id
+        return Response(data, status=status.HTTP_200_OK)

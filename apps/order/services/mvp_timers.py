@@ -44,7 +44,7 @@ def schedule_post_accept_timers(*, order_id: int, order_type: str, accepted_at: 
         _schedule_sos_no_departure_timers(order_id, accepted_at)
         return
 
-    if order_type == OrderType.STANDARD:
+    if order_type in (OrderType.STANDARD, OrderType.TOWING):
         try:
             from apps.order.models import Order
 
@@ -53,7 +53,7 @@ def schedule_post_accept_timers(*, order_id: int, order_type: str, accepted_at: 
             ).get(pk=order_id)
         except Exception:  # noqa: BLE001
             order = None
-        if order and order_has_scheduled_start(order):
+        if order_type == OrderType.STANDARD and order and order_has_scheduled_start(order):
             _schedule_standard_scheduled_timers(order_id, order)
             _schedule_standard_accept_no_on_the_way_notify(order_id, accepted_at)
             return
@@ -163,6 +163,6 @@ def no_departure_cutoff_minutes_for_order(order) -> int | None:
         return _sos_no_departure_action_minutes()
     if order.order_type == OrderType.STANDARD and order_has_scheduled_start(order):
         return None
-    if order.order_type in (OrderType.STANDARD, OrderType.CUSTOM_REQUEST):
+    if order.order_type in (OrderType.STANDARD, OrderType.CUSTOM_REQUEST, OrderType.TOWING):
         return _master_no_departure_minutes()
     return None
