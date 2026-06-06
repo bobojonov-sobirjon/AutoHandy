@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'daphne',
     'django.contrib.sites',
     'jazzmin',
+    'import_export',
     'nested_admin',
     'django.contrib.admin',
     'django.contrib.auth',
@@ -54,6 +55,7 @@ INSTALLED_APPS = [
     'django_filters',
     'channels',
     *LOCAL_APPS,
+    'config.apps.ProjectConfig',
 ]
 
 LOCAL_MIDDLEWARE = [
