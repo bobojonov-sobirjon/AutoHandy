@@ -193,27 +193,41 @@ SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
 }
 
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:8000",
-    "http://127.0.0.1:5173",
-    "http://31.128.43.149:6060",
-    "http://31.128.43.149",
-    "https://31.128.43.149:6060",
-    "https://31.128.43.149",
-]
+def _unique_origins(*groups: str) -> list[str]:
+    """Build deduplicated origin list (scheme + host, no trailing slash)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in groups:
+        for part in (raw or '').split(','):
+            origin = part.strip().rstrip('/')
+            if not origin or origin in seen:
+                continue
+            seen.add(origin)
+            out.append(origin)
+    return out
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:8000",
-    "http://127.0.0.1:5173",
-    "http://31.128.43.149:6060",
-    "http://31.128.43.149",
-    "https://31.128.43.149:6060",
-    "https://31.128.43.149",
-]
 
-CORS_ALLOW_ALL_ORIGINS = True
+_BASE_CORS_CSRF_ORIGINS = _unique_origins(
+    'http://localhost:3000',
+    'http://localhost:8000',
+    'http://localhost:8001',
+    'http://127.0.0.1:5173',
+    'http://31.128.43.149:6060',
+    'http://31.128.43.149',
+    'https://31.128.43.149:6060',
+    'https://31.128.43.149',
+    'https://api.autohandy.app',
+    'https://autohandy.app',
+    API_PUBLIC_BASE_URL,
+    os.getenv('CSRF_TRUSTED_ORIGINS', ''),
+    os.getenv('CORS_ALLOWED_ORIGINS', ''),
+)
+
+CSRF_TRUSTED_ORIGINS = _BASE_CORS_CSRF_ORIGINS
+
+CORS_ALLOWED_ORIGINS = _BASE_CORS_CSRF_ORIGINS
+
+CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'true').lower() in ('1', 'true', 'yes')
 CORS_ALLOW_CREDENTIALS = True
 CORS_EXPOSE_HEADERS = ['Content-Type', 'X-CSRFToken']
 
@@ -240,13 +254,18 @@ CORS_ALLOW_METHODS = [
     'PUT',
 ]
 
-CSRF_COOKIE_SECURE = False
+_USE_SECURE_COOKIES = (
+    API_PUBLIC_BASE_URL.startswith('https://')
+    or os.getenv('USE_SECURE_COOKIES', '').lower() in ('1', 'true', 'yes')
+)
+
+CSRF_COOKIE_SECURE = _USE_SECURE_COOKIES
 CSRF_COOKIE_HTTPONLY = False
 CSRF_COOKIE_SAMESITE = 'Lax'
 CSRF_USE_SESSIONS = False
 CSRF_COOKIE_NAME = 'csrftoken'
 
-SESSION_COOKIE_SECURE = False
+SESSION_COOKIE_SECURE = _USE_SECURE_COOKIES
 SESSION_COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_HTTPONLY = True
 
