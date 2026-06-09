@@ -5,7 +5,6 @@ SMS is sent via Twilio; if Twilio fails, code is still returned in response (whe
 import re
 import requests
 import random
-import logging
 from typing import Any, Dict, List, Optional
 from django.conf import settings
 from django.core.cache import cache
@@ -23,8 +22,6 @@ from .store_review import (
     is_store_review_otp,
     is_store_review_phone,
 )
-
-logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -92,7 +89,6 @@ class SMSService:
                 return {'success': True, 'message': 'SMS sent via Telegram'}
             return {'success': False, 'error': response.text}
         except Exception as e:
-            logger.error(f"Error sending Telegram SMS: {e}")
             return {'success': False, 'error': str(e)}
 
     @staticmethod
@@ -149,7 +145,6 @@ class SMSService:
             from twilio.base.exceptions import TwilioRestException
             client = Client(sid, token)
             message = client.messages.create(body=body, from_=from_number, to=to_formatted)
-            logger.info(f"Twilio SMS sent to {to_formatted} sid={message.sid}")
             return {
                 'success': True,
                 'message_sid': message.sid,
@@ -161,8 +156,6 @@ class SMSService:
                 },
             }
         except TwilioRestException as e:
-            # Twilio gives structured error details (useful for geo-permissions / invalid number / trial restrictions).
-            logger.warning(f"Twilio send failed: {e.status} {e.code} {e.msg}")
             return {
                 'success': False,
                 'error': str(e),
@@ -178,7 +171,6 @@ class SMSService:
                 },
             }
         except Exception as e:
-            logger.warning(f"Twilio send failed (unknown): {e}")
             return {
                 'success': False,
                 'error': str(e),
@@ -216,14 +208,12 @@ class SMSService:
                 fail_silently=False,
             )
             
-            logger.info(f"Email code {sms_code} sent to {email}")
             return {
                 'success': True,
                 'message': 'Код подтверждения отправлен на email'
             }
             
         except Exception as e:
-            logger.error(f"Failed to send email to {email}: {str(e)}")
             return {
                 'success': False,
                 'error': f'Failed to send email: {str(e)}'
@@ -311,7 +301,6 @@ class SMSService:
                 sms_sent = False
                 sms_error = None
                 sms_debug = {'store_review': True}
-                logger.info('Store review login: fixed OTP for %s (SMS not sent)', phone_number)
             else:
                 sms_code = str(random.randint(1000, 9999))
                 sms_sent = False
@@ -328,8 +317,6 @@ class SMSService:
                 sms_sent = twilio_result.get('success', False)
                 sms_error = twilio_result.get('error')
                 sms_debug = twilio_result.get('debug') or {}
-                if not sms_sent:
-                    logger.warning(f"Twilio send failed for {phone_number}: {sms_error}")
 
             cache_id = _phone_cache_id(identifier_type, identifier, phone_number if identifier_type == 'phone' else None)
 
@@ -410,7 +397,6 @@ class SMSService:
         except requests.exceptions.Timeout:
             return {'success': False, 'error': 'SMS service timeout', 'status_code': status.HTTP_408_REQUEST_TIMEOUT}
         except Exception as e:
-            logger.exception(e)
             return {'success': False, 'error': str(e), 'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR}
     
     @staticmethod
@@ -471,10 +457,8 @@ class SMSService:
                         if sms_code_obj.is_expired():
                             return {'success': False, 'error': 'SMS code expired', 'status_code': status.HTTP_400_BAD_REQUEST}
                         sms_code_obj.mark_as_used()
-                        logger.info(f"SMS code verified for {identifier}")
 
-                except Exception as e:
-                    logger.error(f"Error verifying SMS code: {str(e)}")
+                except Exception:
                     cache_key = f'sms_code_{identifier_type}_{cache_id}'
                     stored_code = cache.get(cache_key)
                     if (not stored_code or stored_code != sms_code) and identifier_type == 'phone':
@@ -482,8 +466,6 @@ class SMSService:
 
                     if not stored_code or stored_code != sms_code:
                         return {'success': False, 'error': 'Invalid SMS code', 'status_code': status.HTTP_400_BAD_REQUEST}
-            else:
-                logger.info('Store review OTP accepted for %s', phone_number)
 
             # Find or create user
             user_exists = cache.get(f'user_exists_{identifier_type}_{cache_id}', False)
@@ -515,9 +497,8 @@ class SMSService:
                             try:
                                 group = Group.objects.get(name=role)
                                 user.groups.add(group)
-                                logger.info(f"Added role {role} to existing user {user.email}")
                             except Group.DoesNotExist:
-                                logger.warning(f"Group {role} not found, skipping role assignment")
+                                pass
                 except User.DoesNotExist:
                     if identifier_type == 'phone':
                         user, created = User.objects.prefetch_related('groups').get_or_create(
@@ -536,7 +517,7 @@ class SMSService:
                                 group = Group.objects.get(name=role)
                                 user.groups.add(group)
                             except Group.DoesNotExist:
-                                logger.warning(f"Group {role} not found, skipping role assignment")
+                                pass
                     else:  # email
                         user, created = User.objects.prefetch_related('groups').get_or_create(
                             email=identifier,
@@ -554,7 +535,7 @@ class SMSService:
                                 group = Group.objects.get(name=role)
                                 user.groups.add(group)
                             except Group.DoesNotExist:
-                                logger.warning(f"Group {role} not found, skipping role assignment")
+                                pass
             else:
                 if identifier_type == 'phone':
                     user, created = User.objects.prefetch_related('groups').get_or_create(
@@ -573,7 +554,7 @@ class SMSService:
                             group = Group.objects.get(name=role)
                             user.groups.add(group)
                         except Group.DoesNotExist:
-                            logger.warning(f"Group {role} not found, skipping role assignment")
+                            pass
                 else:  # email
                     user, created = User.objects.prefetch_related('groups').get_or_create(
                         email=identifier,
@@ -591,7 +572,7 @@ class SMSService:
                             group = Group.objects.get(name=role)
                             user.groups.add(group)
                         except Group.DoesNotExist:
-                            logger.warning(f"Group {role} not found, skipping role assignment")
+                            pass
             
             # Phone sign-up: never keep placeholder name/email (safety net after create).
             if identifier_type == 'phone' and created:
@@ -639,21 +620,7 @@ def upsert_user_device_for_login(user, device_token: str, device_type: str) -> N
     token = (device_token or '').strip()
     dtype = (device_type or '').strip()
     if not token:
-        logger.warning(
-            'UserDevice upsert skipped: empty token (user_id=%s device_type=%s)',
-            getattr(user, 'id', None),
-            dtype or None,
-        )
         return
-
-    # Do not log full token (sensitive); prefix + length is enough for debugging.
-    logger.warning(
-        'UserDevice upsert (user_id=%s device_type=%s token_len=%s token_prefix=%s)',
-        getattr(user, 'id', None),
-        dtype or None,
-        len(token),
-        token[:12] + '…' if len(token) > 12 else token,
-    )
 
     UserDevice.objects.update_or_create(
         device_token=token,
