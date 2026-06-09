@@ -183,6 +183,23 @@ class SMSService:
             }
     
     @staticmethod
+    def queue_login_email_code(email: str, sms_code: str) -> bool:
+        """Send login OTP email without blocking the HTTP request (SMTP can be slow)."""
+        import threading
+
+        def _dispatch() -> None:
+            try:
+                from apps.accounts.tasks import send_login_email_code_task
+
+                # Run in a worker thread so CELERY_TASK_ALWAYS_EAGER cannot block login.
+                send_login_email_code_task.apply(args=[email, sms_code])
+            except Exception:
+                SMSService.send_email_code(email, sms_code)
+
+        threading.Thread(target=_dispatch, daemon=True).start()
+        return True
+
+    @staticmethod
     def send_email_code(email: str, sms_code: str) -> dict:
         """
         Отправка кода подтверждения на email
@@ -307,17 +324,6 @@ class SMSService:
                 sms_error = None
                 sms_debug = {}
 
-            if identifier_type == 'email':
-                email_result = SMSService.send_email_code(identifier, sms_code)
-                if not email_result['success']:
-                    return {'success': False, 'error': email_result['error'], 'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR}
-                sms_sent = True
-            elif not store_review:
-                twilio_result = SMSService.send_sms_via_twilio(phone_number, f'Verification code to log in to the Autohandy mobile app: {sms_code}. This code will expire in 5 minutes. Do not share this code with anyone.')
-                sms_sent = twilio_result.get('success', False)
-                sms_error = twilio_result.get('error')
-                sms_debug = twilio_result.get('debug') or {}
-
             cache_id = _phone_cache_id(identifier_type, identifier, phone_number if identifier_type == 'phone' else None)
 
             if identifier_type == 'phone':
@@ -358,9 +364,22 @@ class SMSService:
             if role:
                 cache.set(f'user_role_{identifier_type}_{cache_id}', role, timeout=300)
 
+            if identifier_type == 'email':
+                sms_sent = SMSService.queue_login_email_code(identifier, sms_code)
+                if not sms_sent:
+                    sms_error = 'Email delivery failed or timed out'
+            elif not store_review:
+                twilio_result = SMSService.send_sms_via_twilio(phone_number, f'Verification code to log in to the Autohandy mobile app: {sms_code}. This code will expire in 5 minutes. Do not share this code with anyone.')
+                sms_sent = twilio_result.get('success', False)
+                sms_error = twilio_result.get('error')
+                sms_debug = twilio_result.get('debug') or {}
+
             send_code_in_response = getattr(settings, 'SMS_SEND_CODE_IN_RESPONSE_IF_FAIL', True)
             if identifier_type == 'email':
-                message = 'Verification code sent to email'
+                message = 'Verification code sent to email' if sms_sent else (
+                    'Code generated; email could not be sent. Use the code below.'
+                    if send_code_in_response else 'Email send failed'
+                )
             elif sms_sent:
                 message = 'SMS code sent'
             else:
