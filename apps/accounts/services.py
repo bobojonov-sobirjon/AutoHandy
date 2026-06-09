@@ -212,12 +212,9 @@ class SMSService:
             dict: Результат отправки
         """
         try:
-            subject = 'Your AutoHandy login code'
-            message = (
-                f'Your verification code: {sms_code}\n\n'
-                'Enter this code in the app to sign in. '
-                'It expires in 5 minutes. Do not share this code with anyone.'
-            )
+            from .email_templates import build_login_code_email
+
+            subject, message, html_message = build_login_code_email(sms_code, expires_minutes=5)
             from_email = settings.DEFAULT_FROM_EMAIL
             recipient_list = [email]
             
@@ -226,6 +223,7 @@ class SMSService:
                 message=message,
                 from_email=from_email,
                 recipient_list=recipient_list,
+                html_message=html_message,
                 fail_silently=False,
             )
             

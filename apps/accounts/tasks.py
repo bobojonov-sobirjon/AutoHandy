@@ -13,4 +13,6 @@ def send_login_email_code_task(email: str, sms_code: str) -> None:
     """Send login OTP email in the background so /api/auth/login/ returns immediately."""
     from apps.accounts.services import SMSService
 
-    SMSService.send_email_code(email, sms_code)
+    result = SMSService.send_email_code(email, sms_code)
+    if not result.get('success'):
+        raise RuntimeError(result.get('error') or 'Failed to send login email')
