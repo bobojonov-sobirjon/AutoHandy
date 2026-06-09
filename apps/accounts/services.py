@@ -212,8 +212,12 @@ class SMSService:
             dict: Результат отправки
         """
         try:
-            subject = 'Код подтверждения AutoHandy'
-            message = f'Ваш код подтверждения: {sms_code}'
+            subject = 'Your AutoHandy login code'
+            message = (
+                f'Your verification code: {sms_code}\n\n'
+                'Enter this code in the app to sign in. '
+                'It expires in 5 minutes. Do not share this code with anyone.'
+            )
             from_email = settings.DEFAULT_FROM_EMAIL
             recipient_list = [email]
             

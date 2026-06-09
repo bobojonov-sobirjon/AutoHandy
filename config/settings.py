@@ -348,7 +348,20 @@ JAZZMIN_UI_TWEAKS = {
     },
 }
 
-EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_PROVIDER = os.environ.get('EMAIL_PROVIDER', '').strip().lower()
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '').strip()
+SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '').strip()
+if not EMAIL_PROVIDER:
+    EMAIL_PROVIDER = 'resend' if RESEND_API_KEY else 'smtp'
+
+if os.environ.get('EMAIL_BACKEND'):
+    EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND')
+elif EMAIL_PROVIDER == 'resend':
+    EMAIL_BACKEND = 'config.email_backend.ResendEmailBackend'
+elif EMAIL_PROVIDER == 'sendgrid':
+    EMAIL_BACKEND = 'config.email_backend.SendGridEmailBackend'
+else:
+    EMAIL_BACKEND = 'config.email_backend.IPv4EmailBackend'
 EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
 EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() in ('1', 'true', 'yes')
