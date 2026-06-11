@@ -1,10 +1,11 @@
-"""Towing mileage pricing: base fee + per-mile rate + minimum total."""
+"""Towing mileage pricing: local vs long-distance tariffs."""
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from django.conf import settings
+from django.db.models import Q
 
 from apps.master.models import Master, MasterTowingPricing
 from apps.master.services.geo import MILES_TO_KM, haversine_distance_km, km_to_miles
@@ -12,6 +13,25 @@ from apps.master.services.geo import MILES_TO_KM, haversine_distance_km, km_to_m
 
 def _q(x: Any) -> Decimal:
     return Decimal(str(x)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+
+def resolve_towing_local_max_miles(local_max_miles: Decimal | float | None = None) -> Decimal:
+    if local_max_miles is not None and Decimal(str(local_max_miles)) > 0:
+        return _q(local_max_miles)
+    return _q(getattr(settings, 'TOWING_LOCAL_MAX_MILES', 50))
+
+
+def resolve_towing_trip_type(
+    distance_miles: Decimal | float,
+    *,
+    local_max_miles: Decimal | float | None = None,
+) -> str:
+    """Classify trip as local or long_distance by distance threshold."""
+    miles = _q(distance_miles)
+    threshold = resolve_towing_local_max_miles(local_max_miles)
+    if miles <= threshold:
+        return MasterTowingPricing.TRIP_LOCAL
+    return MasterTowingPricing.TRIP_LONG_DISTANCE
 
 
 def resolve_towing_distance_miles(
@@ -47,6 +67,7 @@ def calculate_towing_price(
     price_per_mile: Decimal,
     minimum_fee: Decimal,
     distance_miles: Decimal,
+    trip_type: str | None = None,
 ) -> dict[str, str]:
     """Return breakdown with string decimals for API responses."""
     base = _q(base_fee)
@@ -56,7 +77,7 @@ def calculate_towing_price(
     mileage_charge = _q(miles * rate)
     calculated = _q(base + mileage_charge)
     total = calculated if calculated >= minimum else minimum
-    return {
+    payload = {
         'distance_miles': format(miles, 'f'),
         'base_fee': format(base, 'f'),
         'price_per_mile': format(rate, 'f'),
@@ -65,6 +86,24 @@ def calculate_towing_price(
         'calculated_total': format(calculated, 'f'),
         'total_price': format(total, 'f'),
     }
+    if trip_type:
+        payload['trip_type'] = trip_type
+    return payload
+
+
+def calculate_towing_price_for_pricing(
+    pricing: MasterTowingPricing,
+    distance_miles: Decimal,
+) -> dict[str, str]:
+    """Pick local/long tariff from master pricing and return price breakdown."""
+    trip_type, base_fee, price_per_mile = pricing.rates_for_distance(distance_miles)
+    return calculate_towing_price(
+        base_fee=base_fee,
+        price_per_mile=price_per_mile,
+        minimum_fee=pricing.minimum_fee,
+        distance_miles=distance_miles,
+        trip_type=trip_type,
+    )
 
 
 def master_ids_within_towing_radius(
@@ -82,7 +121,17 @@ def master_ids_within_towing_radius(
     limit_km = miles * MILES_TO_KM
 
     priced_master_ids = set(
-        MasterTowingPricing.objects.filter(is_active=True, base_fee__gt=0)
+        MasterTowingPricing.objects.filter(
+            is_active=True,
+        )
+        .filter(
+            Q(local_base_fee__gt=0)
+            | Q(local_price_per_mile__gt=0)
+            | Q(long_distance_base_fee__gt=0)
+            | Q(long_distance_price_per_mile__gt=0)
+            | Q(base_fee__gt=0)
+            | Q(price_per_mile__gt=0)
+        )
         .values_list('master_id', flat=True)
     )
     if not priced_master_ids:
@@ -126,6 +175,7 @@ def build_towing_estimates_for_masters(
         delivery_lon=delivery_lon,
         distance_miles=distance_miles,
     )
+    trip_type = resolve_towing_trip_type(miles)
 
     master_ids = master_ids_within_towing_radius(pickup_lat, pickup_lon, radius_miles=radius_miles)
     pricing_map = {
@@ -142,14 +192,9 @@ def build_towing_estimates_for_masters(
     results: list[dict[str, Any]] = []
     for master in masters:
         pricing = pricing_map.get(master.id)
-        if not pricing:
+        if not pricing or not pricing.has_configured_rates():
             continue
-        breakdown = calculate_towing_price(
-            base_fee=pricing.base_fee,
-            price_per_mile=pricing.price_per_mile,
-            minimum_fee=pricing.minimum_fee,
-            distance_miles=miles,
-        )
+        breakdown = calculate_towing_price_for_pricing(pricing, miles)
         wlat, wlon = master.get_work_location_for_distance()
         distance_to_pickup_mi = None
         if wlat is not None:
@@ -175,6 +220,8 @@ def build_towing_estimates_for_masters(
 
     return {
         'distance_miles': format(miles, 'f'),
+        'trip_type': trip_type,
+        'local_max_miles': format(resolve_towing_local_max_miles(), 'f'),
         'master_count': len(results),
         'masters': results,
     }

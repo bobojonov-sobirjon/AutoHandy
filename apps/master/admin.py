@@ -148,6 +148,15 @@ class MasterAdmin(NestedModelAdmin):
 
 @admin.register(MasterTowingPricing)
 class MasterTowingPricingAdmin(admin.ModelAdmin):
-    list_display = ('master', 'base_fee', 'price_per_mile', 'minimum_fee', 'is_active', 'updated_at')
+    list_display = (
+        'master',
+        'local_base_fee',
+        'local_price_per_mile',
+        'long_distance_base_fee',
+        'long_distance_price_per_mile',
+        'minimum_fee',
+        'is_active',
+        'updated_at',
+    )
     list_filter = ('is_active',)
     search_fields = ('master__user__username', 'master__user__email')

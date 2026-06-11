@@ -83,7 +83,11 @@ class MasterProfileView(APIView):
         # Если пользователь авторизован, показываем его профили
         if request.user and request.user.is_authenticated:
             masters = self.get_object()
-            serializer = MasterSerializer(masters, many=True, context={'request': request})
+            serializer = MasterSerializer(
+                masters,
+                many=True,
+                context={'request': request, 'include_towing_pricing': True},
+            )
             return Response(serializer.data, status=status.HTTP_200_OK)
         else:
             # Для неавторизованных пользователей возвращаем пустой список
@@ -520,12 +524,15 @@ class MasterDetailsView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        hide = not (
-            request.user.is_authenticated and master.user_id == request.user.id
-        )
+        is_owner = request.user.is_authenticated and master.user_id == request.user.id
+        hide = not is_owner
         serializer = MasterSerializer(
             master,
-            context={'request': request, 'hide_master_exact_location': hide},
+            context={
+                'request': request,
+                'hide_master_exact_location': hide,
+                'include_towing_pricing': is_owner,
+            },
         )
         return Response(serializer.data, status=status.HTTP_200_OK)
     
@@ -2081,7 +2088,9 @@ class MasterBusySlotListCreateView(APIView):
                     {'error': 'Invalid date format. Use YYYY-MM-DD (e.g. 2026-04-06)'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            payload, err_msg = build_master_day_slots_payload(master, check_date)
+            payload, err_msg = build_master_day_slots_payload(
+                master, check_date, request=request
+            )
             if err_msg:
                 return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
             return Response(payload)
@@ -2405,28 +2414,26 @@ class MasterTowingPricingView(APIView):
         try:
             pricing = master.towing_pricing
         except MasterTowingPricing.DoesNotExist:
+            from apps.master.api.serializers import serialize_master_towing_pricing
+
             return Response(
-                {
-                    'configured': False,
-                    'master_id': master.id,
-                    'base_fee': '0.00',
-                    'price_per_mile': '0.00',
-                    'minimum_fee': '0.00',
-                    'is_active': False,
-                },
+                serialize_master_towing_pricing(None, master_id=master.id),
                 status=status.HTTP_200_OK,
             )
-        from apps.master.api.serializers import MasterTowingPricingSerializer
+        from apps.master.api.serializers import serialize_master_towing_pricing
 
-        data = MasterTowingPricingSerializer(pricing).data
-        data['configured'] = True
-        data['master_id'] = master.id
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(
+            serialize_master_towing_pricing(pricing, master_id=master.id),
+            status=status.HTTP_200_OK,
+        )
 
     @extend_schema(
         summary='Set towing pricing',
         description=(
-            'Upsert towing tariff for the master. Example: base_fee=80, price_per_mile=5, minimum_fee=100.'
+            'Upsert local and long-distance towing tariffs for the master. '
+            'Trips up to `local_max_miles` (or global TOWING_LOCAL_MAX_MILES) use local rates; '
+            'longer trips use long-distance rates. '
+            'Legacy `base_fee` / `price_per_mile` map to local tariff.'
         ),
         tags=['Master Towing'],
         request={
@@ -2434,8 +2441,11 @@ class MasterTowingPricingView(APIView):
                 'type': 'object',
                 'properties': {
                     'master_id': {'type': 'integer'},
-                    'base_fee': {'type': 'number', 'example': 80},
-                    'price_per_mile': {'type': 'number', 'example': 5},
+                    'local_base_fee': {'type': 'number', 'example': 80},
+                    'local_price_per_mile': {'type': 'number', 'example': 5},
+                    'long_distance_base_fee': {'type': 'number', 'example': 120},
+                    'long_distance_price_per_mile': {'type': 'number', 'example': 4},
+                    'local_max_miles': {'type': 'number', 'example': 50},
                     'minimum_fee': {'type': 'number', 'example': 100},
                     'is_active': {'type': 'boolean', 'default': True},
                 },
@@ -2450,7 +2460,9 @@ class MasterTowingPricingView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         pricing = serializer.save()
-        data = MasterTowingPricingSerializer(pricing).data
-        data['configured'] = True
-        data['master_id'] = pricing.master_id
-        return Response(data, status=status.HTTP_200_OK)
+        from apps.master.api.serializers import serialize_master_towing_pricing
+
+        return Response(
+            serialize_master_towing_pricing(pricing, master_id=pricing.master_id),
+            status=status.HTTP_200_OK,
+        )

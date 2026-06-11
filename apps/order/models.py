@@ -267,6 +267,13 @@ class Order(models.Model):
         verbose_name='Towing total (snapshot)',
         help_text='Locked towing job price at order creation.',
     )
+    towing_trip_type = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        verbose_name='Towing trip type (snapshot)',
+        help_text='local or long_distance — tariff used when the order was created.',
+    )
     created_at = models.DateTimeField(
         auto_now_add=True,
         verbose_name='Created at',

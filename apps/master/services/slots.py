@@ -332,11 +332,25 @@ def _accepted_standard_order_busy_blocks(
     return blocks
 
 
+def _master_display_name_for_slots(master, request=None) -> str:
+    from apps.accounts.display_name import (
+        masked_master_full_name,
+        should_mask_master_name_for_request,
+    )
+
+    user = master.user
+    fallback = user.get_full_name() or user.phone_number or ''
+    if should_mask_master_name_for_request(request, master.user_id):
+        return masked_master_full_name(user, fallback=fallback)
+    return fallback
+
+
 def build_master_day_slots_payload(
     master,
     check_date: date,
     *,
     busy_date_only: bool = False,
+    request=None,
 ) -> tuple[dict | None, str | None]:
     """
     One-day calendar: working_hours, break_data, slots with availability.
@@ -410,7 +424,7 @@ def build_master_day_slots_payload(
                     f'{day_row.start_time.strftime("%H:%M")}-{day_row.end_time.strftime("%H:%M")}'
                 )
             elif not busy_all:
-                master_name = master.user.get_full_name() or master.user.phone_number
+                master_name = _master_display_name_for_slots(master, request)
                 return (
                     {
                         'date': check_date.isoformat(),
@@ -463,7 +477,7 @@ def build_master_day_slots_payload(
         {
             'date': check_date.isoformat(),
             'master_id': master.id,
-            'master_name': master.user.get_full_name() or master.user.phone_number,
+            'master_name': _master_display_name_for_slots(master, request),
             'working_hours': working_hours_display,
             'schedule_source': schedule_source,
             'busy_slot_id': schedule_busy_slot_id,

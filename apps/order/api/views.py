@@ -1139,6 +1139,7 @@ class TowingEstimateView(APIView):
         description=(
             'Returns nearby masters with towing pricing and calculated totals. '
             'Send pickup coordinates plus delivery coordinates **or** `distance_miles`. '
+            'Picks local or long-distance tariff by distance (see `trip_type` in response). '
             'Formula: `total = max(base_fee + distance_miles × price_per_mile, minimum_fee)`.'
         ),
         tags=[STAG_ORDER_DRIVER_CREATE],
@@ -1335,7 +1336,14 @@ class CustomRequestOfferListCreateView(APIView):
         try:
             from apps.order.services.notifications import notify_user_order_kind
 
-            master_name = (getattr(master, 'user', None).get_full_name() if getattr(master, 'user', None) else '')  # type: ignore[union-attr]
+            from apps.accounts.display_name import masked_master_full_name
+
+            master_user = getattr(master, 'user', None)
+            master_name = (
+                masked_master_full_name(master_user)
+                if master_user is not None
+                else ''
+            )
             master_name = (master_name or '').strip()
             notify_user_order_kind(
                 order,
@@ -1481,7 +1489,9 @@ unavailable row when only one order maps to it; merged busy spans omit it.
 
         from apps.master.services.slots import build_master_day_slots_payload
 
-        payload, err_msg = build_master_day_slots_payload(master, check_date)
+        payload, err_msg = build_master_day_slots_payload(
+            master, check_date, request=request
+        )
         if err_msg:
             return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
         return Response(payload)

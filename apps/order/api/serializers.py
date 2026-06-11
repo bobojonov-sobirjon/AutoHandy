@@ -431,6 +431,7 @@ class OrderSerializer(serializers.ModelSerializer):
                 if obj.towing_total is not None
                 else None
             ),
+            'trip_type': obj.towing_trip_type,
         }
 
     def get_fuel_delivery_type_display(self, obj):
@@ -1383,7 +1384,7 @@ class TowingCreateSerializer(serializers.Serializer):
     def validate(self, attrs):
         from apps.master.models import MasterTowingPricing
         from apps.order.services.towing_pricing import (
-            calculate_towing_price,
+            calculate_towing_price_for_pricing,
             resolve_towing_distance_miles,
         )
 
@@ -1436,15 +1437,11 @@ class TowingCreateSerializer(serializers.Serializer):
         except ValueError as exc:
             raise serializers.ValidationError(str(exc)) from exc
 
-        breakdown = calculate_towing_price(
-            base_fee=pricing.base_fee,
-            price_per_mile=pricing.price_per_mile,
-            minimum_fee=pricing.minimum_fee,
-            distance_miles=distance_miles,
-        )
+        breakdown = calculate_towing_price_for_pricing(pricing, distance_miles)
         attrs['_pricing'] = pricing
         attrs['_distance_miles'] = distance_miles
         attrs['_breakdown'] = breakdown
+        attrs['_trip_type'] = breakdown.get('trip_type')
         return attrs
 
     def create(self, validated_data):
@@ -1453,6 +1450,7 @@ class TowingCreateSerializer(serializers.Serializer):
         pricing = validated_data.pop('_pricing')
         distance_miles = validated_data.pop('_distance_miles')
         breakdown = validated_data.pop('_breakdown')
+        trip_type = validated_data.pop('_trip_type', None)
         master_id = validated_data.pop('master_id')
         car_list = validated_data.pop('car_list', [])
         text = (validated_data.pop('text', None) or 'Towing service').strip() or 'Towing service'
@@ -1479,9 +1477,10 @@ class TowingCreateSerializer(serializers.Serializer):
             delivery_latitude=validated_data.get('delivery_latitude'),
             delivery_longitude=validated_data.get('delivery_longitude'),
             towing_distance_miles=distance_miles,
-            towing_base_fee=pricing.base_fee,
-            towing_price_per_mile=pricing.price_per_mile,
+            towing_base_fee=Decimal(breakdown['base_fee']),
+            towing_price_per_mile=Decimal(breakdown['price_per_mile']),
             towing_minimum_fee=pricing.minimum_fee,
+            towing_trip_type=trip_type,
             towing_total=Decimal(breakdown['total_price']),
             average_price=Decimal(breakdown['total_price']),
             average_service_name='Towing',
@@ -1791,24 +1790,13 @@ class OrderExtraMoneyRequestSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_master(self, obj):
+        from apps.accounts.display_name import build_compact_master_user_payload
+
         m = getattr(obj, 'master', None)
         if not m:
             return None
-        u = getattr(m, 'user', None)
-        full_name = None
-        avatar = None
-        if u is not None:
-            try:
-                full_name = u.get_full_name() or getattr(u, 'email', None) or getattr(u, 'phone_number', None)
-            except Exception:  # noqa: BLE001
-                full_name = getattr(u, 'email', None) or getattr(u, 'phone_number', None)
-            avatar = _media_url(self.context.get('request') if isinstance(self.context, dict) else None, getattr(u, 'avatar', None))
-        return {
-            'id': getattr(m, 'id', None),
-            'user_id': getattr(m, 'user_id', None),
-            'full_name': full_name,
-            'avatar': avatar,
-        }
+        request = self.context.get('request') if isinstance(self.context, dict) else None
+        return build_compact_master_user_payload(m, request, media_url_fn=_media_url)
 
     def get_order(self, obj):
         o = getattr(obj, 'order', None)
@@ -1891,24 +1879,13 @@ class OrderTimeChangeRequestSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_master(self, obj):
+        from apps.accounts.display_name import build_compact_master_user_payload
+
         m = getattr(obj, 'master', None)
         if not m:
             return None
-        u = getattr(m, 'user', None)
-        full_name = None
-        avatar = None
-        if u is not None:
-            try:
-                full_name = u.get_full_name() or getattr(u, 'email', None) or getattr(u, 'phone_number', None)
-            except Exception:  # noqa: BLE001
-                full_name = getattr(u, 'email', None) or getattr(u, 'phone_number', None)
-            avatar = _media_url(self.context.get('request') if isinstance(self.context, dict) else None, getattr(u, 'avatar', None))
-        return {
-            'id': getattr(m, 'id', None),
-            'user_id': getattr(m, 'user_id', None),
-            'full_name': full_name,
-            'avatar': avatar,
-        }
+        request = self.context.get('request') if isinstance(self.context, dict) else None
+        return build_compact_master_user_payload(m, request, media_url_fn=_media_url)
 
     def get_order(self, obj):
         o = getattr(obj, 'order', None)
@@ -1971,24 +1948,13 @@ class OrderServiceAddRequestSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_master(self, obj):
+        from apps.accounts.display_name import build_compact_master_user_payload
+
         m = getattr(obj, 'master', None)
         if not m:
             return None
-        u = getattr(m, 'user', None)
-        full_name = None
-        avatar = None
-        if u is not None:
-            try:
-                full_name = u.get_full_name() or getattr(u, 'email', None) or getattr(u, 'phone_number', None)
-            except Exception:  # noqa: BLE001
-                full_name = getattr(u, 'email', None) or getattr(u, 'phone_number', None)
-            avatar = _media_url(self.context.get('request') if isinstance(self.context, dict) else None, getattr(u, 'avatar', None))
-        return {
-            'id': getattr(m, 'id', None),
-            'user_id': getattr(m, 'user_id', None),
-            'full_name': full_name,
-            'avatar': avatar,
-        }
+        request = self.context.get('request') if isinstance(self.context, dict) else None
+        return build_compact_master_user_payload(m, request, media_url_fn=_media_url)
 
     def get_order(self, obj):
         o = getattr(obj, 'order', None)
