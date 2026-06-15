@@ -1,5 +1,4 @@
 from django.db import migrations, models
-import django.core.validators
 import django.db.models.deletion
 
 
@@ -53,6 +52,8 @@ def split_towing_pricing_by_service_type(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
+    # PostgreSQL: data migration must commit before ALTER TABLE / DROP COLUMN.
+    atomic = False
 
     dependencies = [
         ('master', '0035_master_towing_local_long_distance'),
@@ -86,69 +87,4 @@ class Migration(migrations.Migration):
             ),
         ),
         migrations.RunPython(split_towing_pricing_by_service_type, migrations.RunPython.noop),
-        migrations.RemoveField(model_name='mastertowingpricing', name='local_base_fee'),
-        migrations.RemoveField(model_name='mastertowingpricing', name='local_price_per_mile'),
-        migrations.RemoveField(model_name='mastertowingpricing', name='long_distance_base_fee'),
-        migrations.RemoveField(model_name='mastertowingpricing', name='long_distance_price_per_mile'),
-        migrations.RemoveField(model_name='mastertowingpricing', name='local_max_miles'),
-        migrations.AlterField(
-            model_name='mastertowingpricing',
-            name='base_fee',
-            field=models.DecimalField(
-                decimal_places=2,
-                default=0,
-                help_text='Flat fee for this towing service type (e.g. $80).',
-                max_digits=10,
-                validators=[django.core.validators.MinValueValidator(0)],
-                verbose_name='Base fee',
-            ),
-        ),
-        migrations.AlterField(
-            model_name='mastertowingpricing',
-            name='minimum_fee',
-            field=models.DecimalField(
-                decimal_places=2,
-                default=0,
-                help_text='Final price for this service type will not be lower than this amount.',
-                max_digits=10,
-                validators=[django.core.validators.MinValueValidator(0)],
-                verbose_name='Minimum total',
-            ),
-        ),
-        migrations.AlterField(
-            model_name='mastertowingpricing',
-            name='price_per_mile',
-            field=models.DecimalField(
-                decimal_places=2,
-                default=0,
-                help_text='Additional charge per mile (e.g. $5).',
-                max_digits=10,
-                validators=[django.core.validators.MinValueValidator(0)],
-                verbose_name='Price per mile',
-            ),
-        ),
-        migrations.AlterField(
-            model_name='mastertowingpricing',
-            name='is_active',
-            field=models.BooleanField(
-                default=True,
-                help_text='When false, master is hidden from estimates for this service type.',
-                verbose_name='Active',
-            ),
-        ),
-        migrations.AddConstraint(
-            model_name='mastertowingpricing',
-            constraint=models.UniqueConstraint(
-                fields=('master', 'service_type'),
-                name='master_towing_pricing_master_service_type_uniq',
-            ),
-        ),
-        migrations.AlterModelOptions(
-            name='mastertowingpricing',
-            options={
-                'ordering': ['master_id', 'service_type'],
-                'verbose_name': 'Master towing pricing',
-                'verbose_name_plural': 'Master towing pricing',
-            },
-        ),
     ]
