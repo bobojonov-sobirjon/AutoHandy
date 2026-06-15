@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from apps.categories.models import Category
 from apps.categories.serializers import CategorySerializer
+from apps.categories.services.home_screen_order import order_categories_for_display
 from rest_framework.permissions import AllowAny
 from drf_spectacular.utils import extend_schema, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
@@ -53,6 +54,8 @@ class CategoryListAPIView(APIView):
         - `type` — `by_car` or `by_order`
         - `is_truck` — `true` for **Emergency Roadside for Semi Trucks** catalog only; default hides truck categories
 
+        **Sorting:** results are ordered by `sort_order` ascending (home screen order), then name.
+
         **Examples:**
         - `/api/categories/categories/?type=by_order` — car/service main categories
         - `/api/categories/categories/?type=by_order&is_truck=true` — semi-truck roadside main category
@@ -95,7 +98,7 @@ class CategoryListAPIView(APIView):
 
         categories = _exclude_custom_request_catalog(categories, request)
         categories = _apply_truck_catalog_filter(categories, request)
-        categories = categories.order_by('-created_at')
+        categories = order_categories_for_display(categories)
         serializer = CategorySerializer(categories, many=True, context={'request': request})
         return Response(serializer.data)
 
@@ -170,6 +173,6 @@ class SubCategoryListAPIView(APIView):
             subs = subs.filter(is_truck=True)
         else:
             subs = subs.filter(is_truck=False)
-        subs = subs.order_by('-created_at')
+        subs = order_categories_for_display(subs)
         serializer = CategorySerializer(subs, many=True, context={'request': request})
         return Response(serializer.data)

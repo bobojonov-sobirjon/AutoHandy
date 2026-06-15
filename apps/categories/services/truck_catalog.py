@@ -1,9 +1,12 @@
 """Semi-truck Emergency Roadside category helpers."""
 from __future__ import annotations
 
+from django.db.models import Q
+
 from apps.categories.models import Category
 
-TRUCK_ROADSIDE_MAIN_NAME = 'Emergency Roadside for Semi Trucks'
+TRUCK_ROADSIDE_MAIN_NAME = 'Roadside Semi Truck'
+TRUCK_ROADSIDE_MAIN_LEGACY_NAME = 'Emergency Roadside for Semi Trucks'
 
 
 def get_truck_roadside_main_category() -> Category | None:
@@ -12,8 +15,8 @@ def get_truck_roadside_main_category() -> Category | None:
             is_truck=True,
             parent__isnull=True,
             type_category=Category.TypeCategory.BY_ORDER,
-            name=TRUCK_ROADSIDE_MAIN_NAME,
         )
+        .filter(Q(name=TRUCK_ROADSIDE_MAIN_NAME) | Q(name=TRUCK_ROADSIDE_MAIN_LEGACY_NAME))
         .order_by('id')
         .first()
     )

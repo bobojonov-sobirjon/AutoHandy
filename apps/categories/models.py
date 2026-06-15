@@ -45,6 +45,13 @@ class Category(models.Model):
             '(tire, jump start, fuel, lockout, repair, towing). Use is_truck=true in the API to list truck catalog.'
         ),
     )
+    sort_order = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        db_index=True,
+        verbose_name='Display order',
+        help_text='Lower numbers appear first on the home screen. Leave empty to sort after numbered items.',
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
 
@@ -55,7 +62,7 @@ class Category(models.Model):
     class Meta:
         verbose_name = 'Category'
         verbose_name_plural = 'Categories'
-        ordering = ['-created_at']
+        ordering = ['name']
 
     def __str__(self):
         return self.name

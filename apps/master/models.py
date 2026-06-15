@@ -3,6 +3,8 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 
+from apps.master.towing_types import TowingServiceType
+
 User = get_user_model()
 
 
@@ -358,78 +360,34 @@ class MasterBusySlot(models.Model):
 
 
 class MasterTowingPricing(models.Model):
-    """Per-master towing tariffs: local vs long-distance base fee + per-mile rate."""
+    """Per-master, per-service-type towing tariff: base fee + per mile + minimum."""
 
-    TRIP_LOCAL = 'local'
-    TRIP_LONG_DISTANCE = 'long_distance'
-    TRIP_TYPE_CHOICES = [
-        (TRIP_LOCAL, 'Local'),
-        (TRIP_LONG_DISTANCE, 'Long distance'),
-    ]
-
-    master = models.OneToOneField(
+    master = models.ForeignKey(
         Master,
         on_delete=models.CASCADE,
-        related_name='towing_pricing',
+        related_name='towing_pricing_items',
         verbose_name='Master',
     )
-    local_base_fee = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0,
-        validators=[MinValueValidator(0)],
-        verbose_name='Local base fee',
-        help_text='Flat fee for local towing (e.g. $80).',
-    )
-    local_price_per_mile = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0,
-        validators=[MinValueValidator(0)],
-        verbose_name='Local price per mile',
-        help_text='Per-mile rate for local towing (e.g. $5).',
-    )
-    long_distance_base_fee = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0,
-        validators=[MinValueValidator(0)],
-        verbose_name='Long distance base fee',
-        help_text='Flat fee for long-distance towing (e.g. $120).',
-    )
-    long_distance_price_per_mile = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0,
-        validators=[MinValueValidator(0)],
-        verbose_name='Long distance price per mile',
-        help_text='Per-mile rate for long-distance towing (e.g. $4).',
-    )
-    local_max_miles = models.DecimalField(
-        max_digits=8,
-        decimal_places=2,
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(0)],
-        verbose_name='Local max miles',
-        help_text='Trips up to this distance use local tariff; above uses long-distance. '
-        'Falls back to TOWING_LOCAL_MAX_MILES when empty.',
+    service_type = models.CharField(
+        max_length=32,
+        choices=TowingServiceType.choices,
+        verbose_name='Service type',
     )
     base_fee = models.DecimalField(
         max_digits=10,
         decimal_places=2,
         default=0,
         validators=[MinValueValidator(0)],
-        verbose_name='Base fee (legacy)',
-        help_text='Deprecated alias for local_base_fee; kept for backward compatibility.',
+        verbose_name='Base fee',
+        help_text='Flat fee for this towing service type (e.g. $80).',
     )
     price_per_mile = models.DecimalField(
         max_digits=10,
         decimal_places=2,
         default=0,
         validators=[MinValueValidator(0)],
-        verbose_name='Price per mile (legacy)',
-        help_text='Deprecated alias for local_price_per_mile.',
+        verbose_name='Price per mile',
+        help_text='Additional charge per mile (e.g. $5).',
     )
     minimum_fee = models.DecimalField(
         max_digits=10,
@@ -437,12 +395,12 @@ class MasterTowingPricing(models.Model):
         default=0,
         validators=[MinValueValidator(0)],
         verbose_name='Minimum total',
-        help_text='Final price will not be lower than this amount.',
+        help_text='Final price for this service type will not be lower than this amount.',
     )
     is_active = models.BooleanField(
         default=True,
         verbose_name='Active',
-        help_text='When false, master is hidden from towing estimates.',
+        help_text='When false, master is hidden from estimates for this service type.',
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created at')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated at')
@@ -450,50 +408,16 @@ class MasterTowingPricing(models.Model):
     class Meta:
         verbose_name = 'Master towing pricing'
         verbose_name_plural = 'Master towing pricing'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['master', 'service_type'],
+                name='master_towing_pricing_master_service_type_uniq',
+            ),
+        ]
+        ordering = ['master_id', 'service_type']
 
     def __str__(self):
-        return f'Towing pricing for master {self.master_id}'
-
-    def sync_legacy_fields(self) -> None:
-        """Keep legacy columns aligned with local tariff for old queries/clients."""
-        self.base_fee = self.local_base_fee
-        self.price_per_mile = self.local_price_per_mile
-
-    def save(self, *args, **kwargs):
-        if self.local_base_fee <= 0 and self.base_fee > 0:
-            self.local_base_fee = self.base_fee
-        if self.local_price_per_mile <= 0 and self.price_per_mile > 0:
-            self.local_price_per_mile = self.price_per_mile
-        self.sync_legacy_fields()
-        super().save(*args, **kwargs)
+        return f'Towing {self.service_type} for master {self.master_id}'
 
     def has_configured_rates(self) -> bool:
-        local_ok = self.local_base_fee > 0 or self.local_price_per_mile > 0
-        long_ok = self.long_distance_base_fee > 0 or self.long_distance_price_per_mile > 0
-        legacy_ok = self.base_fee > 0 or self.price_per_mile > 0
-        return local_ok or long_ok or legacy_ok
-
-    def resolve_trip_type(self, distance_miles) -> str:
-        from apps.order.services.towing_pricing import resolve_towing_trip_type
-
-        return resolve_towing_trip_type(
-            distance_miles,
-            local_max_miles=self.local_max_miles,
-        )
-
-    def rates_for_distance(self, distance_miles) -> tuple[str, 'Decimal', 'Decimal']:
-        """Return (trip_type, base_fee, price_per_mile) for the given distance."""
-        from decimal import Decimal
-
-        trip_type = self.resolve_trip_type(distance_miles)
-        if trip_type == self.TRIP_LONG_DISTANCE:
-            base = self.long_distance_base_fee
-            rate = self.long_distance_price_per_mile
-            if base <= 0 and rate <= 0:
-                base = self.local_base_fee or self.base_fee
-                rate = self.local_price_per_mile or self.price_per_mile
-                trip_type = self.TRIP_LOCAL
-        else:
-            base = self.local_base_fee or self.base_fee
-            rate = self.local_price_per_mile or self.price_per_mile
-        return trip_type, Decimal(str(base)), Decimal(str(rate))
+        return self.is_active and (self.base_fee > 0 or self.price_per_mile > 0)

@@ -1139,8 +1139,9 @@ class TowingEstimateView(APIView):
         description=(
             'Returns nearby masters with towing pricing and calculated totals. '
             'Send pickup coordinates plus delivery coordinates **or** `distance_miles`. '
-            'Picks local or long-distance tariff by distance (see `trip_type` in response). '
-            'Formula: `total = max(base_fee + distance_miles × price_per_mile, minimum_fee)`.'
+            'Driver sends `service_type` (local, long_distance, accident_recovery, motorcycle). '
+            'Price uses that service\'s base_fee + distance_miles × price_per_mile, '
+            'not lower than minimum_fee for that service.'
         ),
         tags=[STAG_ORDER_DRIVER_CREATE],
         request=TowingEstimateRequestSerializer,
@@ -1155,6 +1156,7 @@ class TowingEstimateView(APIView):
 
         data = ser.validated_data
         payload = build_towing_estimates_for_masters(
+            service_type=data['service_type'],
             pickup_lat=float(data['latitude']),
             pickup_lon=float(data['longitude']),
             delivery_lat=float(data['delivery_latitude']) if data.get('delivery_latitude') is not None else None,

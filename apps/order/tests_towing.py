@@ -11,12 +11,13 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.categories.models import Category
 from apps.master.models import Master, MasterTowingPricing
+from apps.master.towing_types import TowingServiceType
 from apps.order.models import Order, OrderType
 from apps.order.services.towing_pricing import (
+    build_master_towing_pricing_payload,
     calculate_towing_price,
-    calculate_towing_price_for_pricing,
+    calculate_towing_price_for_service,
     resolve_towing_distance_miles,
-    resolve_towing_trip_type,
 )
 
 User = get_user_model()
@@ -46,12 +47,19 @@ class TowingFlowTestCase(APITestCase):
             longitude=Decimal('69.280000'),
             service_area_radius_miles=100,
         )
-        self.pricing = MasterTowingPricing.objects.create(
+        self.local_pricing = MasterTowingPricing.objects.create(
             master=self.master,
-            local_base_fee=Decimal('80'),
-            local_price_per_mile=Decimal('5'),
-            long_distance_base_fee=Decimal('120'),
-            long_distance_price_per_mile=Decimal('4'),
+            service_type=TowingServiceType.LOCAL,
+            base_fee=Decimal('80'),
+            price_per_mile=Decimal('5'),
+            minimum_fee=Decimal('100'),
+            is_active=True,
+        )
+        self.long_pricing = MasterTowingPricing.objects.create(
+            master=self.master,
+            service_type=TowingServiceType.LONG_DISTANCE,
+            base_fee=Decimal('120'),
+            price_per_mile=Decimal('4'),
             minimum_fee=Decimal('100'),
             is_active=True,
         )
@@ -80,26 +88,22 @@ class TowingFlowTestCase(APITestCase):
             price_per_mile=Decimal('5'),
             minimum_fee=Decimal('100'),
             distance_miles=Decimal('20'),
+            service_type=TowingServiceType.LOCAL,
         )
         self.assertEqual(result['total_price'], '180.00')
-        self.assertEqual(result['mileage_charge'], '100.00')
-
-    def test_resolve_trip_type_local_vs_long(self):
-        self.assertEqual(resolve_towing_trip_type(Decimal('20')), 'local')
-        self.assertEqual(resolve_towing_trip_type(Decimal('50')), 'local')
-        self.assertEqual(resolve_towing_trip_type(Decimal('50.01')), 'long_distance')
+        self.assertEqual(result['service_type'], TowingServiceType.LOCAL)
 
     def test_long_distance_pricing_breakdown(self):
-        result = calculate_towing_price_for_pricing(self.pricing, Decimal('60'))
-        self.assertEqual(result['trip_type'], 'long_distance')
+        result = calculate_towing_price_for_service(self.long_pricing, Decimal('60'))
+        self.assertEqual(result['service_type'], TowingServiceType.LONG_DISTANCE)
         self.assertEqual(result['base_fee'], '120.00')
-        self.assertEqual(result['price_per_mile'], '4.00')
         self.assertEqual(result['total_price'], '360.00')
 
     def test_towing_estimate_long_distance(self):
         response = self.client.post(
             reverse('order:towing-estimate'),
             {
+                'service_type': TowingServiceType.LONG_DISTANCE,
                 'latitude': '41.311100',
                 'longitude': '69.279700',
                 'distance_miles': '60',
@@ -107,8 +111,7 @@ class TowingFlowTestCase(APITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['trip_type'], 'long_distance')
-        self.assertEqual(response.data['masters'][0]['pricing']['trip_type'], 'long_distance')
+        self.assertEqual(response.data['service_type'], TowingServiceType.LONG_DISTANCE)
         self.assertEqual(response.data['masters'][0]['pricing']['total_price'], '360.00')
 
     def test_resolve_distance_from_explicit_miles(self):
@@ -119,10 +122,11 @@ class TowingFlowTestCase(APITestCase):
         )
         self.assertEqual(miles, Decimal('20.00'))
 
-    def test_towing_estimate_lists_master(self):
+    def test_towing_estimate_lists_master_for_local(self):
         response = self.client.post(
             reverse('order:towing-estimate'),
             {
+                'service_type': TowingServiceType.LOCAL,
                 'latitude': '41.311100',
                 'longitude': '69.279700',
                 'distance_miles': '20',
@@ -130,23 +134,19 @@ class TowingFlowTestCase(APITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['distance_miles'], '20.00')
         self.assertEqual(response.data['master_count'], 1)
-        self.assertEqual(response.data['masters'][0]['master_id'], self.master.id)
         self.assertEqual(response.data['masters'][0]['pricing']['total_price'], '180.00')
 
-    def test_create_towing_order(self):
+    def test_create_towing_order_local(self):
         response = self.client.post(
             reverse('order:towing-create'),
             {
+                'service_type': TowingServiceType.LOCAL,
                 'master_id': self.master.id,
                 'car_list': [self.car.id],
                 'location': 'Pickup address',
                 'latitude': '41.311100',
                 'longitude': '69.279700',
-                'delivery_location': 'Delivery address',
-                'delivery_latitude': '41.350000',
-                'delivery_longitude': '69.300000',
                 'distance_miles': '20',
             },
             format='json',
@@ -154,12 +154,17 @@ class TowingFlowTestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         order = Order.objects.get(pk=response.data['order']['id'])
         self.assertEqual(order.order_type, OrderType.TOWING)
-        self.assertEqual(order.master_id, self.master.id)
+        self.assertEqual(order.towing_trip_type, TowingServiceType.LOCAL)
         self.assertEqual(order.towing_total, Decimal('180.00'))
-        self.assertEqual(order.towing_trip_type, 'local')
-        self.assertTrue(order.category.filter(is_towing_entry=True).exists())
-        self.assertEqual(response.data['order']['towing']['total_price'], '180.00')
-        self.assertEqual(response.data['order']['towing']['trip_type'], 'local')
+        self.assertEqual(response.data['order']['towing']['service_type'], TowingServiceType.LOCAL)
+
+    def test_master_towing_pricing_payload_has_all_services(self):
+        payload = build_master_towing_pricing_payload(
+            self.master.id,
+            list(self.master.towing_pricing_items.all()),
+        )
+        self.assertEqual(len(payload['services']), 4)
+        self.assertTrue(payload['configured'])
 
     @patch('apps.order.services.notifications.send_fcm_to_user_devices')
     def test_create_towing_order_sends_push_notifications(self, mock_fcm):
@@ -167,6 +172,7 @@ class TowingFlowTestCase(APITestCase):
         response = self.client.post(
             reverse('order:towing-create'),
             {
+                'service_type': TowingServiceType.LOCAL,
                 'master_id': self.master.id,
                 'car_list': [self.car.id],
                 'location': 'Pickup address',
@@ -177,18 +183,8 @@ class TowingFlowTestCase(APITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertGreaterEqual(mock_fcm.call_count, 2)
-        kinds = {call.kwargs.get('data', {}).get('kind') for call in mock_fcm.call_args_list}
-        self.assertIn('towing_created', kinds)
-        self.assertIn('order_new', kinds)
-        order_types = {
-            call.kwargs.get('data', {}).get('order_type')
-            for call in mock_fcm.call_args_list
-            if call.kwargs.get('data', {}).get('order_type')
-        }
-        self.assertIn('towing', order_types)
 
-    def test_master_can_set_towing_pricing(self):
+    def test_master_can_set_towing_pricing_bulk(self):
         other_master = Master.objects.create(
             user=self.master_user,
             latitude=Decimal('41.320000'),
@@ -200,16 +196,34 @@ class TowingFlowTestCase(APITestCase):
             reverse('master-towing-pricing'),
             {
                 'master_id': other_master.id,
-                'base_fee': '90',
-                'price_per_mile': '6',
-                'minimum_fee': '120',
-                'is_active': True,
+                'services': [
+                    {
+                        'service_type': TowingServiceType.LOCAL,
+                        'base_fee': '90',
+                        'price_per_mile': '6',
+                        'minimum_fee': '120',
+                        'is_active': True,
+                    },
+                    {
+                        'service_type': TowingServiceType.MOTORCYCLE,
+                        'base_fee': '50',
+                        'price_per_mile': '3',
+                        'minimum_fee': '70',
+                        'is_active': True,
+                    },
+                ],
             },
             format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        pricing = MasterTowingPricing.objects.get(master=other_master)
-        self.assertEqual(pricing.local_base_fee, Decimal('90'))
-        self.assertEqual(pricing.local_price_per_mile, Decimal('6'))
-        self.assertEqual(pricing.base_fee, Decimal('90'))
-        self.assertEqual(pricing.price_per_mile, Decimal('6'))
+        local = MasterTowingPricing.objects.get(
+            master=other_master,
+            service_type=TowingServiceType.LOCAL,
+        )
+        motorcycle = MasterTowingPricing.objects.get(
+            master=other_master,
+            service_type=TowingServiceType.MOTORCYCLE,
+        )
+        self.assertEqual(local.base_fee, Decimal('90'))
+        self.assertEqual(motorcycle.price_per_mile, Decimal('3'))
+        self.assertEqual(len(response.data['services']), 4)

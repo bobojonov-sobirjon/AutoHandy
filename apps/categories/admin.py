@@ -39,10 +39,10 @@ class MainCategoryAdmin(admin.ModelAdmin):
 
     get_icon.short_description = 'Icon'
 
-    list_display = ['get_icon', 'name', 'type_category', 'is_truck', 'created_at']
+    list_display = ['get_icon', 'name', 'sort_order', 'type_category', 'is_truck', 'created_at']
     list_filter = ['type_category', 'is_truck', 'created_at']
     search_fields = ['name']
-    ordering = ['-created_at']
+    ordering = ['sort_order', 'name']
 
     fieldsets = (
         (
@@ -55,6 +55,7 @@ class MainCategoryAdmin(admin.ModelAdmin):
                     'is_custom_request_entry',
                     'is_towing_entry',
                     'is_truck',
+                    'sort_order',
                 ),
                 'description': 'Main categories have no parent. Create subcategories under Sub categories.',
             },
@@ -99,16 +100,16 @@ class SubCategoryAdmin(admin.ModelAdmin):
 
     get_icon.short_description = 'Icon'
 
-    list_display = ['get_icon', 'name', 'parent', 'type_category', 'is_truck', 'created_at']
+    list_display = ['get_icon', 'name', 'sort_order', 'parent', 'type_category', 'is_truck', 'created_at']
     list_filter = ['type_category', 'is_truck', SubCategoryParentMainOnlyFilter, 'created_at']
     search_fields = ['name', 'parent__name']
-    ordering = ['-created_at']
+    ordering = ['sort_order', 'name']
 
     fieldsets = (
         (
             'Main information',
             {
-                'fields': ('parent', 'name', 'icon', 'is_custom_request_entry', 'is_towing_entry', 'is_truck'),
+                'fields': ('parent', 'name', 'icon', 'is_custom_request_entry', 'is_towing_entry', 'is_truck', 'sort_order'),
                 'description': 'Category type is taken from the selected main category automatically.',
             },
         ),

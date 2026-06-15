@@ -26,6 +26,7 @@ from apps.order.services.status_workflow import (
 from django.contrib.auth import get_user_model
 from apps.accounts.serializers import UserDetailsSerializer
 from config.wgs84 import WGS84_COORD_DECIMAL_KWARGS
+from apps.master.towing_types import TowingServiceType
 
 User = get_user_model()
 
@@ -138,11 +139,10 @@ class MasterSerializer(serializers.ModelSerializer):
     def get_towing_pricing(self, obj):
         if not self.context.get('include_towing_pricing'):
             return None
-        try:
-            pricing = obj.towing_pricing
-        except MasterTowingPricing.DoesNotExist:
-            pricing = None
-        return serialize_master_towing_pricing(pricing, master_id=obj.id)
+        from apps.order.services.towing_pricing import build_master_towing_pricing_payload
+
+        items = list(obj.towing_pricing_items.all())
+        return build_master_towing_pricing_payload(obj.id, items)
     
     def get_services(self, obj):
         """Get master services"""
@@ -1351,70 +1351,35 @@ class ServiceCardsResponseSerializer(serializers.Serializer):
     groups = ServiceCardGroupSerializer(many=True)
 
 
-class MasterTowingPricingSerializer(serializers.ModelSerializer):
-    master_id = serializers.IntegerField(required=False, allow_null=True, write_only=True)
-    base_fee = serializers.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        required=False,
-        min_value=0,
-        help_text='Legacy alias for local_base_fee.',
-    )
-    price_per_mile = serializers.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        required=False,
-        min_value=0,
-        help_text='Legacy alias for local_price_per_mile.',
-    )
+class MasterTowingServicePricingItemSerializer(serializers.Serializer):
+    service_type = serializers.ChoiceField(choices=TowingServiceType.choices)
+    base_fee = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    price_per_mile = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    minimum_fee = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False, default=0)
+    is_active = serializers.BooleanField(required=False, default=True)
 
-    class Meta:
-        model = MasterTowingPricing
-        fields = [
-            'master_id',
-            'local_base_fee',
-            'local_price_per_mile',
-            'long_distance_base_fee',
-            'long_distance_price_per_mile',
-            'local_max_miles',
-            'base_fee',
-            'price_per_mile',
-            'minimum_fee',
-            'is_active',
-            'created_at',
-            'updated_at',
-        ]
-        read_only_fields = ['created_at', 'updated_at']
 
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        data['local'] = {
-            'base_fee': data.get('local_base_fee'),
-            'price_per_mile': data.get('local_price_per_mile'),
-        }
-        data['long_distance'] = {
-            'base_fee': data.get('long_distance_base_fee'),
-            'price_per_mile': data.get('long_distance_price_per_mile'),
-        }
-        return data
+class MasterTowingPricingBulkSerializer(serializers.Serializer):
+    master_id = serializers.IntegerField(required=False, allow_null=True)
+    services = MasterTowingServicePricingItemSerializer(many=True)
 
-    def _apply_legacy_aliases(self, attrs):
-        if 'base_fee' in attrs and 'local_base_fee' not in attrs:
-            attrs['local_base_fee'] = attrs.pop('base_fee')
-        elif 'base_fee' in attrs:
-            attrs.pop('base_fee', None)
-        if 'price_per_mile' in attrs and 'local_price_per_mile' not in attrs:
-            attrs['local_price_per_mile'] = attrs.pop('price_per_mile')
-        elif 'price_per_mile' in attrs:
-            attrs.pop('price_per_mile', None)
+    def validate_services(self, value):
+        if not value:
+            raise serializers.ValidationError('At least one service is required.')
+        seen = set()
+        for item in value:
+            st = item['service_type']
+            if st in seen:
+                raise serializers.ValidationError(f'Duplicate service_type: {st}')
+            seen.add(st)
+        return value
 
     def validate(self, attrs):
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             raise serializers.ValidationError('Authentication required.')
-        self._apply_legacy_aliases(attrs)
         user = request.user
-        mid = attrs.pop('master_id', None)
+        mid = attrs.get('master_id')
         if mid in (None, ''):
             qs = Master.objects.filter(user=user)
             n = qs.count()
@@ -1437,42 +1402,28 @@ class MasterTowingPricingSerializer(serializers.ModelSerializer):
             attrs['_master'] = master
         return attrs
 
-    def create(self, validated_data):
-        master = validated_data.pop('_master')
-        validated_data.pop('master_id', None)
-        obj, _ = MasterTowingPricing.objects.update_or_create(
-            master=master,
-            defaults=validated_data,
-        )
-        return obj
+    def save(self):
+        master = self.validated_data['_master']
+        saved: list[MasterTowingPricing] = []
+        for item in self.validated_data['services']:
+            service_type = item['service_type']
+            defaults = {
+                'base_fee': item['base_fee'],
+                'price_per_mile': item['price_per_mile'],
+                'minimum_fee': item.get('minimum_fee', 0),
+                'is_active': item.get('is_active', True),
+            }
+            obj, _ = MasterTowingPricing.objects.update_or_create(
+                master=master,
+                service_type=service_type,
+                defaults=defaults,
+            )
+            saved.append(obj)
+        return master, saved
 
-    def update(self, instance, validated_data):
-        validated_data.pop('_master', None)
-        validated_data.pop('master_id', None)
-        self._apply_legacy_aliases(validated_data)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-        return instance
 
+def serialize_master_towing_pricing(master: Master) -> dict:
+    from apps.order.services.towing_pricing import build_master_towing_pricing_payload
 
-def serialize_master_towing_pricing(pricing: MasterTowingPricing | None, *, master_id: int) -> dict:
-    """Workshop/towing API payload when pricing row may be missing."""
-    if pricing is None:
-        return {
-            'configured': False,
-            'master_id': master_id,
-            'local_base_fee': '0.00',
-            'local_price_per_mile': '0.00',
-            'long_distance_base_fee': '0.00',
-            'long_distance_price_per_mile': '0.00',
-            'local_max_miles': None,
-            'minimum_fee': '0.00',
-            'is_active': False,
-            'local': {'base_fee': '0.00', 'price_per_mile': '0.00'},
-            'long_distance': {'base_fee': '0.00', 'price_per_mile': '0.00'},
-        }
-    data = MasterTowingPricingSerializer(pricing).data
-    data['configured'] = pricing.has_configured_rates()
-    data['master_id'] = master_id
-    return data
+    items = list(master.towing_pricing_items.all())
+    return build_master_towing_pricing_payload(master.id, items)

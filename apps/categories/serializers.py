@@ -28,6 +28,7 @@ class CategorySerializer(serializers.ModelSerializer):
             'type_category',
             'parent',
             'is_truck',
+            'sort_order',
             'created_at',
             'updated_at',
         ]

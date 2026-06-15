@@ -2411,29 +2411,19 @@ class MasterTowingPricingView(APIView):
         master, err = self._resolve_master(request, request.query_params.get('master_id'))
         if err is not None:
             return err
-        try:
-            pricing = master.towing_pricing
-        except MasterTowingPricing.DoesNotExist:
-            from apps.master.api.serializers import serialize_master_towing_pricing
-
-            return Response(
-                serialize_master_towing_pricing(None, master_id=master.id),
-                status=status.HTTP_200_OK,
-            )
         from apps.master.api.serializers import serialize_master_towing_pricing
 
         return Response(
-            serialize_master_towing_pricing(pricing, master_id=master.id),
+            serialize_master_towing_pricing(master),
             status=status.HTTP_200_OK,
         )
 
     @extend_schema(
         summary='Set towing pricing',
         description=(
-            'Upsert local and long-distance towing tariffs for the master. '
-            'Trips up to `local_max_miles` (or global TOWING_LOCAL_MAX_MILES) use local rates; '
-            'longer trips use long-distance rates. '
-            'Legacy `base_fee` / `price_per_mile` map to local tariff.'
+            'Upsert towing tariffs per service type. Driver selects the service when ordering; '
+            'price uses that type\'s base_fee + price_per_mile + minimum_fee. '
+            'Service types: local, long_distance, accident_recovery, motorcycle.'
         ),
         tags=['Master Towing'],
         request={
@@ -2441,28 +2431,35 @@ class MasterTowingPricingView(APIView):
                 'type': 'object',
                 'properties': {
                     'master_id': {'type': 'integer'},
-                    'local_base_fee': {'type': 'number', 'example': 80},
-                    'local_price_per_mile': {'type': 'number', 'example': 5},
-                    'long_distance_base_fee': {'type': 'number', 'example': 120},
-                    'long_distance_price_per_mile': {'type': 'number', 'example': 4},
-                    'local_max_miles': {'type': 'number', 'example': 50},
-                    'minimum_fee': {'type': 'number', 'example': 100},
-                    'is_active': {'type': 'boolean', 'default': True},
+                    'services': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'service_type': {
+                                    'type': 'string',
+                                    'enum': ['local', 'long_distance', 'accident_recovery', 'motorcycle'],
+                                },
+                                'base_fee': {'type': 'number', 'example': 80},
+                                'price_per_mile': {'type': 'number', 'example': 5},
+                                'minimum_fee': {'type': 'number', 'example': 100},
+                                'is_active': {'type': 'boolean', 'default': True},
+                            },
+                        },
+                    },
                 },
             }
         },
         responses={200: {'type': 'object'}},
     )
     def put(self, request):
-        from apps.master.api.serializers import MasterTowingPricingSerializer
+        from apps.master.api.serializers import MasterTowingPricingBulkSerializer, serialize_master_towing_pricing
 
-        serializer = MasterTowingPricingSerializer(data=request.data, context={'request': request})
+        serializer = MasterTowingPricingBulkSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        pricing = serializer.save()
-        from apps.master.api.serializers import serialize_master_towing_pricing
-
+        master, _saved = serializer.save()
         return Response(
-            serialize_master_towing_pricing(pricing, master_id=pricing.master_id),
+            serialize_master_towing_pricing(master),
             status=status.HTTP_200_OK,
         )

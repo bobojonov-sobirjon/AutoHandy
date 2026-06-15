@@ -28,6 +28,7 @@ from apps.order.services.post_completion import build_post_completion_payload
 from apps.car.models import Car
 from apps.categories.models import Category
 from apps.master.models import Master
+from apps.master.towing_types import TowingServiceType
 from apps.master.services.geo import haversine_distance_km, km_to_miles
 from apps.accounts.serializers import UserSerializer
 from apps.master.api.serializers import MasterSerializer
@@ -432,6 +433,7 @@ class OrderSerializer(serializers.ModelSerializer):
                 else None
             ),
             'trip_type': obj.towing_trip_type,
+            'service_type': obj.towing_trip_type,
         }
 
     def get_fuel_delivery_type_display(self, obj):
@@ -1287,6 +1289,10 @@ class CustomRequestCreateSerializer(serializers.Serializer):
 class TowingEstimateRequestSerializer(serializers.Serializer):
     """Pickup + delivery coords or explicit miles for price estimate."""
 
+    service_type = serializers.ChoiceField(
+        choices=TowingServiceType.choices,
+        help_text='Driver-selected towing service: local, long_distance, accident_recovery, motorcycle.',
+    )
     latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, help_text='Pickup latitude')
     longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, help_text='Pickup longitude')
     delivery_latitude = serializers.DecimalField(
@@ -1333,6 +1339,10 @@ class TowingEstimateRequestSerializer(serializers.Serializer):
 class TowingCreateSerializer(serializers.Serializer):
     """Create towing order with pre-selected master and locked mileage price."""
 
+    service_type = serializers.ChoiceField(
+        choices=TowingServiceType.choices,
+        help_text='Driver-selected towing service type.',
+    )
     master_id = serializers.IntegerField()
     car_list = serializers.ListField(
         child=serializers.IntegerField(),
@@ -1384,13 +1394,14 @@ class TowingCreateSerializer(serializers.Serializer):
     def validate(self, attrs):
         from apps.master.models import MasterTowingPricing
         from apps.order.services.towing_pricing import (
-            calculate_towing_price_for_pricing,
+            calculate_towing_price_for_service,
             resolve_towing_distance_miles,
         )
 
         miles_in = attrs.get('distance_miles')
         dlat = attrs.get('delivery_latitude')
         dlon = attrs.get('delivery_longitude')
+        service_type = attrs['service_type']
         if miles_in is None and (dlat is None or dlon is None):
             raise serializers.ValidationError(
                 'Send delivery_latitude + delivery_longitude, or distance_miles.'
@@ -1402,9 +1413,19 @@ class TowingCreateSerializer(serializers.Serializer):
 
         master = Master.objects.get(id=attrs['master_id'])
         try:
-            pricing = MasterTowingPricing.objects.get(master=master, is_active=True)
+            pricing = MasterTowingPricing.objects.get(
+                master=master,
+                service_type=service_type,
+                is_active=True,
+            )
         except MasterTowingPricing.DoesNotExist:
-            raise serializers.ValidationError({'master_id': 'This master has no active towing pricing.'})
+            raise serializers.ValidationError({
+                'master_id': f'This master has no active pricing for {service_type}.',
+            })
+        if not pricing.has_configured_rates():
+            raise serializers.ValidationError({
+                'master_id': f'This master has not configured pricing for {service_type}.',
+            })
 
         pickup_lat = float(attrs['latitude'])
         pickup_lon = float(attrs['longitude'])
@@ -1437,11 +1458,11 @@ class TowingCreateSerializer(serializers.Serializer):
         except ValueError as exc:
             raise serializers.ValidationError(str(exc)) from exc
 
-        breakdown = calculate_towing_price_for_pricing(pricing, distance_miles)
+        breakdown = calculate_towing_price_for_service(pricing, distance_miles)
         attrs['_pricing'] = pricing
         attrs['_distance_miles'] = distance_miles
         attrs['_breakdown'] = breakdown
-        attrs['_trip_type'] = breakdown.get('trip_type')
+        attrs['_service_type'] = service_type
         return attrs
 
     def create(self, validated_data):
@@ -1450,7 +1471,7 @@ class TowingCreateSerializer(serializers.Serializer):
         pricing = validated_data.pop('_pricing')
         distance_miles = validated_data.pop('_distance_miles')
         breakdown = validated_data.pop('_breakdown')
-        trip_type = validated_data.pop('_trip_type', None)
+        trip_type = validated_data.pop('_service_type')
         master_id = validated_data.pop('master_id')
         car_list = validated_data.pop('car_list', [])
         text = (validated_data.pop('text', None) or 'Towing service').strip() or 'Towing service'

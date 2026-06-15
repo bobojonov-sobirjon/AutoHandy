@@ -1,4 +1,4 @@
-"""Towing mileage pricing: local vs long-distance tariffs."""
+"""Towing mileage pricing per driver-selected service type."""
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
@@ -9,29 +9,24 @@ from django.db.models import Q
 
 from apps.master.models import Master, MasterTowingPricing
 from apps.master.services.geo import MILES_TO_KM, haversine_distance_km, km_to_miles
+from apps.master.towing_types import (
+    ALL_TOWING_SERVICE_TYPES,
+    TOWING_SERVICE_TYPE_LABELS,
+    TowingServiceType,
+)
 
 
 def _q(x: Any) -> Decimal:
     return Decimal(str(x)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
-def resolve_towing_local_max_miles(local_max_miles: Decimal | float | None = None) -> Decimal:
-    if local_max_miles is not None and Decimal(str(local_max_miles)) > 0:
-        return _q(local_max_miles)
-    return _q(getattr(settings, 'TOWING_LOCAL_MAX_MILES', 50))
-
-
-def resolve_towing_trip_type(
-    distance_miles: Decimal | float,
-    *,
-    local_max_miles: Decimal | float | None = None,
-) -> str:
-    """Classify trip as local or long_distance by distance threshold."""
-    miles = _q(distance_miles)
-    threshold = resolve_towing_local_max_miles(local_max_miles)
-    if miles <= threshold:
-        return MasterTowingPricing.TRIP_LOCAL
-    return MasterTowingPricing.TRIP_LONG_DISTANCE
+def normalize_towing_service_type(value: str) -> str:
+    raw = (value or '').strip().lower()
+    if raw not in ALL_TOWING_SERVICE_TYPES:
+        raise ValueError(
+            f'Invalid service_type. Use one of: {", ".join(ALL_TOWING_SERVICE_TYPES)}'
+        )
+    return raw
 
 
 def resolve_towing_distance_miles(
@@ -67,7 +62,7 @@ def calculate_towing_price(
     price_per_mile: Decimal,
     minimum_fee: Decimal,
     distance_miles: Decimal,
-    trip_type: str | None = None,
+    service_type: str | None = None,
 ) -> dict[str, str]:
     """Return breakdown with string decimals for API responses."""
     base = _q(base_fee)
@@ -86,33 +81,82 @@ def calculate_towing_price(
         'calculated_total': format(calculated, 'f'),
         'total_price': format(total, 'f'),
     }
-    if trip_type:
-        payload['trip_type'] = trip_type
+    if service_type:
+        payload['service_type'] = service_type
+        payload['trip_type'] = service_type  # backward compat for older clients
     return payload
 
 
-def calculate_towing_price_for_pricing(
+def calculate_towing_price_for_service(
     pricing: MasterTowingPricing,
     distance_miles: Decimal,
 ) -> dict[str, str]:
-    """Pick local/long tariff from master pricing and return price breakdown."""
-    trip_type, base_fee, price_per_mile = pricing.rates_for_distance(distance_miles)
+    """Price breakdown for a specific master service-type row."""
     return calculate_towing_price(
-        base_fee=base_fee,
-        price_per_mile=price_per_mile,
+        base_fee=pricing.base_fee,
+        price_per_mile=pricing.price_per_mile,
         minimum_fee=pricing.minimum_fee,
         distance_miles=distance_miles,
-        trip_type=trip_type,
+        service_type=pricing.service_type,
     )
 
 
-def master_ids_within_towing_radius(
+def default_service_pricing_item(service_type: str) -> dict[str, Any]:
+    return {
+        'service_type': service_type,
+        'label': TOWING_SERVICE_TYPE_LABELS.get(service_type, service_type),
+        'base_fee': '0.00',
+        'price_per_mile': '0.00',
+        'minimum_fee': '0.00',
+        'is_active': False,
+        'configured': False,
+    }
+
+
+def build_master_towing_pricing_payload(
+    master_id: int,
+    items: list[MasterTowingPricing] | None = None,
+) -> dict[str, Any]:
+    """All towing service types for workshop / master API."""
+    by_type = {p.service_type: p for p in (items or [])}
+    services: list[dict[str, Any]] = []
+    configured_any = False
+    for service_type in ALL_TOWING_SERVICE_TYPES:
+        row = by_type.get(service_type)
+        if row is None:
+            services.append(default_service_pricing_item(service_type))
+            continue
+        configured = row.has_configured_rates()
+        configured_any = configured_any or configured
+        services.append(
+            {
+                'service_type': service_type,
+                'label': TOWING_SERVICE_TYPE_LABELS.get(service_type, service_type),
+                'base_fee': format(_q(row.base_fee), 'f'),
+                'price_per_mile': format(_q(row.price_per_mile), 'f'),
+                'minimum_fee': format(_q(row.minimum_fee), 'f'),
+                'is_active': row.is_active,
+                'configured': configured,
+                'created_at': row.created_at,
+                'updated_at': row.updated_at,
+            }
+        )
+    return {
+        'master_id': master_id,
+        'configured': configured_any,
+        'services': services,
+    }
+
+
+def master_ids_with_towing_service(
+    service_type: str,
     latitude: float,
     longitude: float,
     *,
     radius_miles: float | None = None,
 ) -> list[int]:
-    """Masters with active towing pricing within radius of pickup point."""
+    """Masters with active pricing for the selected towing service type near pickup."""
+    service_type = normalize_towing_service_type(service_type)
     miles = float(
         radius_miles
         if radius_miles is not None
@@ -122,16 +166,10 @@ def master_ids_within_towing_radius(
 
     priced_master_ids = set(
         MasterTowingPricing.objects.filter(
+            service_type=service_type,
             is_active=True,
         )
-        .filter(
-            Q(local_base_fee__gt=0)
-            | Q(local_price_per_mile__gt=0)
-            | Q(long_distance_base_fee__gt=0)
-            | Q(long_distance_price_per_mile__gt=0)
-            | Q(base_fee__gt=0)
-            | Q(price_per_mile__gt=0)
-        )
+        .filter(Q(base_fee__gt=0) | Q(price_per_mile__gt=0))
         .values_list('master_id', flat=True)
     )
     if not priced_master_ids:
@@ -155,6 +193,7 @@ def master_ids_within_towing_radius(
 
 def build_towing_estimates_for_masters(
     *,
+    service_type: str,
     pickup_lat: float,
     pickup_lon: float,
     delivery_lat: float | None = None,
@@ -166,6 +205,7 @@ def build_towing_estimates_for_masters(
     """Estimate towing price for each eligible master near pickup."""
     from apps.master.api.serializers import MasterNearbySerializer
 
+    service_type = normalize_towing_service_type(service_type)
     serializer_context = {'request': request} if request is not None else {}
 
     miles = resolve_towing_distance_miles(
@@ -175,12 +215,20 @@ def build_towing_estimates_for_masters(
         delivery_lon=delivery_lon,
         distance_miles=distance_miles,
     )
-    trip_type = resolve_towing_trip_type(miles)
 
-    master_ids = master_ids_within_towing_radius(pickup_lat, pickup_lon, radius_miles=radius_miles)
+    master_ids = master_ids_with_towing_service(
+        service_type,
+        pickup_lat,
+        pickup_lon,
+        radius_miles=radius_miles,
+    )
     pricing_map = {
         p.master_id: p
-        for p in MasterTowingPricing.objects.filter(master_id__in=master_ids, is_active=True)
+        for p in MasterTowingPricing.objects.filter(
+            master_id__in=master_ids,
+            service_type=service_type,
+            is_active=True,
+        ).filter(Q(base_fee__gt=0) | Q(price_per_mile__gt=0))
     }
 
     masters = (
@@ -194,7 +242,7 @@ def build_towing_estimates_for_masters(
         pricing = pricing_map.get(master.id)
         if not pricing or not pricing.has_configured_rates():
             continue
-        breakdown = calculate_towing_price_for_pricing(pricing, miles)
+        breakdown = calculate_towing_price_for_service(pricing, miles)
         wlat, wlon = master.get_work_location_for_distance()
         distance_to_pickup_mi = None
         if wlat is not None:
@@ -219,9 +267,10 @@ def build_towing_estimates_for_masters(
     )
 
     return {
+        'service_type': service_type,
+        'service_label': TOWING_SERVICE_TYPE_LABELS.get(service_type, service_type),
         'distance_miles': format(miles, 'f'),
-        'trip_type': trip_type,
-        'local_max_miles': format(resolve_towing_local_max_miles(), 'f'),
+        'trip_type': service_type,  # backward compat
         'master_count': len(results),
         'masters': results,
     }

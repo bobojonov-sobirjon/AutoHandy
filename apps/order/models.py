@@ -268,11 +268,11 @@ class Order(models.Model):
         help_text='Locked towing job price at order creation.',
     )
     towing_trip_type = models.CharField(
-        max_length=20,
+        max_length=32,
         null=True,
         blank=True,
-        verbose_name='Towing trip type (snapshot)',
-        help_text='local or long_distance — tariff used when the order was created.',
+        verbose_name='Towing service type (snapshot)',
+        help_text='local, long_distance, accident_recovery, or motorcycle — selected by driver at order creation.',
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
