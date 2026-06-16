@@ -120,7 +120,17 @@ class SubCategoryAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         if obj.parent_id:
-            obj.type_category = Category.objects.only('type_category').get(pk=obj.parent_id).type_category
+            parent = Category.objects.only(
+                'type_category',
+                'is_truck',
+                'is_custom_request_entry',
+                'is_towing_entry',
+            ).get(pk=obj.parent_id)
+            obj.type_category = parent.type_category
+            if parent.is_truck:
+                obj.is_truck = True
+            obj.is_custom_request_entry = False
+            obj.is_towing_entry = False
         super().save_model(request, obj, form, change)
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
