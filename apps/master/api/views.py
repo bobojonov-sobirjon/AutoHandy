@@ -2421,8 +2421,9 @@ class MasterTowingPricingView(APIView):
     @extend_schema(
         summary='Set towing pricing',
         description=(
-            'Upsert towing tariffs per service type. Driver selects the service when ordering; '
-            'price uses that type\'s base_fee + price_per_mile + minimum_fee. '
+            'Upsert towing tariffs per service type. '
+            'Formula: total = base_fee + (distance_miles × price_per_mile). '
+            'Response includes `examples` for 10/20/50 miles. '
             'Service types: local, long_distance, accident_recovery, motorcycle.'
         ),
         tags=['Master Towing'],
@@ -2440,9 +2441,8 @@ class MasterTowingPricingView(APIView):
                                     'type': 'string',
                                     'enum': ['local', 'long_distance', 'accident_recovery', 'motorcycle'],
                                 },
-                                'base_fee': {'type': 'number', 'example': 80},
-                                'price_per_mile': {'type': 'number', 'example': 5},
-                                'minimum_fee': {'type': 'number', 'example': 100},
+                                'base_fee': {'type': 'number', 'example': 100},
+                                'price_per_mile': {'type': 'number', 'example': 3},
                                 'is_active': {'type': 'boolean', 'default': True},
                             },
                         },

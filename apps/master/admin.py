@@ -153,7 +153,6 @@ class MasterTowingPricingAdmin(admin.ModelAdmin):
         'service_type',
         'base_fee',
         'price_per_mile',
-        'minimum_fee',
         'is_active',
         'updated_at',
     )

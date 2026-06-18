@@ -1355,7 +1355,6 @@ class MasterTowingServicePricingItemSerializer(serializers.Serializer):
     service_type = serializers.ChoiceField(choices=TowingServiceType.choices)
     base_fee = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
     price_per_mile = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
-    minimum_fee = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False, default=0)
     is_active = serializers.BooleanField(required=False, default=True)
 
 
@@ -1410,7 +1409,6 @@ class MasterTowingPricingBulkSerializer(serializers.Serializer):
             defaults = {
                 'base_fee': item['base_fee'],
                 'price_per_mile': item['price_per_mile'],
-                'minimum_fee': item.get('minimum_fee', 0),
                 'is_active': item.get('is_active', True),
             }
             obj, _ = MasterTowingPricing.objects.update_or_create(

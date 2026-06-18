@@ -422,11 +422,6 @@ class OrderSerializer(serializers.ModelSerializer):
                 if obj.towing_price_per_mile is not None
                 else None
             ),
-            'minimum_fee': (
-                format(Decimal(str(obj.towing_minimum_fee)), 'f')
-                if obj.towing_minimum_fee is not None
-                else None
-            ),
             'total_price': (
                 format(Decimal(str(obj.towing_total)), 'f')
                 if obj.towing_total is not None
@@ -1500,7 +1495,7 @@ class TowingCreateSerializer(serializers.Serializer):
             towing_distance_miles=distance_miles,
             towing_base_fee=Decimal(breakdown['base_fee']),
             towing_price_per_mile=Decimal(breakdown['price_per_mile']),
-            towing_minimum_fee=pricing.minimum_fee,
+            towing_minimum_fee=None,
             towing_trip_type=trip_type,
             towing_total=Decimal(breakdown['total_price']),
             average_price=Decimal(breakdown['total_price']),

@@ -1139,9 +1139,9 @@ class TowingEstimateView(APIView):
         description=(
             'Returns nearby masters with towing pricing and calculated totals. '
             'Send pickup coordinates plus delivery coordinates **or** `distance_miles`. '
-            'Driver sends `service_type` (local, long_distance, accident_recovery, motorcycle). '
-            'Price uses that service\'s base_fee + distance_miles × price_per_mile, '
-            'not lower than minimum_fee for that service.'
+            'Driver sends `service_type`. '
+            'Distance is pickup → drop-off (or explicit `distance_miles`). '
+            'Price: `base_fee + distance_miles × price_per_mile`.'
         ),
         tags=[STAG_ORDER_DRIVER_CREATE],
         request=TowingEstimateRequestSerializer,

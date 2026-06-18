@@ -12,8 +12,10 @@ from apps.master.services.geo import MILES_TO_KM, haversine_distance_km, km_to_m
 from apps.master.towing_types import (
     ALL_TOWING_SERVICE_TYPES,
     TOWING_SERVICE_TYPE_LABELS,
-    TowingServiceType,
 )
+
+# Shown to masters under tariff fields in workshop UI.
+MASTER_PRICING_EXAMPLE_DISTANCES: tuple[int, ...] = (10, 20, 50)
 
 
 def _q(x: Any) -> Decimal:
@@ -38,8 +40,7 @@ def resolve_towing_distance_miles(
     distance_miles: Decimal | float | None = None,
 ) -> Decimal:
     """
-    Client may send explicit ``distance_miles`` OR pickup + delivery coordinates.
-    Explicit miles take precedence when > 0.
+    Distance for towing price: pickup → drop-off (haversine), unless client sends explicit miles.
     """
     if distance_miles is not None:
         miles = _q(distance_miles)
@@ -60,42 +61,69 @@ def calculate_towing_price(
     *,
     base_fee: Decimal,
     price_per_mile: Decimal,
-    minimum_fee: Decimal,
     distance_miles: Decimal,
     service_type: str | None = None,
 ) -> dict[str, str]:
-    """Return breakdown with string decimals for API responses."""
+    """
+    Final price = base_fee + (distance_miles × price_per_mile).
+    No minimum floor.
+    """
     base = _q(base_fee)
     rate = _q(price_per_mile)
-    minimum = _q(minimum_fee)
     miles = _q(distance_miles)
     mileage_charge = _q(miles * rate)
-    calculated = _q(base + mileage_charge)
-    total = calculated if calculated >= minimum else minimum
+    total = _q(base + mileage_charge)
     payload = {
         'distance_miles': format(miles, 'f'),
         'base_fee': format(base, 'f'),
         'price_per_mile': format(rate, 'f'),
-        'minimum_fee': format(minimum, 'f'),
         'mileage_charge': format(mileage_charge, 'f'),
-        'calculated_total': format(calculated, 'f'),
         'total_price': format(total, 'f'),
+        'formula': f'{format(base, "f")} + ({format(miles, "f")} × {format(rate, "f")})',
     }
     if service_type:
         payload['service_type'] = service_type
-        payload['trip_type'] = service_type  # backward compat for older clients
+        payload['trip_type'] = service_type
     return payload
+
+
+def build_pricing_examples(
+    base_fee: Decimal | float,
+    price_per_mile: Decimal | float,
+) -> list[dict[str, str]]:
+    """Sample totals for workshop UI (10 / 20 / 50 miles)."""
+    base = _q(base_fee)
+    rate = _q(price_per_mile)
+    out: list[dict[str, str]] = []
+    for miles_int in MASTER_PRICING_EXAMPLE_DISTANCES:
+        miles = _q(miles_int)
+        breakdown = calculate_towing_price(
+            base_fee=base,
+            price_per_mile=rate,
+            distance_miles=miles,
+        )
+        out.append(
+            {
+                'distance_miles': format(miles, 'f'),
+                'mileage_charge': breakdown['mileage_charge'],
+                'total_price': breakdown['total_price'],
+                'label': (
+                    f'{breakdown["distance_miles"]} mi: '
+                    f'${breakdown["base_fee"]} + ({breakdown["distance_miles"]} × ${breakdown["price_per_mile"]}) '
+                    f'= ${breakdown["total_price"]}'
+                ),
+            }
+        )
+    return out
 
 
 def calculate_towing_price_for_service(
     pricing: MasterTowingPricing,
     distance_miles: Decimal,
 ) -> dict[str, str]:
-    """Price breakdown for a specific master service-type row."""
     return calculate_towing_price(
         base_fee=pricing.base_fee,
         price_per_mile=pricing.price_per_mile,
-        minimum_fee=pricing.minimum_fee,
         distance_miles=distance_miles,
         service_type=pricing.service_type,
     )
@@ -107,9 +135,9 @@ def default_service_pricing_item(service_type: str) -> dict[str, Any]:
         'label': TOWING_SERVICE_TYPE_LABELS.get(service_type, service_type),
         'base_fee': '0.00',
         'price_per_mile': '0.00',
-        'minimum_fee': '0.00',
         'is_active': False,
         'configured': False,
+        'examples': build_pricing_examples(0, 0),
     }
 
 
@@ -117,7 +145,6 @@ def build_master_towing_pricing_payload(
     master_id: int,
     items: list[MasterTowingPricing] | None = None,
 ) -> dict[str, Any]:
-    """All towing service types for workshop / master API."""
     by_type = {p.service_type: p for p in (items or [])}
     services: list[dict[str, Any]] = []
     configured_any = False
@@ -128,15 +155,17 @@ def build_master_towing_pricing_payload(
             continue
         configured = row.has_configured_rates()
         configured_any = configured_any or configured
+        base = _q(row.base_fee)
+        rate = _q(row.price_per_mile)
         services.append(
             {
                 'service_type': service_type,
                 'label': TOWING_SERVICE_TYPE_LABELS.get(service_type, service_type),
-                'base_fee': format(_q(row.base_fee), 'f'),
-                'price_per_mile': format(_q(row.price_per_mile), 'f'),
-                'minimum_fee': format(_q(row.minimum_fee), 'f'),
+                'base_fee': format(base, 'f'),
+                'price_per_mile': format(rate, 'f'),
                 'is_active': row.is_active,
                 'configured': configured,
+                'examples': build_pricing_examples(base, rate),
                 'created_at': row.created_at,
                 'updated_at': row.updated_at,
             }
@@ -144,6 +173,7 @@ def build_master_towing_pricing_payload(
     return {
         'master_id': master_id,
         'configured': configured_any,
+        'pricing_formula': 'total = base_fee + (distance_miles × price_per_mile)',
         'services': services,
     }
 
@@ -155,7 +185,6 @@ def master_ids_with_towing_service(
     *,
     radius_miles: float | None = None,
 ) -> list[int]:
-    """Masters with active pricing for the selected towing service type near pickup."""
     service_type = normalize_towing_service_type(service_type)
     miles = float(
         radius_miles
@@ -202,7 +231,6 @@ def build_towing_estimates_for_masters(
     radius_miles: float | None = None,
     request=None,
 ) -> dict[str, Any]:
-    """Estimate towing price for each eligible master near pickup."""
     from apps.master.api.serializers import MasterNearbySerializer
 
     service_type = normalize_towing_service_type(service_type)
@@ -270,7 +298,9 @@ def build_towing_estimates_for_masters(
         'service_type': service_type,
         'service_label': TOWING_SERVICE_TYPE_LABELS.get(service_type, service_type),
         'distance_miles': format(miles, 'f'),
-        'trip_type': service_type,  # backward compat
+        'distance_source': 'explicit_miles' if distance_miles else 'pickup_to_dropoff',
+        'pricing_formula': 'total = base_fee + (distance_miles × price_per_mile)',
+        'trip_type': service_type,
         'master_count': len(results),
         'masters': results,
     }

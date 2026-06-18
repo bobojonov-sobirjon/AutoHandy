@@ -360,7 +360,7 @@ class MasterBusySlot(models.Model):
 
 
 class MasterTowingPricing(models.Model):
-    """Per-master, per-service-type towing tariff: base fee + per mile + minimum."""
+    """Per-master, per-service-type towing tariff: base fee + per mile."""
 
     master = models.ForeignKey(
         Master,
@@ -387,15 +387,7 @@ class MasterTowingPricing(models.Model):
         default=0,
         validators=[MinValueValidator(0)],
         verbose_name='Price per mile',
-        help_text='Additional charge per mile (e.g. $5).',
-    )
-    minimum_fee = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0,
-        validators=[MinValueValidator(0)],
-        verbose_name='Minimum total',
-        help_text='Final price for this service type will not be lower than this amount.',
+        help_text='Charge per mile (e.g. $3). Total = base_fee + distance_miles × price_per_mile.',
     )
     is_active = models.BooleanField(
         default=True,
