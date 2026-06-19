@@ -388,6 +388,11 @@ SMS_DEBUG_IN_RESPONSE = os.environ.get('SMS_DEBUG_IN_RESPONSE', '').lower() in [
 # App Store / Google Play review: comma-separated E.164 phones + fixed OTP (e.g. 4242).
 STORE_REVIEW_PHONES = os.environ.get('STORE_REVIEW_PHONES', '')
 STORE_REVIEW_OTP = os.environ.get('STORE_REVIEW_OTP', '')
+# App Store / Google Play — alohida test akkauntlar (Driver va Master)
+STORE_REVIEW_DRIVER_PHONE = os.environ.get('STORE_REVIEW_DRIVER_PHONE', '')
+STORE_REVIEW_DRIVER_OTP = os.environ.get('STORE_REVIEW_DRIVER_OTP', '')
+STORE_REVIEW_MASTER_PHONE = os.environ.get('STORE_REVIEW_MASTER_PHONE', '')
+STORE_REVIEW_MASTER_OTP = os.environ.get('STORE_REVIEW_MASTER_OTP', '')
 
 # Post-completion tip modal presets (USD); client may also send a custom amount.
 TIP_PRESET_AMOUNTS = os.environ.get('TIP_PRESET_AMOUNTS', '5,10,20')

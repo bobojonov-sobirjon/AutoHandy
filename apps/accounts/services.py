@@ -18,9 +18,11 @@ from rest_framework import status
 from rest_framework.response import Response
 from .models import UserSMSCode
 from .store_review import (
-    get_store_review_otp,
-    is_store_review_otp,
+    get_store_review_config,
+    get_store_review_otp_for_phone,
+    is_store_review_otp_for_phone,
     is_store_review_phone,
+    validate_store_review_role,
 )
 
 User = get_user_model()
@@ -316,10 +318,20 @@ class SMSService:
                 and is_store_review_phone(phone_number)
             )
             if store_review:
-                sms_code = get_store_review_otp()
+                role_err = validate_store_review_role(phone_number, role)
+                if role_err:
+                    return {
+                        'success': False,
+                        'error': role_err,
+                        'status_code': status.HTTP_400_BAD_REQUEST,
+                    }
+                sms_code = get_store_review_otp_for_phone(phone_number)
                 sms_sent = False
                 sms_error = None
-                sms_debug = {'store_review': True}
+                sms_debug = {
+                    'store_review': True,
+                    'store_review_role': get_store_review_config(phone_number).get('role'),
+                }
             else:
                 sms_code = str(random.randint(1000, 9999))
                 sms_sent = False
@@ -444,8 +456,7 @@ class SMSService:
             store_review_verified = (
                 identifier_type == 'phone'
                 and phone_number
-                and is_store_review_phone(phone_number)
-                and is_store_review_otp(sms_code)
+                and is_store_review_otp_for_phone(phone_number, sms_code, role)
             )
 
             # Get code from database (primary source); store-review phones use fixed OTP instead.
