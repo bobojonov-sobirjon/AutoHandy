@@ -47,3 +47,20 @@ class TruckCategoryTestCase(APITestCase):
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]['name'], 'Jump Start')
         self.assertTrue(response.data[0]['is_truck'])
+
+    def test_subcategories_for_towing_entry_parent(self):
+        towing = Category.objects.create(
+            name='Towing',
+            type_category=Category.TypeCategory.BY_ORDER,
+            is_towing_entry=True,
+        )
+        Category.objects.create(
+            name='Local towing',
+            type_category=Category.TypeCategory.BY_ORDER,
+            parent=towing,
+        )
+        url = reverse('subcategory-list')
+        response = self.client.get(url, {'parent_id': towing.id})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['name'], 'Local towing')

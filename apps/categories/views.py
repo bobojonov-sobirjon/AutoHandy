@@ -1,4 +1,3 @@
-from django.db.models import Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -111,6 +110,7 @@ class SubCategoryListAPIView(APIView):
         description="""
         Список подкатегорий для указанной **основной** категории.
         `parent_id` — ID main-категории (без родителя). Если категория не main или не найдена — 404.
+        Towing / Custom Request main categories are included like any other parent.
         """,
         parameters=[
             OpenApiParameter(
@@ -155,15 +155,8 @@ class SubCategoryListAPIView(APIView):
                 {'detail': 'Main category not found.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        if parent.is_custom_request_entry or parent.is_towing_entry:
-            return Response(
-                {'detail': 'Main category not found.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
 
         subs = Category.objects.filter(parent_id=parent_pk)
-        subs = _exclude_custom_request_catalog(subs, request)
-        subs = subs.filter(~Q(parent__is_custom_request_entry=True))
         truck_only = _parse_bool_query(request.query_params.get('is_truck'))
         if truck_only is True:
             subs = subs.filter(is_truck=True)
