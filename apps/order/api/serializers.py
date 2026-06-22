@@ -318,12 +318,13 @@ class OrderSerializer(serializers.ModelSerializer):
     towing = serializers.SerializerMethodField()
     fuel_delivery_type_display = serializers.SerializerMethodField()
     fuel_delivery_summary = serializers.SerializerMethodField()
+    truck = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = [
             'id', 'order_number', 'user', 'order_type', 'order_type_display',
-            'car_data', 'category_data',
+            'car_data', 'category_data', 'truck',
             'text', 'status', 'status_display', 'priority', 'priority_display',
             'location', 'latitude', 'longitude', 'location_precision',
             'towing',
@@ -444,6 +445,11 @@ class OrderSerializer(serializers.ModelSerializer):
         if not label:
             return None
         return f'Delivery of 2 gallons of fuel ({label})'
+
+    def get_truck(self, obj):
+        from apps.order.services.truck_orders import truck_payload_from_order
+
+        return truck_payload_from_order(obj)
 
     def get_custom_request_selected_offer(self, obj):
         """
@@ -1278,6 +1284,355 @@ class CustomRequestCreateSerializer(serializers.Serializer):
         if car_list:
             order.car.set(list(dict.fromkeys(car_list)))
         order.category.set([cat.pk])
+        return order
+
+
+class TruckOrderCreateSerializer(serializers.Serializer):
+    """
+    Semi-truck roadside service (tire, jump start, fuel, etc.) — no passenger car profile.
+
+    ``timing=now`` → SOS queue to nearby masters with this truck subcategory.
+    ``timing=schedule`` → same broadcast; ``preferred_date`` + ``preferred_time_start`` shown to masters.
+    """
+
+    TIMING_NOW = 'now'
+    TIMING_SCHEDULE = 'schedule'
+
+    category_id = serializers.IntegerField(help_text='Semi-truck subcategory ID (from subcategories API).')
+    truck_make_model = serializers.CharField(max_length=255, help_text='Truck make and model, e.g. Freightliner Cascadia.')
+    truck_year = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=1900,
+        max_value=2100,
+        help_text='Optional truck year.',
+    )
+    text = serializers.CharField(required=False, allow_blank=True, default='')
+    location = serializers.CharField(help_text='Service / pickup address.')
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    timing = serializers.ChoiceField(
+        choices=[(TIMING_NOW, 'Right now'), (TIMING_SCHEDULE, 'Choose date and time')],
+        default=TIMING_NOW,
+    )
+    preferred_date = serializers.DateField(required=False, allow_null=True)
+    preferred_time_start = LenientTimeField(required=False, allow_null=True)
+
+    def validate_category_id(self, value):
+        from apps.order.services.truck_orders import get_truck_subcategory, is_truck_towing_subcategory
+
+        category = get_truck_subcategory(value)
+        if category is None:
+            raise serializers.ValidationError(
+                'category_id must be a semi-truck subcategory (is_truck=true with a parent).'
+            )
+        if is_truck_towing_subcategory(category):
+            raise serializers.ValidationError(
+                'Use POST /api/order/truck/towing/ for semi-truck towing.'
+            )
+        return value
+
+    def validate_truck_make_model(self, value):
+        cleaned = (value or '').strip()
+        if not cleaned:
+            raise serializers.ValidationError('Truck make and model is required.')
+        return cleaned
+
+    def validate(self, attrs):
+        timing = attrs.get('timing') or self.TIMING_NOW
+        pd = attrs.get('preferred_date')
+        ps = attrs.get('preferred_time_start')
+
+        if timing == self.TIMING_SCHEDULE:
+            if pd is None or ps is None:
+                raise serializers.ValidationError(
+                    'preferred_date and preferred_time_start are required when timing=schedule.'
+                )
+            from apps.order.services.order_scheduled_start import (
+                scheduled_slot_is_in_future,
+                scheduled_slot_past_cancel_deadline,
+            )
+
+            if not scheduled_slot_is_in_future(preferred_date=pd, preferred_time_start=ps):
+                raise serializers.ValidationError(
+                    {'preferred_time_start': 'Scheduled start time must be in the future.'}
+                )
+            if scheduled_slot_past_cancel_deadline(preferred_date=pd, preferred_time_start=ps):
+                raise serializers.ValidationError(
+                    {'preferred_time_start': 'Scheduled time window has already passed; choose a later slot.'}
+                )
+        elif pd is not None or ps is not None:
+            raise serializers.ValidationError(
+                'preferred_date and preferred_time_start are only used when timing=schedule.'
+            )
+
+        from apps.order.services.truck_orders import get_truck_subcategory
+
+        category = get_truck_subcategory(attrs['category_id'])
+        queue = build_sos_master_id_queue(
+            float(attrs['latitude']),
+            float(attrs['longitude']),
+            [category.pk],
+        )
+        queue = filter_master_ids_meeting_emergency_thresholds(queue)
+        if not queue:
+            raise serializers.ValidationError(
+                'No semi-truck service providers are available near this location for the selected service.'
+            )
+        attrs['_category'] = category
+        attrs['_sos_queue'] = queue
+        return attrs
+
+    def create(self, validated_data):
+        from apps.order.services.truck_orders import build_truck_order_text
+
+        category = validated_data.pop('_category')
+        sos_queue = validated_data.pop('_sos_queue')
+        category_id = validated_data.pop('category_id')
+        timing = validated_data.pop('timing', self.TIMING_NOW)
+        truck_make_model = validated_data.pop('truck_make_model')
+        truck_year = validated_data.pop('truck_year', None)
+        text = (validated_data.pop('text', None) or '').strip()
+        pd = validated_data.pop('preferred_date', None)
+        ps = validated_data.pop('preferred_time_start', None)
+
+        if not text:
+            text = build_truck_order_text(category, truck_make_model, truck_year)
+
+        order = Order.objects.create(
+            user=self.context['request'].user,
+            order_type=OrderType.SOS,
+            status=OrderStatus.PENDING,
+            priority=OrderPriority.HIGH,
+            location_source=LocationSource.GPS_CUSTOM,
+            text=text,
+            location=validated_data['location'],
+            latitude=validated_data['latitude'],
+            longitude=validated_data['longitude'],
+            truck_make_model=truck_make_model,
+            truck_year=truck_year,
+            preferred_date=pd if timing == self.TIMING_SCHEDULE else None,
+            preferred_time_start=ps if timing == self.TIMING_SCHEDULE else None,
+        )
+        order.category.set([category_id])
+        order.sos_offer_queue = sos_queue
+        order.sos_offer_index = 0
+        order.save(update_fields=['sos_offer_queue', 'sos_offer_index'])
+
+        if order.status == OrderStatus.PENDING:
+            activate_pending_master_offer(order, request=self.context.get('request'))
+        return order
+
+
+class TruckTowingCreateSerializer(serializers.Serializer):
+    """Semi-truck towing: mileage price + truck info (no passenger car)."""
+
+    category_id = serializers.IntegerField(help_text='Semi-truck Towing subcategory ID.')
+    service_type = serializers.ChoiceField(
+        choices=TowingServiceType.choices,
+        help_text='Towing pricing tier (local, long_distance, accident_recovery, motorcycle).',
+    )
+    master_id = serializers.IntegerField()
+    truck_make_model = serializers.CharField(max_length=255)
+    truck_year = serializers.IntegerField(required=False, allow_null=True, min_value=1900, max_value=2100)
+    text = serializers.CharField(required=False, allow_blank=True, default='Semi-truck towing')
+    location = serializers.CharField(help_text='Pickup address')
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS)
+    delivery_location = serializers.CharField(required=False, allow_blank=True, default='')
+    delivery_latitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
+        required=False,
+        allow_null=True,
+    )
+    delivery_longitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
+        required=False,
+        allow_null=True,
+    )
+    distance_miles = serializers.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=Decimal('0.01'),
+    )
+    timing = serializers.ChoiceField(
+        choices=[('now', 'Right now'), ('schedule', 'Choose date and time')],
+        default='now',
+    )
+    preferred_date = serializers.DateField(required=False, allow_null=True)
+    preferred_time_start = LenientTimeField(required=False, allow_null=True)
+
+    def validate_category_id(self, value):
+        from apps.order.services.truck_orders import get_truck_subcategory, is_truck_towing_subcategory
+
+        category = get_truck_subcategory(value)
+        if category is None or not is_truck_towing_subcategory(category):
+            raise serializers.ValidationError(
+                'category_id must be the semi-truck Towing subcategory.'
+            )
+        return value
+
+    def validate_truck_make_model(self, value):
+        cleaned = (value or '').strip()
+        if not cleaned:
+            raise serializers.ValidationError('Truck make and model is required.')
+        return cleaned
+
+    def validate_master_id(self, value):
+        try:
+            Master.objects.get(id=value)
+        except Master.DoesNotExist:
+            raise serializers.ValidationError(f'Master with ID {value} not found')
+        return value
+
+    def validate(self, attrs):
+        from apps.master.models import MasterTowingPricing
+        from apps.order.services.towing_pricing import (
+            calculate_towing_price_for_service,
+            resolve_towing_distance_miles,
+        )
+        from apps.order.services.truck_orders import get_truck_subcategory
+
+        timing = attrs.get('timing') or 'now'
+        pd = attrs.get('preferred_date')
+        ps = attrs.get('preferred_time_start')
+        if timing == 'schedule':
+            if pd is None or ps is None:
+                raise serializers.ValidationError(
+                    'preferred_date and preferred_time_start are required when timing=schedule.'
+                )
+        elif pd is not None or ps is not None:
+            raise serializers.ValidationError(
+                'preferred_date and preferred_time_start are only used when timing=schedule.'
+            )
+
+        miles_in = attrs.get('distance_miles')
+        dlat = attrs.get('delivery_latitude')
+        dlon = attrs.get('delivery_longitude')
+        service_type = attrs['service_type']
+        if miles_in is None and (dlat is None or dlon is None):
+            raise serializers.ValidationError(
+                'Send delivery_latitude + delivery_longitude, or distance_miles.'
+            )
+        if (dlat is None) ^ (dlon is None):
+            raise serializers.ValidationError(
+                'delivery_latitude and delivery_longitude must be sent together.'
+            )
+
+        master = Master.objects.get(id=attrs['master_id'])
+        try:
+            pricing = MasterTowingPricing.objects.get(
+                master=master,
+                service_type=service_type,
+                is_active=True,
+            )
+        except MasterTowingPricing.DoesNotExist:
+            raise serializers.ValidationError({
+                'master_id': f'This master has no active pricing for {service_type}.',
+            })
+        if not pricing.has_configured_rates():
+            raise serializers.ValidationError({
+                'master_id': f'This master has not configured pricing for {service_type}.',
+            })
+
+        pickup_lat = float(attrs['latitude'])
+        pickup_lon = float(attrs['longitude'])
+        wlat, wlon = master.get_work_location_for_distance()
+        if wlat is None:
+            raise serializers.ValidationError(
+                {'master_id': 'Selected master has no work location coordinates.'}
+            )
+        distance_km = haversine_distance_km(pickup_lat, pickup_lon, wlat, wlon)
+        max_km = master.max_order_distance_km()
+        if distance_km > max_km:
+            d_mi = km_to_miles(distance_km)
+            max_mi = km_to_miles(max_km)
+            raise serializers.ValidationError(
+                {
+                    'master_id': (
+                        f'Selected master is too far from pickup ({d_mi:.1f} mi; limit {max_mi:.1f} mi).'
+                    )
+                }
+            )
+
+        try:
+            distance_miles = resolve_towing_distance_miles(
+                pickup_lat=pickup_lat,
+                pickup_lon=pickup_lon,
+                delivery_lat=float(dlat) if dlat is not None else None,
+                delivery_lon=float(dlon) if dlon is not None else None,
+                distance_miles=miles_in,
+            )
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+        breakdown = calculate_towing_price_for_service(pricing, distance_miles)
+        attrs['_pricing'] = pricing
+        attrs['_distance_miles'] = distance_miles
+        attrs['_breakdown'] = breakdown
+        attrs['_service_type'] = service_type
+        attrs['_category'] = get_truck_subcategory(attrs['category_id'])
+        return attrs
+
+    def create(self, validated_data):
+        from apps.order.services.truck_orders import build_truck_order_text
+
+        pricing = validated_data.pop('_pricing')
+        distance_miles = validated_data.pop('_distance_miles')
+        breakdown = validated_data.pop('_breakdown')
+        trip_type = validated_data.pop('_service_type')
+        category = validated_data.pop('_category')
+        master_id = validated_data.pop('master_id')
+        category_id = validated_data.pop('category_id')
+        truck_make_model = validated_data.pop('truck_make_model')
+        truck_year = validated_data.pop('truck_year', None)
+        timing = validated_data.pop('timing', 'now')
+        pd = validated_data.pop('preferred_date', None)
+        ps = validated_data.pop('preferred_time_start', None)
+        text = (validated_data.pop('text', None) or 'Semi-truck towing').strip() or 'Semi-truck towing'
+        if text == 'Semi-truck towing':
+            text = build_truck_order_text(category, truck_make_model, truck_year)
+
+        master = Master.objects.get(id=master_id)
+        order = Order.objects.create(
+            user=self.context['request'].user,
+            master=master,
+            order_type=OrderType.TOWING,
+            status=OrderStatus.PENDING,
+            priority=OrderPriority.HIGH,
+            location_source=LocationSource.GPS_CUSTOM,
+            text=text,
+            location=validated_data['location'],
+            latitude=validated_data['latitude'],
+            longitude=validated_data['longitude'],
+            delivery_location=validated_data.get('delivery_location') or '',
+            delivery_latitude=validated_data.get('delivery_latitude'),
+            delivery_longitude=validated_data.get('delivery_longitude'),
+            towing_distance_miles=distance_miles,
+            towing_base_fee=Decimal(breakdown['base_fee']),
+            towing_price_per_mile=Decimal(breakdown['price_per_mile']),
+            towing_minimum_fee=None,
+            towing_trip_type=trip_type,
+            towing_total=Decimal(breakdown['total_price']),
+            average_price=Decimal(breakdown['total_price']),
+            average_service_name=category.name,
+            truck_make_model=truck_make_model,
+            truck_year=truck_year,
+            preferred_date=pd if timing == 'schedule' else None,
+            preferred_time_start=ps if timing == 'schedule' else None,
+        )
+        order.category.set([category_id])
+
+        if order.status == OrderStatus.PENDING:
+            activate_pending_master_offer(order, request=self.context.get('request'))
+            try:
+                from apps.order.services.towing_notifications import notify_towing_order_created
+
+                notify_towing_order_created(order, request=self.context.get('request'))
+            except Exception:  # noqa: BLE001
+                pass
         return order
 
 

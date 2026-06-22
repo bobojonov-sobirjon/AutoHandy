@@ -274,6 +274,19 @@ class Order(models.Model):
         verbose_name='Towing service type (snapshot)',
         help_text='local, long_distance, accident_recovery, or motorcycle — selected by driver at order creation.',
     )
+    truck_make_model = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        verbose_name='Truck make and model',
+        help_text='Semi-truck orders: client-entered truck name (no passenger car profile).',
+    )
+    truck_year = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        verbose_name='Truck year',
+        help_text='Optional model year for semi-truck orders.',
+    )
     created_at = models.DateTimeField(
         auto_now_add=True,
         verbose_name='Created at',

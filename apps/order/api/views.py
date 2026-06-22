@@ -89,6 +89,8 @@ from apps.order.api.serializers import (
     CustomRequestCreateSerializer,
     TowingEstimateRequestSerializer,
     TowingCreateSerializer,
+    TruckOrderCreateSerializer,
+    TruckTowingCreateSerializer,
     CustomRequestOfferCreateSerializer,
     CustomRequestOfferSerializer,
     CustomRequestOfferWithMasterSerializer,
@@ -1199,6 +1201,71 @@ class TowingCreateView(APIView):
             {
                 'message': 'Your towing order has been sent to the selected master',
                 'order': order_serializer.data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class TruckOrderCreateView(APIView):
+    """Semi-truck roadside service (no passenger car)."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    @extend_schema(
+        summary='Create semi-truck roadside order',
+        description=(
+            'Roadside Semi Truck subcategories (tire, jump start, fuel, lockout, repair). '
+            'Client enters truck make/model instead of selecting a passenger car. '
+            '`timing=now` notifies nearby masters immediately (SOS queue). '
+            '`timing=schedule` stores preferred date/time on the order.'
+        ),
+        tags=[STAG_ORDER_DRIVER_CREATE],
+        request=TruckOrderCreateSerializer,
+        responses={201: {'type': 'object'}},
+    )
+    def post(self, request):
+        serializer = TruckOrderCreateSerializer(data=request.data, context={'request': request})
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        order = serializer.save()
+        attach_order_images_from_request(order, request)
+        return Response(
+            {
+                'message': 'Your semi-truck request has been sent to nearby providers',
+                'order': OrderSerializer(order, context={'request': request}).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class TruckTowingCreateView(APIView):
+    """Semi-truck towing with mileage pricing and truck info (no passenger car)."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    @extend_schema(
+        summary='Create semi-truck towing order',
+        description=(
+            'Same mileage pricing as `/api/order/towing/`, but uses the semi-truck Towing subcategory '
+            'and `truck_make_model` / `truck_year` instead of `car_list`. '
+            'Estimate prices via `POST /api/order/towing/estimate/` before create.'
+        ),
+        tags=[STAG_ORDER_DRIVER_CREATE],
+        request=TruckTowingCreateSerializer,
+        responses={201: {'type': 'object'}},
+    )
+    def post(self, request):
+        serializer = TruckTowingCreateSerializer(data=request.data, context={'request': request})
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        order = serializer.save()
+        attach_order_images_from_request(order, request)
+        return Response(
+            {
+                'message': 'Your semi-truck towing order has been sent to the selected master',
+                'order': OrderSerializer(order, context={'request': request}).data,
             },
             status=status.HTTP_201_CREATED,
         )

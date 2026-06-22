@@ -10,6 +10,8 @@ urlpatterns = [
     path('custom-request/', views.CustomRequestCreateView.as_view(), name='custom-request-create'),
     path('towing/estimate/', views.TowingEstimateView.as_view(), name='towing-estimate'),
     path('towing/', views.TowingCreateView.as_view(), name='towing-create'),
+    path('truck/', views.TruckOrderCreateView.as_view(), name='truck-order-create'),
+    path('truck/towing/', views.TruckTowingCreateView.as_view(), name='truck-towing-create'),
     path(
         'emergency/estimate-price/',
         views.EmergencyPriceEstimateView.as_view(),
