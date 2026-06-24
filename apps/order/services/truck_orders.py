@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from apps.categories.models import Category
+from apps.master.towing_types import TowingServiceType
+
+TRUCK_TOWING_SERVICE_TYPE = TowingServiceType.SEMI_TRUCK
 
 
 def is_truck_towing_subcategory(category: Category) -> bool:

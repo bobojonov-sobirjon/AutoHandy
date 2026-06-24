@@ -272,7 +272,7 @@ class Order(models.Model):
         null=True,
         blank=True,
         verbose_name='Towing service type (snapshot)',
-        help_text='local, long_distance, accident_recovery, or motorcycle — selected by driver at order creation.',
+        help_text='local, long_distance, accident_recovery, motorcycle, or semi_truck — selected by driver at order creation.',
     )
     truck_make_model = models.CharField(
         max_length=255,

@@ -1425,13 +1425,9 @@ class TruckOrderCreateSerializer(serializers.Serializer):
 
 
 class TruckTowingCreateSerializer(serializers.Serializer):
-    """Semi-truck towing: mileage price + truck info (no passenger car)."""
+    """Semi-truck towing: mileage price (semi_truck tariff) + truck info (no passenger car)."""
 
     category_id = serializers.IntegerField(help_text='Semi-truck Towing subcategory ID.')
-    service_type = serializers.ChoiceField(
-        choices=TowingServiceType.choices,
-        help_text='Towing pricing tier (local, long_distance, accident_recovery, motorcycle).',
-    )
     master_id = serializers.IntegerField()
     truck_make_model = serializers.CharField(max_length=255)
     truck_year = serializers.IntegerField(required=False, allow_null=True, min_value=1900, max_value=2100)
@@ -1493,7 +1489,10 @@ class TruckTowingCreateSerializer(serializers.Serializer):
             calculate_towing_price_for_service,
             resolve_towing_distance_miles,
         )
-        from apps.order.services.truck_orders import get_truck_subcategory
+        from apps.order.services.truck_orders import (
+            TRUCK_TOWING_SERVICE_TYPE,
+            get_truck_subcategory,
+        )
 
         timing = attrs.get('timing') or 'now'
         pd = attrs.get('preferred_date')
@@ -1511,7 +1510,7 @@ class TruckTowingCreateSerializer(serializers.Serializer):
         miles_in = attrs.get('distance_miles')
         dlat = attrs.get('delivery_latitude')
         dlon = attrs.get('delivery_longitude')
-        service_type = attrs['service_type']
+        service_type = TRUCK_TOWING_SERVICE_TYPE
         if miles_in is None and (dlat is None or dlon is None):
             raise serializers.ValidationError(
                 'Send delivery_latitude + delivery_longitude, or distance_miles.'
@@ -1643,6 +1642,52 @@ class TowingEstimateRequestSerializer(serializers.Serializer):
         choices=TowingServiceType.choices,
         help_text='Driver-selected towing service: local, long_distance, accident_recovery, motorcycle.',
     )
+    latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, help_text='Pickup latitude')
+    longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, help_text='Pickup longitude')
+    delivery_latitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
+        required=False,
+        allow_null=True,
+    )
+    delivery_longitude = serializers.DecimalField(
+        **WGS84_COORD_DECIMAL_KWARGS,
+        required=False,
+        allow_null=True,
+    )
+    distance_miles = serializers.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=Decimal('0.01'),
+        help_text='Optional: override computed pickup→delivery distance.',
+    )
+    radius_miles = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=1,
+        max_value=200,
+        help_text='Search radius around pickup (default from settings).',
+    )
+
+    def validate(self, attrs):
+        miles = attrs.get('distance_miles')
+        dlat = attrs.get('delivery_latitude')
+        dlon = attrs.get('delivery_longitude')
+        if miles is None and (dlat is None or dlon is None):
+            raise serializers.ValidationError(
+                'Send delivery_latitude + delivery_longitude, or distance_miles.'
+            )
+        if (dlat is None) ^ (dlon is None):
+            raise serializers.ValidationError(
+                'delivery_latitude and delivery_longitude must be sent together.'
+            )
+        return attrs
+
+
+class TruckTowingEstimateRequestSerializer(serializers.Serializer):
+    """Semi-truck towing estimate — always uses service_type semi_truck."""
+
     latitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, help_text='Pickup latitude')
     longitude = serializers.DecimalField(**WGS84_COORD_DECIMAL_KWARGS, help_text='Pickup longitude')
     delivery_latitude = serializers.DecimalField(

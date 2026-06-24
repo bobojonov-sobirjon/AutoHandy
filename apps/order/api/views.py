@@ -91,6 +91,7 @@ from apps.order.api.serializers import (
     TowingCreateSerializer,
     TruckOrderCreateSerializer,
     TruckTowingCreateSerializer,
+    TruckTowingEstimateRequestSerializer,
     CustomRequestOfferCreateSerializer,
     CustomRequestOfferSerializer,
     CustomRequestOfferWithMasterSerializer,
@@ -1206,6 +1207,48 @@ class TowingCreateView(APIView):
         )
 
 
+class TruckTowingEstimateView(APIView):
+    """Estimate semi-truck towing price (service_type=semi_truck)."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Estimate semi-truck towing price by mileage',
+        description=(
+            'Same formula as passenger towing: `base_fee + (distance_miles × price_per_mile)`. '
+            'Uses masters who configured `service_type=semi_truck` in towing pricing.'
+        ),
+        tags=[STAG_ORDER_DRIVER_CREATE],
+        request=TruckTowingEstimateRequestSerializer,
+        responses={200: {'type': 'object'}},
+    )
+    def post(self, request):
+        from apps.master.towing_types import TowingServiceType
+        from apps.order.services.towing_pricing import build_towing_estimates_for_masters
+
+        ser = TruckTowingEstimateRequestSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = ser.validated_data
+        payload = build_towing_estimates_for_masters(
+            service_type=TowingServiceType.SEMI_TRUCK,
+            pickup_lat=float(data['latitude']),
+            pickup_lon=float(data['longitude']),
+            delivery_lat=float(data['delivery_latitude']) if data.get('delivery_latitude') is not None else None,
+            delivery_lon=float(data['delivery_longitude']) if data.get('delivery_longitude') is not None else None,
+            distance_miles=data.get('distance_miles'),
+            radius_miles=data.get('radius_miles'),
+            request=request,
+        )
+        payload['service_type'] = TowingServiceType.SEMI_TRUCK
+        if payload['master_count'] == 0:
+            payload['note'] = (
+                'No masters with semi-truck towing pricing found within the search radius.'
+            )
+        return Response(payload, status=status.HTTP_200_OK)
+
+
 class TruckOrderCreateView(APIView):
     """Semi-truck roadside service (no passenger car)."""
 
@@ -1248,9 +1291,9 @@ class TruckTowingCreateView(APIView):
     @extend_schema(
         summary='Create semi-truck towing order',
         description=(
-            'Same mileage pricing as `/api/order/towing/`, but uses the semi-truck Towing subcategory '
-            'and `truck_make_model` / `truck_year` instead of `car_list`. '
-            'Estimate prices via `POST /api/order/towing/estimate/` before create.'
+            'Creates semi-truck towing order using `service_type=semi_truck` mileage tariff. '
+            'Uses truck_make_model / truck_year instead of car_list. '
+            'Estimate via `POST /api/order/truck/towing/estimate/` before create.'
         ),
         tags=[STAG_ORDER_DRIVER_CREATE],
         request=TruckTowingCreateSerializer,

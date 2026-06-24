@@ -11,6 +11,7 @@ urlpatterns = [
     path('towing/estimate/', views.TowingEstimateView.as_view(), name='towing-estimate'),
     path('towing/', views.TowingCreateView.as_view(), name='towing-create'),
     path('truck/', views.TruckOrderCreateView.as_view(), name='truck-order-create'),
+    path('truck/towing/estimate/', views.TruckTowingEstimateView.as_view(), name='truck-towing-estimate'),
     path('truck/towing/', views.TruckTowingCreateView.as_view(), name='truck-towing-create'),
     path(
         'emergency/estimate-price/',

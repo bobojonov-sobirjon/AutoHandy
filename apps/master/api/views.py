@@ -787,6 +787,10 @@ JWT, группа **Master**; доступ только к **своей** мас
         for cat in subs:
             if filter_parent_ids is not None and cat.parent_id not in filter_parent_ids:
                 continue
+            from apps.order.services.truck_orders import is_truck_towing_subcategory
+
+            if is_truck_towing_subcategory(cat):
+                continue
             by_parent[cat.parent_id].append(cat)
 
         groups_out = []
@@ -2424,7 +2428,7 @@ class MasterTowingPricingView(APIView):
             'Upsert towing tariffs per service type. '
             'Formula: total = base_fee + (distance_miles × price_per_mile). '
             'Response includes `examples` for 10/20/50 miles. '
-            'Service types: local, long_distance, accident_recovery, motorcycle.'
+            'Service types: local, long_distance, accident_recovery, motorcycle, semi_truck.'
         ),
         tags=['Master Towing'],
         request={
@@ -2439,7 +2443,13 @@ class MasterTowingPricingView(APIView):
                             'properties': {
                                 'service_type': {
                                     'type': 'string',
-                                    'enum': ['local', 'long_distance', 'accident_recovery', 'motorcycle'],
+                                    'enum': [
+                                        'local',
+                                        'long_distance',
+                                        'accident_recovery',
+                                        'motorcycle',
+                                        'semi_truck',
+                                    ],
                                 },
                                 'base_fee': {'type': 'number', 'example': 100},
                                 'price_per_mile': {'type': 'number', 'example': 3},

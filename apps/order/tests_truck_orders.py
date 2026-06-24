@@ -44,9 +44,9 @@ class TruckOrderFlowTestCase(APITestCase):
         self.master_service = MasterService.objects.create(master=self.master)
         MasterTowingPricing.objects.create(
             master=self.master,
-            service_type=TowingServiceType.LOCAL,
-            base_fee=Decimal('150'),
-            price_per_mile=Decimal('5'),
+            service_type=TowingServiceType.SEMI_TRUCK,
+            base_fee=Decimal('200'),
+            price_per_mile=Decimal('6'),
             is_active=True,
         )
 
@@ -103,12 +103,26 @@ class TruckOrderFlowTestCase(APITestCase):
         self.assertEqual(response.data['order']['truck']['year'], 2018)
 
     @patch('apps.order.api.serializers.activate_pending_master_offer')
+    def test_truck_towing_estimate(self, _mock_offer):
+        response = self.client.post(
+            reverse('order:truck-towing-estimate'),
+            {
+                'latitude': '41.311100',
+                'longitude': '69.279700',
+                'distance_miles': '10',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['service_type'], TowingServiceType.SEMI_TRUCK)
+        self.assertEqual(response.data['masters'][0]['pricing']['total_price'], '260.00')
+
+    @patch('apps.order.api.serializers.activate_pending_master_offer')
     def test_truck_towing_order_with_pricing(self, _mock_offer):
         response = self.client.post(
             reverse('order:truck-towing-create'),
             {
                 'category_id': self.truck_towing.id,
-                'service_type': TowingServiceType.LOCAL,
                 'master_id': self.master.id,
                 'truck_make_model': 'Kenworth T680',
                 'truck_year': 2020,
@@ -125,6 +139,7 @@ class TruckOrderFlowTestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         order = Order.objects.get(pk=response.data['order']['id'])
         self.assertEqual(order.order_type, OrderType.TOWING)
+        self.assertEqual(order.towing_trip_type, TowingServiceType.SEMI_TRUCK)
         self.assertEqual(order.truck_make_model, 'Kenworth T680')
         self.assertIsNotNone(order.towing_total)
         self.assertIn(self.truck_towing.id, order.category.values_list('id', flat=True))
