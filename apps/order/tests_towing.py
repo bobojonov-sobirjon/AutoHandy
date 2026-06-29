@@ -146,6 +146,9 @@ class TowingFlowTestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['masters'][0]['pricing']['total_price'], '160.00')
         self.assertNotIn('minimum_fee', response.data['masters'][0]['pricing'])
+        fees = response.data['masters'][0]['marketplace_fees']
+        self.assertEqual(fees['dispatch_fee'], '9.60')
+        self.assertEqual(fees['customer_total'], '177.60')
 
     def test_create_towing_order_local(self):
         response = self.client.post(

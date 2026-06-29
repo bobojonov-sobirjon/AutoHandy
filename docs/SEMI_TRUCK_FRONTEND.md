@@ -217,11 +217,21 @@ Ixtiyoriy: `radius_miles` (1–200, default server sozlamasi).
         "total_price": "350.00",
         "formula": "200.00 + (25.00 × 6.00)",
         "service_type": "semi_truck"
+      },
+      "marketplace_fees": {
+        "technician_total": "350.00",
+        "dispatch_fee": "21.00",
+        "service_fee": "17.50",
+        "platform_fee": "0.00",
+        "customer_total": "388.50",
+        "is_emergency": true
       }
     }
   ]
 }
 ```
+
+Har bir master uchun `marketplace_fees` — SOS kabi **dispatch** (6%) + **service** (5%) foizi; alohida client `platform_fee` yo‘q. Order GET da `pricing.marketplace_fees` ham shu modeldan keladi.
 
 `master_count === 0` bo‘lsa — yaqin atrofda `semi_truck` narx sozlagan master yo‘q.
 

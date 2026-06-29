@@ -159,11 +159,11 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
             'car_count': _order_car_count(order),
             'lines_by_order_service_id': {},
             'emergency': {
-                'is_emergency': False,
+                'is_emergency': True,
                 'time_zone': None,
                 'time_bucket': None,
                 'coefficient': _q(Decimal('1.0')),
-                'note': None,
+                'note': 'Towing uses emergency dispatch and service fees (no client platform fee).',
             },
         }
 

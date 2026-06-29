@@ -271,6 +271,12 @@ def build_towing_estimates_for_masters(
         if not pricing or not pricing.has_configured_rates():
             continue
         breakdown = calculate_towing_price_for_service(pricing, miles)
+        from apps.payment.services.checkout_fees import preview_marketplace_fees_for_work_total
+
+        marketplace_fees = preview_marketplace_fees_for_work_total(
+            breakdown['total_price'],
+            is_emergency=True,
+        )
         wlat, wlon = master.get_work_location_for_distance()
         distance_to_pickup_mi = None
         if wlat is not None:
@@ -283,6 +289,7 @@ def build_towing_estimates_for_masters(
                 'master': MasterNearbySerializer(master, context=serializer_context).data,
                 'distance_to_pickup_miles': distance_to_pickup_mi,
                 'pricing': breakdown,
+                'marketplace_fees': marketplace_fees,
             }
         )
 

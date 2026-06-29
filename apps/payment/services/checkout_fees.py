@@ -14,6 +14,10 @@ def _q(x: Decimal) -> Decimal:
     return x.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
+def _money(amount: Decimal) -> str:
+    return f"{_q(amount):.2f}"
+
+
 def _dec_setting(name: str, default: str) -> Decimal:
     return Decimal(str(getattr(settings, name, default)))
 
@@ -22,25 +26,27 @@ def money_to_cents(amount: Decimal) -> int:
     return int((amount * Decimal('100')).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
 
 
-def compute_marketplace_checkout(order) -> dict[str, Any]:
-    """
-    Returns technician_total (job subtotal after discount rules), optional penalty_total,
-    customer surcharges, customer charge (includes penalties), master_payout (from job subtotal only),
-    platform_gross (before Stripe processing).
-    """
-    bd = compute_order_price_breakdown(order)
-    work = _q(Decimal(str(bd['work_total'])))
-    penalty = _q(Decimal(str(bd.get('penalty_total', 0))))
-    tech = work
-    is_emergency = bool((bd.get('emergency') or {}).get('is_emergency')) or getattr(order, 'order_type', None) == OrderType.SOS
+def _order_uses_emergency_marketplace_fees(order, breakdown: dict[str, Any] | None = None) -> bool:
+    ot = getattr(order, 'order_type', None)
+    if ot in (OrderType.SOS, OrderType.TOWING):
+        return True
+    if breakdown is None:
+        breakdown = compute_order_price_breakdown(order)
+    return bool((breakdown.get('emergency') or {}).get('is_emergency'))
 
+
+def _marketplace_surcharges(
+    tech: Decimal,
+    *,
+    is_emergency: bool,
+    penalty: Decimal = Decimal('0'),
+) -> dict[str, Any]:
     prov_pct = _dec_setting('PROVIDER_PLATFORM_FEE_PERCENT', '10')
     master_payout = _q(tech * (Decimal('100') - prov_pct) / Decimal('100'))
 
     if is_emergency:
         d_pct = _dec_setting('EMERGENCY_DISPATCH_FEE_PERCENT', '6')
         s_pct = _dec_setting('CUSTOMER_SERVICE_FEE_PERCENT_EMERGENCY', '5')
-        client_platform_pct = Decimal('0')
         dispatch_fee = _q(tech * d_pct / Decimal('100'))
         service_fee = _q(tech * s_pct / Decimal('100'))
         platform_fee = Decimal('0')
@@ -54,26 +60,49 @@ def compute_marketplace_checkout(order) -> dict[str, Any]:
     master_platform_fee = _q(tech - master_payout)
     customer_total = _q(tech + dispatch_fee + service_fee + platform_fee + penalty)
     platform_gross = _q(customer_total - master_payout)
-
-    platform_fee_s = format(platform_fee, 'f')
     return {
-        'technician_total': format(tech, 'f'),
-        'penalty_total': format(penalty, 'f'),
+        'technician_total': _money(tech),
+        'penalty_total': _money(penalty),
         'is_emergency': is_emergency,
-        'dispatch_fee': format(dispatch_fee, 'f'),
-        'service_fee': format(service_fee, 'f'),
-        'platform_fee': platform_fee_s,
-        'master_platform_fee': format(master_platform_fee, 'f'),
-        # Backward-compatible alias (same value as platform_fee).
-        'platform_fee_line': platform_fee_s,
-        'customer_total': format(customer_total, 'f'),
-        'master_estimated_payout': format(master_payout, 'f'),
-        'platform_estimated_gross': format(platform_gross, 'f'),
+        'dispatch_fee': _money(dispatch_fee),
+        'service_fee': _money(service_fee),
+        'platform_fee': _money(platform_fee),
+        'master_platform_fee': _money(master_platform_fee),
+        'platform_fee_line': _money(platform_fee),
+        'customer_total': _money(customer_total),
+        'master_estimated_payout': _money(master_payout),
+        'platform_estimated_gross': _money(platform_gross),
         '_customer_total_decimal': customer_total,
         '_master_payout_decimal': master_payout,
         '_technician_total_decimal': tech,
         '_penalty_decimal': penalty,
     }
+
+
+def preview_marketplace_fees_for_work_total(
+    work_total: Decimal | str | float,
+    *,
+    is_emergency: bool,
+) -> dict[str, Any]:
+    """Fee preview for estimates (no order row). Omits internal ``_*_decimal`` keys."""
+    surcharges = _marketplace_surcharges(
+        _q(Decimal(str(work_total))),
+        is_emergency=is_emergency,
+    )
+    return {k: v for k, v in surcharges.items() if not k.startswith('_')}
+
+
+def compute_marketplace_checkout(order) -> dict[str, Any]:
+    """
+    Returns technician_total (job subtotal after discount rules), optional penalty_total,
+    customer surcharges, customer charge (includes penalties), master_payout (from job subtotal only),
+    platform_gross (before Stripe processing).
+    """
+    bd = compute_order_price_breakdown(order)
+    work = _q(Decimal(str(bd['work_total'])))
+    penalty = _q(Decimal(str(bd.get('penalty_total', 0))))
+    is_emergency = _order_uses_emergency_marketplace_fees(order, bd)
+    return _marketplace_surcharges(work, is_emergency=is_emergency, penalty=penalty)
 
 
 def customer_charge_cents(order) -> int:
@@ -103,10 +132,13 @@ def build_order_marketplace_fee_display(order) -> dict[str, Any]:
 
     ot = getattr(order, 'order_type', None)
     is_sos = ot == OrderType.SOS
+    is_towing = ot == OrderType.TOWING
     is_custom = ot == OrderType.CUSTOM_REQUEST
 
     if is_sos:
         pricing_mode = 'emergency'
+    elif is_towing:
+        pricing_mode = 'emergency_towing'
     elif is_custom:
         pricing_mode = 'scheduled_custom_request'
     else:
