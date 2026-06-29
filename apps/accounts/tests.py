@@ -1,4 +1,4 @@
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APITestCase
 from rest_framework import status
@@ -214,6 +214,31 @@ class IdentifierSerializerTestCase(TestCase):
         self.assertTrue(serializer.is_valid())
         self.assertEqual(serializer.validated_data['identifier']['type'], 'phone')
         self.assertEqual(serializer.validated_data['identifier']['value'], '79123456789')
+
+    @override_settings(DEFAULT_PHONE_COUNTRY_CODE='1')
+    def test_validate_phone_number_us_e164(self):
+        from .serializers import IdentifierSerializer
+        from apps.accounts.services import SMSService
+
+        data = {'identifier': '+12797580037', 'role': 'Driver'}
+        serializer = IdentifierSerializer(data=data)
+        self.assertTrue(serializer.is_valid())
+        self.assertEqual(serializer.validated_data['identifier']['value'], '12797580037')
+        self.assertEqual(SMSService.format_phone_to_e164('+12797580037'), '12797580037')
+
+        data = {'identifier': '12797580037', 'role': 'Driver'}
+        serializer = IdentifierSerializer(data=data)
+        self.assertTrue(serializer.is_valid())
+        self.assertEqual(serializer.validated_data['identifier']['value'], '12797580037')
+
+    @override_settings(DEFAULT_PHONE_COUNTRY_CODE='1')
+    def test_validate_phone_number_us_ten_digit_national(self):
+        from .serializers import IdentifierSerializer
+
+        data = {'identifier': '2797580037', 'role': 'Driver'}
+        serializer = IdentifierSerializer(data=data)
+        self.assertTrue(serializer.is_valid())
+        self.assertEqual(serializer.validated_data['identifier']['value'], '12797580037')
     
     def test_validate_email(self):
         """Тест валидации email"""

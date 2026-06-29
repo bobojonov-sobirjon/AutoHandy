@@ -44,6 +44,12 @@ def order_scheduled_start_datetime(order) -> datetime | None:
     )
 
 
+def preferred_slot_for_immediate_service() -> tuple[date, time]:
+    """ASAP / right-now orders: snapshot current local service date + time for master UI."""
+    now = timezone.now().astimezone(scheduled_order_timezone())
+    return now.date(), now.time().replace(second=0, microsecond=0)
+
+
 def scheduled_no_start_cancel_deadline(
     *,
     order=None,

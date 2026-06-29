@@ -1590,6 +1590,10 @@ class TruckTowingCreateSerializer(serializers.Serializer):
         timing = validated_data.pop('timing', 'now')
         pd = validated_data.pop('preferred_date', None)
         ps = validated_data.pop('preferred_time_start', None)
+        if timing == 'now' or not (pd and ps):
+            from apps.order.services.order_scheduled_start import preferred_slot_for_immediate_service
+
+            pd, ps = preferred_slot_for_immediate_service()
         text = (validated_data.pop('text', None) or 'Semi-truck towing').strip() or 'Semi-truck towing'
         if text == 'Semi-truck towing':
             text = build_truck_order_text(category, truck_make_model, truck_year)
@@ -1619,8 +1623,8 @@ class TruckTowingCreateSerializer(serializers.Serializer):
             average_service_name=category.name,
             truck_make_model=truck_make_model,
             truck_year=truck_year,
-            preferred_date=pd if timing == 'schedule' else None,
-            preferred_time_start=ps if timing == 'schedule' else None,
+            preferred_date=pd,
+            preferred_time_start=ps,
         )
         order.category.set([category_id])
 
@@ -1878,6 +1882,9 @@ class TowingCreateSerializer(serializers.Serializer):
             )
 
         master = Master.objects.get(id=master_id)
+        from apps.order.services.order_scheduled_start import preferred_slot_for_immediate_service
+
+        asap_date, asap_time = preferred_slot_for_immediate_service()
         order = Order.objects.create(
             user=self.context['request'].user,
             master=master,
@@ -1900,6 +1907,8 @@ class TowingCreateSerializer(serializers.Serializer):
             towing_total=Decimal(breakdown['total_price']),
             average_price=Decimal(breakdown['total_price']),
             average_service_name='Towing',
+            preferred_date=asap_date,
+            preferred_time_start=asap_time,
         )
         if car_list:
             order.car.set(list(dict.fromkeys(car_list)))

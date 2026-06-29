@@ -108,11 +108,15 @@ class SMSService:
         elif len(cleaned) == 10 and cleaned.startswith('9'):
             # Russia 9XXXXXXXXX -> 79XXXXXXXXX
             cleaned = '7' + cleaned
-        # If user entered national number without country code, optionally prepend default.
-        # Example: US national 10 digits -> +1XXXXXXXXXX (if DEFAULT_PHONE_COUNTRY_CODE=1)
+        # If user entered national number without country code, prepend default country code.
+        # US app: set DEFAULT_PHONE_COUNTRY_CODE=1 so 2797580037 -> 12797580037
         default_cc = str(getattr(settings, 'DEFAULT_PHONE_COUNTRY_CODE', '') or '').strip()
         if default_cc and cleaned.isdigit() and len(cleaned) == 10:
             cleaned = f'{default_cc}{cleaned}'
+
+        # US/Canada NANP: 11 digits starting with 1 is already E.164 without +
+        if len(cleaned) == 11 and cleaned.startswith('1'):
+            return cleaned
 
         # Already has country code (e.g. 998..., 7..., 1..., 44...) or default applied above.
         return cleaned

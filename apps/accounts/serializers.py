@@ -39,15 +39,13 @@ def validate_phone_number_format(value):
     """
     if not value:
         raise ValidationError("Phone number is required")
-    cleaned = re.sub(r'\D', '', value)
-    if len(cleaned) < 10 or len(cleaned) > 15:
+    from apps.accounts.services import SMSService
+
+    cleaned = SMSService.format_phone_to_e164(value)
+    digits = re.sub(r'\D', '', cleaned or '')
+    if len(digits) < 10 or len(digits) > 15:
         raise ValidationError("Phone number must be 10–15 digits (with country code)")
-    # Russia: 8XXXXXXXXXX -> 7XXXXXXXXXX
-    if len(cleaned) == 11 and cleaned.startswith('8'):
-        cleaned = '7' + cleaned[1:]
-    elif len(cleaned) == 10 and cleaned.startswith('9'):
-        cleaned = '7' + cleaned
-    return cleaned
+    return digits
 
 
 class IdentifierSerializer(serializers.Serializer):
@@ -66,7 +64,9 @@ class IdentifierSerializer(serializers.Serializer):
         value = value.strip()
         if '@' in value:
             return {'type': 'email', 'value': validate_email_format(value)}
-        elif value.startswith(('+', '7', '8', '9')) or (value.replace('+', '').replace(' ', '').replace('-', '').isdigit()):
+        elif value.startswith(('+', '1', '7', '8', '9')) or (
+            value.replace('+', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '').isdigit()
+        ):
             return {'type': 'phone', 'value': validate_phone_number_format(value)}
         raise ValidationError("Invalid format. Enter email or phone number")
 
@@ -103,7 +103,9 @@ class SMSVerificationSerializer(serializers.Serializer):
         value = value.strip()
         if '@' in value:
             return {'type': 'email', 'value': validate_email_format(value)}
-        elif value.startswith(('+', '7', '8', '9')) or (value.replace('+', '').replace(' ', '').replace('-', '').isdigit()):
+        elif value.startswith(('+', '1', '7', '8', '9')) or (
+            value.replace('+', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '').isdigit()
+        ):
             return {'type': 'phone', 'value': validate_phone_number_format(value)}
         raise ValidationError("Invalid format. Enter email or phone number")
 
