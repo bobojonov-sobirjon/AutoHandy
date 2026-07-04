@@ -1502,6 +1502,19 @@ class TruckTowingCreateSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     'preferred_date and preferred_time_start are required when timing=schedule.'
                 )
+            from apps.order.services.order_scheduled_start import (
+                scheduled_slot_is_in_future,
+                scheduled_slot_past_cancel_deadline,
+            )
+
+            if not scheduled_slot_is_in_future(preferred_date=pd, preferred_time_start=ps):
+                raise serializers.ValidationError(
+                    {'preferred_time_start': 'Scheduled start time must be in the future.'}
+                )
+            if scheduled_slot_past_cancel_deadline(preferred_date=pd, preferred_time_start=ps):
+                raise serializers.ValidationError(
+                    {'preferred_time_start': 'Scheduled time window has already passed; choose a later slot.'}
+                )
         elif pd is not None or ps is not None:
             raise serializers.ValidationError(
                 'preferred_date and preferred_time_start are only used when timing=schedule.'

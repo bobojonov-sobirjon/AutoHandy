@@ -3369,8 +3369,8 @@ class OrderMasterPreferredTimePatchView(APIView):
     @extend_schema(
         summary='Предпочтительное время окончания (мастер, после accept)',
         description=(
-            'Только **standard** заказ, статус **accepted**, назначенный мастер. '
-            'Клиент при создании передаёт `preferred_date` + `preferred_time_start`; '
+            '**standard**, **towing**, yoki rejalashtirilgan **sos** zakaz, status **accepted**, '
+            'назначенный мастер. Клиент при создании передаёт `preferred_date` + `preferred_time_start`; '
             'в теле запроса только **`preferred_time_end`**.'
         ),
         tags=[STAG_ORDER_MASTER_AVAILABLE],
@@ -3389,9 +3389,11 @@ class OrderMasterPreferredTimePatchView(APIView):
         except Order.DoesNotExist:
             return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        if order.order_type != OrderType.STANDARD:
+        from apps.order.services.order_scheduled_start import order_supports_master_preferred_time_end_patch
+
+        if not order_supports_master_preferred_time_end_patch(order):
             return Response(
-                {'error': 'Only for standard orders'},
+                {'error': 'Only for standard, towing, or scheduled SOS orders'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if order.status != OrderStatus.ACCEPTED:

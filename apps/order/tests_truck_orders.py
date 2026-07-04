@@ -144,6 +144,55 @@ class TruckOrderFlowTestCase(APITestCase):
         self.assertIsNotNone(order.towing_total)
         self.assertIn(self.truck_towing.id, order.category.values_list('id', flat=True))
 
+    @patch('apps.order.api.serializers.activate_pending_master_offer')
+    def test_truck_towing_master_can_set_preferred_time_end(self, _mock_offer):
+        from datetime import date, time, timedelta
+
+        from django.utils import timezone
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        from apps.order.models import OrderStatus
+        from apps.order.services.order_scheduled_start import scheduled_order_timezone
+
+        local_now = timezone.now().astimezone(scheduled_order_timezone())
+        preferred_date = local_now.date() + timedelta(days=2)
+        preferred_time_start = time(10, 0)
+
+        create_resp = self.client.post(
+            reverse('order:truck-towing-create'),
+            {
+                'category_id': self.truck_towing.id,
+                'master_id': self.master.id,
+                'truck_make_model': 'Kenworth T680',
+                'location': 'Pickup yard',
+                'latitude': '41.311100',
+                'longitude': '69.279700',
+                'delivery_latitude': '41.320000',
+                'delivery_longitude': '69.290000',
+                'timing': 'schedule',
+                'preferred_date': preferred_date.isoformat(),
+                'preferred_time_start': preferred_time_start.strftime('%H:%M'),
+            },
+            format='json',
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED, create_resp.data)
+        order = Order.objects.get(pk=create_resp.data['order']['id'])
+        order.status = OrderStatus.ACCEPTED
+        order.save(update_fields=['status', 'updated_at'])
+
+        master_refresh = RefreshToken.for_user(self.master_user)
+        master_client = self.client_class()
+        master_client.credentials(HTTP_AUTHORIZATION=f'Bearer {master_refresh.access_token}')
+
+        patch_resp = master_client.patch(
+            reverse('order:order-master-preferred-time', kwargs={'order_id': order.pk}),
+            {'preferred_time_end': '12:00'},
+            format='json',
+        )
+        self.assertEqual(patch_resp.status_code, status.HTTP_200_OK, patch_resp.data)
+        order.refresh_from_db()
+        self.assertEqual(order.preferred_time_end, time(12, 0))
+
     def test_truck_endpoint_rejects_towing_category(self):
         response = self.client.post(
             reverse('order:truck-order-create'),

@@ -103,3 +103,16 @@ def scheduled_slot_is_in_future(
     if grace is None:
         grace = int(getattr(settings, 'SCHEDULED_CREATE_PAST_GRACE_MINUTES', 5))
     return start > now - timedelta(minutes=max(0, grace))
+
+
+def order_supports_master_preferred_time_end_patch(order) -> bool:
+    """Whether assigned master may PATCH preferred_time_end after accept."""
+    from apps.order.models import OrderType
+
+    if order.order_type == OrderType.STANDARD:
+        return True
+    if order.order_type == OrderType.TOWING:
+        return True
+    if order.order_type == OrderType.SOS and order_has_scheduled_start(order):
+        return True
+    return False

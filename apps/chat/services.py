@@ -108,6 +108,21 @@ def sync_closes_at_from_completed_order(*, room: ChatRoom) -> None:
 
 
 @transaction.atomic
+def reopen_order_chat_messaging(*, room: ChatRoom) -> ChatRoom:
+    """
+    Re-enable messaging when the same customer/master pair starts a new order.
+    Clears the previous grace-period deadline so history stays readable but sending works again.
+    """
+    room = ChatRoom.objects.select_for_update().get(pk=room.pk)
+    if room.is_active and room.closes_at is None:
+        return room
+    room.is_active = True
+    room.closes_at = None
+    room.save(update_fields=['is_active', 'closes_at', 'updated_at'])
+    return room
+
+
+@transaction.atomic
 def schedule_order_chat_grace_period(*, order) -> None:
     """Call when order moves to COMPLETED — chat stays open for N hours."""
     room_id = getattr(order, 'chat_room_id', None)
@@ -153,6 +168,7 @@ def get_or_create_order_chat_room(*, master_user, customer_user) -> tuple[ChatRo
         .first()
     )
     if existing:
+        reopen_order_chat_messaging(room=existing)
         return existing, False
 
     room = ChatRoom.objects.create(initiator=master_user, is_active=True)
