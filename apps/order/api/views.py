@@ -3182,7 +3182,6 @@ class AcceptOrderView(APIView):
                 sync_order_services_from_order_categories(order)
 
             order.refresh_from_db()
-            serializer = OrderSerializer(order, context={'request': request})
             if broadcast_close_recipients and order.order_type in (OrderType.SOS, OrderType.CUSTOM_REQUEST):
                 try:
                     from apps.order.services.notifications import notify_masters_broadcast_order_closed_websocket
@@ -3221,13 +3220,15 @@ class AcceptOrderView(APIView):
 
                 if order.chat_room_id is None and order.master_id:
                     room, _created = get_or_create_order_chat_room(
-                        master_user=request.user,
+                        master_user=order.master.user,
                         customer_user=order.user,
                     )
                     order.chat_room = room
                     order.save(update_fields=['chat_room', 'updated_at'])
             except Exception:  # noqa: BLE001
                 pass
+            order.refresh_from_db()
+            serializer = OrderSerializer(order, context={'request': request})
             return Response(
                 {
                     'message': 'Заказ принят. Далее: «В пути» → «Прибыл» → «Начать работу».',
@@ -3585,6 +3586,8 @@ class CompleteOrderView(APIView):
                         'completion_pin',
                         'completion_pin_issued_at',
                         'updated_at',
+                        'saved_card',
+                        'payment_type',
                         'stripe_payment_intent_id',
                         'stripe_payment_status',
                         'stripe_payment_amount_cents',
@@ -3798,6 +3801,8 @@ Order detail / complete responses include **`post_completion`** for the driver (
                 charge_order_tip(order, tip_amount)
                 order.save(
                     update_fields=[
+                        'saved_card',
+                        'payment_type',
                         'tip_amount',
                         'tip_stripe_payment_intent_id',
                         'tip_stripe_payment_status',
@@ -3844,6 +3849,8 @@ Order detail / complete responses include **`post_completion`** for the driver (
                 charge_order_tip(order, tip_amount)
                 order.save(
                     update_fields=[
+                        'saved_card',
+                        'payment_type',
                         'tip_amount',
                         'tip_stripe_payment_intent_id',
                         'tip_stripe_payment_status',

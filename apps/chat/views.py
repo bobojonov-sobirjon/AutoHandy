@@ -20,6 +20,7 @@ from .services import (
     broadcast_chat_messages,
     post_safety_welcome_if_needed,
     refresh_room_messaging_state,
+    reopen_order_chat_messaging,
 )
 
 
@@ -181,6 +182,7 @@ If chat already exists, returns the existing chat.
         ).first()
 
         if existing_room:
+            reopen_order_chat_messaging(room=existing_room)
             result_serializer = ChatRoomSerializer(existing_room, context={'request': request})
             return Response(result_serializer.data, status=status.HTTP_200_OK)
 

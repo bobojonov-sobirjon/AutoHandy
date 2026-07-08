@@ -5,7 +5,11 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.chat.models import ChatRoom
-from apps.chat.services import get_or_create_order_chat_room, reopen_order_chat_messaging
+from apps.chat.services import (
+    get_or_create_order_chat_room,
+    refresh_room_messaging_state,
+    reopen_order_chat_messaging,
+)
 
 User = get_user_model()
 
@@ -55,3 +59,25 @@ class OrderChatReopenTestCase(TestCase):
         self.assertEqual(result.pk, room.pk)
         result.refresh_from_db()
         self.assertTrue(result.messaging_is_open())
+
+    def test_refresh_does_not_reclose_room_with_active_order(self):
+        from apps.master.models import Master
+        from apps.order.models import Order, OrderStatus, OrderType
+
+        room = self._closed_room()
+        master = Master.objects.create(user=self.master_user)
+        Order.objects.create(
+            user=self.customer_user,
+            master=master,
+            order_type=OrderType.TOWING,
+            status=OrderStatus.ACCEPTED,
+            chat_room=room,
+        )
+        reopen_order_chat_messaging(room=room)
+        room.refresh_from_db()
+        self.assertTrue(room.messaging_is_open())
+
+        refresh_room_messaging_state(room=room)
+        room.refresh_from_db()
+        self.assertTrue(room.messaging_is_open())
+        self.assertIsNone(room.closes_at)

@@ -6,8 +6,10 @@ from decimal import Decimal
 from django.conf import settings
 from django.utils import timezone
 
-from apps.order.models import Order, OrderStripePaymentStatus
+from apps.order.models import Order, OrderPaymentType, OrderStripePaymentStatus
+from apps.payment.models import SavedCard
 from apps.payment.services.checkout_fees import customer_charge_cents, master_payout_cents, money_to_cents
+from apps.payment.services.stripe_cards import resolve_client_saved_card
 from apps.payment.services.stripe_client import stripe_configured, stripe_sdk
 
 
@@ -91,22 +93,36 @@ def _friendly_stripe_destination_error(msg: str) -> str | None:
     return None
 
 
+def _resolve_order_charge_card(order: Order) -> SavedCard:
+    """
+    Order-linked card first, else the client's default saved card (same as cancel penalties).
+    Also links the card on the order when missing so later charges reuse it.
+    """
+    card = resolve_client_saved_card(order)
+    if not card:
+        raise StripeChargeError(
+            'No saved card on file. Add a payment card in the app before leaving a tip.'
+        )
+    if card.user_id != order.user_id:
+        raise StripeChargeError('Saved card does not belong to the order owner.')
+    if not card.is_active:
+        raise StripeChargeError('Saved card is inactive.')
+    if not order.saved_card_id:
+        order.saved_card = card
+        order.payment_type = OrderPaymentType.CARD
+    return card
+
+
 def charge_order_on_completion(order: Order) -> None:
     """
     Charge the order owner's saved card when the master completes the job.
     On success updates order stripe_* fields via ORM (caller should save completion in same transaction).
     Raises StripeChargeError on failure (no DB writes on failure).
     """
-    if not order.saved_card_id:
-        raise StripeChargeError('No saved card on this order.')
     if not stripe_configured():
         raise StripeChargeError('Stripe is not configured on the server.')
 
-    card = order.saved_card
-    if card.user_id != order.user_id:
-        raise StripeChargeError('Saved card does not belong to the order owner.')
-    if not card.is_active:
-        raise StripeChargeError('Saved card is inactive.')
+    card = _resolve_order_charge_card(order)
 
     amount_cents = customer_charge_cents(order)
     if amount_cents <= 0:
@@ -171,11 +187,10 @@ def charge_order_on_completion(order: Order) -> None:
 
 def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
     """
-    Off-session tip after completion. Full amount is transferred to the assigned master
-    (no platform fee on tips). Updates order tip_* fields on success.
+    Off-session tip after completion. When the master has an eligible Connect account,
+    100% is transferred to them (no platform fee). Otherwise the tip is captured on
+    the platform account (same as a job payment without Connect).
     """
-    if not order.saved_card_id:
-        raise StripeChargeError('No saved card on this order.')
     if not stripe_configured():
         raise StripeChargeError('Stripe is not configured on the server.')
 
@@ -183,11 +198,7 @@ def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
     if amount <= 0:
         raise StripeChargeError('Tip amount must be positive.')
 
-    card = order.saved_card
-    if card.user_id != order.user_id:
-        raise StripeChargeError('Saved card does not belong to the order owner.')
-    if not card.is_active:
-        raise StripeChargeError('Saved card is inactive.')
+    card = _resolve_order_charge_card(order)
 
     amount_cents = money_to_cents(amount)
     currency = (getattr(settings, 'STRIPE_CHARGE_CURRENCY', 'usd') or 'usd').lower()
@@ -197,11 +208,10 @@ def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
             dest = (order.master.stripe_connect_account_id or '').strip()
         except Exception:
             dest = ''
-    if not dest:
-        raise StripeChargeError('Master has no Stripe Connect account for tip payout.')
 
     stripe = stripe_sdk()
-    _assert_connect_destination_can_receive_transfers(stripe, dest)
+    if dest:
+        _assert_connect_destination_can_receive_transfers(stripe, dest)
 
     idem = f'autohandy_order_{order.pk}_tip_v1'
     params: dict = {
@@ -217,8 +227,9 @@ def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
             'kind': 'tip',
         },
         'idempotency_key': idem,
-        'transfer_data': {'destination': dest},
     }
+    if dest:
+        params['transfer_data'] = {'destination': dest}
 
     try:
         pi = stripe.PaymentIntent.create(**params)

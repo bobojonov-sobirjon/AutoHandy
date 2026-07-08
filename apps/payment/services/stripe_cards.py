@@ -156,3 +156,50 @@ def detach_card(user, card_pk: int) -> None:
         )
         nxt.is_default = True
         nxt.save(update_fields=['is_default', 'updated_at'])
+
+
+def resolve_client_saved_card(order) -> SavedCard | None:
+    """Order-linked card first, else user's default/active client card."""
+    if order.saved_card_id:
+        card = order.saved_card
+        if card and card.is_active and card.user_id == order.user_id:
+            if card.holder_role == SavedCardHolderRole.CLIENT:
+                return card
+    return (
+        SavedCard.objects.filter(
+            user_id=order.user_id,
+            is_active=True,
+            holder_role=SavedCardHolderRole.CLIENT,
+        )
+        .order_by('-is_default', '-created_at')
+        .first()
+    )
+
+
+def attach_default_client_saved_card_to_order(order, *, user=None):
+    """
+    Link the client's default saved card to an order when none is set yet.
+    Used on create for towing / truck flows so cancel penalties can charge off-session.
+    """
+    from apps.order.models import OrderPaymentType
+
+    if getattr(order, 'saved_card_id', None):
+        return order.saved_card
+    owner = user or getattr(order, 'user', None)
+    if owner is None:
+        return None
+    card = (
+        SavedCard.objects.filter(
+            user_id=owner.pk,
+            is_active=True,
+            holder_role=SavedCardHolderRole.CLIENT,
+        )
+        .order_by('-is_default', '-created_at')
+        .first()
+    )
+    if not card:
+        return None
+    order.saved_card = card
+    order.payment_type = OrderPaymentType.CARD
+    order.save(update_fields=['saved_card', 'payment_type', 'updated_at'])
+    return card

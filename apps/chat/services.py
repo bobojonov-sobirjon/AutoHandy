@@ -78,6 +78,17 @@ def refresh_room_messaging_state(*, room: ChatRoom, ensure_closed_banner: bool =
     room = ChatRoom.objects.select_for_update().get(pk=room.pk)
     sync_closes_at_from_completed_order(room=room)
 
+    from apps.order.models import Order, OrderStatus
+
+    terminal = {OrderStatus.COMPLETED, OrderStatus.CANCELLED, OrderStatus.REJECTED}
+    if (
+        not room.messaging_is_open()
+        and Order.objects.filter(chat_room_id=room.pk).exclude(status__in=terminal).exists()
+    ):
+        room.is_active = True
+        room.closes_at = None
+        room.save(update_fields=['is_active', 'closes_at', 'updated_at'])
+
     now = timezone.now()
     if room.closes_at and now >= room.closes_at and room.is_active:
         room.is_active = False
@@ -94,6 +105,11 @@ def sync_closes_at_from_completed_order(*, room: ChatRoom) -> None:
     if room.closes_at is not None:
         return
     from apps.order.models import Order, OrderStatus
+
+    terminal = {OrderStatus.COMPLETED, OrderStatus.CANCELLED, OrderStatus.REJECTED}
+    if Order.objects.filter(chat_room_id=room.pk).exclude(status__in=terminal).exists():
+        # Active order reuses this room — do not inherit close time from an older completed order.
+        return
 
     order = (
         Order.objects.filter(chat_room_id=room.pk, status=OrderStatus.COMPLETED)

@@ -6,28 +6,10 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.conf import settings
 
 from apps.order.models import Order, OrderStripePaymentStatus
-from apps.payment.models import SavedCard, SavedCardHolderRole
 from apps.payment.services.checkout_fees import money_to_cents
 from apps.payment.services.order_charge import StripeChargeError
+from apps.payment.services.stripe_cards import resolve_client_saved_card
 from apps.payment.services.stripe_client import stripe_configured, stripe_sdk
-
-
-def resolve_client_saved_card(order: Order) -> SavedCard | None:
-    """Order-linked card first, else user's default/active client card."""
-    if order.saved_card_id:
-        card = order.saved_card
-        if card and card.is_active and card.user_id == order.user_id:
-            if card.holder_role == SavedCardHolderRole.CLIENT:
-                return card
-    return (
-        SavedCard.objects.filter(
-            user_id=order.user_id,
-            is_active=True,
-            holder_role=SavedCardHolderRole.CLIENT,
-        )
-        .order_by('-is_default', '-created_at')
-        .first()
-    )
 
 
 def cancellation_penalty_already_collected(order: Order) -> bool:

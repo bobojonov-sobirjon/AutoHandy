@@ -1641,6 +1641,10 @@ class TruckTowingCreateSerializer(serializers.Serializer):
         )
         order.category.set([category_id])
 
+        from apps.payment.services.stripe_cards import attach_default_client_saved_card_to_order
+
+        attach_default_client_saved_card_to_order(order, user=self.context['request'].user)
+
         if order.status == OrderStatus.PENDING:
             activate_pending_master_offer(order, request=self.context.get('request'))
             try:
@@ -1926,6 +1930,10 @@ class TowingCreateSerializer(serializers.Serializer):
         if car_list:
             order.car.set(list(dict.fromkeys(car_list)))
         order.category.set([cat.pk])
+
+        from apps.payment.services.stripe_cards import attach_default_client_saved_card_to_order
+
+        attach_default_client_saved_card_to_order(order, user=self.context['request'].user)
 
         if order.status == OrderStatus.PENDING:
             activate_pending_master_offer(order, request=self.context.get('request'))
