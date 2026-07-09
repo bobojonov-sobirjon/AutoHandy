@@ -59,7 +59,9 @@ class ChargeOrderTipTestCase(TestCase):
         self.assertEqual(self.order.saved_card_id, self.card.id)
         self.assertEqual(self.order.tip_amount, Decimal('10.00'))
         self.assertEqual(self.order.tip_stripe_payment_status, OrderStripePaymentStatus.SUCCEEDED)
+        self.assertEqual(self.order.tip_stripe_payment_amount_cents, 1080)
         create_kwargs = mock_stripe_sdk.return_value.PaymentIntent.create.call_args.kwargs
+        self.assertEqual(create_kwargs['amount'], 1080)
         self.assertNotIn('transfer_data', create_kwargs)
 
     @patch('apps.payment.services.order_charge.stripe_configured', return_value=True)
@@ -76,7 +78,10 @@ class ChargeOrderTipTestCase(TestCase):
         charge_order_tip(self.order, Decimal('5.00'))
 
         create_kwargs = mock_stripe_sdk.return_value.PaymentIntent.create.call_args.kwargs
+        self.assertEqual(create_kwargs['amount'], 540)
         self.assertEqual(create_kwargs['transfer_data']['destination'], 'acct_test123')
+        self.assertEqual(create_kwargs['application_fee_amount'], 90)
+        self.assertEqual(self.order.tip_stripe_payment_amount_cents, 540)
 
     def test_tip_without_any_saved_card_raises(self):
         self.card.is_active = False

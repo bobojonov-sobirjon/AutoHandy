@@ -11,6 +11,11 @@ from rest_framework.views import APIView
 from apps.master.models import Master
 from apps.master.permissions import IsMasterGroup
 from apps.order.models import Order, OrderStatus
+from apps.payment.services.checkout_fees import (
+    build_order_tip_display,
+    master_payout_cents,
+    master_tip_payout_cents,
+)
 from apps.payment.services.connect_balance import list_connect_balance_transactions
 
 
@@ -80,6 +85,12 @@ class MasterCheckoutHistoryView(APIView):
                 'stripe_payment_amount_cents',
                 'stripe_payment_currency',
                 'stripe_payment_error',
+                'tip_amount',
+                'tip_stripe_payment_intent_id',
+                'tip_stripe_payment_status',
+                'tip_stripe_payment_amount_cents',
+                'tip_paid_at',
+                'order_type',
                 'updated_at',
             )
         )
@@ -99,6 +110,11 @@ class MasterCheckoutHistoryView(APIView):
 
         order_rows = []
         for o in p_obj_list:
+            job_master_payout_cents = master_payout_cents(o)
+            tip_info = build_order_tip_display(o)
+            tip_master_payout_cents = 0
+            if tip_info and o.tip_amount and o.tip_amount > 0:
+                tip_master_payout_cents = master_tip_payout_cents(o, o.tip_amount)
             order_rows.append(
                 {
                     'order_id': o.id,
@@ -108,6 +124,8 @@ class MasterCheckoutHistoryView(APIView):
                     'stripe_payment_amount_cents': o.stripe_payment_amount_cents,
                     'stripe_payment_currency': (o.stripe_payment_currency or '').upper() or None,
                     'stripe_payment_error': (o.stripe_payment_error or '')[:500] or None,
+                    'tip': tip_info,
+                    'master_payout_cents': job_master_payout_cents + tip_master_payout_cents,
                     'completed_at': o.updated_at.isoformat() if o.updated_at else None,
                 }
             )

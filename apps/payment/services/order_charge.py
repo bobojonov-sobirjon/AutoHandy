@@ -8,7 +8,13 @@ from django.utils import timezone
 
 from apps.order.models import Order, OrderPaymentType, OrderStripePaymentStatus
 from apps.payment.models import SavedCard
-from apps.payment.services.checkout_fees import customer_charge_cents, master_payout_cents, money_to_cents
+from apps.payment.services.checkout_fees import (
+    customer_charge_cents,
+    customer_tip_charge_cents,
+    master_payout_cents,
+    master_tip_payout_cents,
+    money_to_cents,
+)
 from apps.payment.services.stripe_cards import resolve_client_saved_card
 from apps.payment.services.stripe_client import stripe_configured, stripe_sdk
 
@@ -187,10 +193,9 @@ def charge_order_on_completion(order: Order) -> None:
 
 def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
     """
-    Off-session tip after completion. When the master has an eligible Connect account,
-    100% is transferred to them (no platform fee). Otherwise the tip is captured on
-    the platform account (same as a job payment without Connect).
-    """
+    Off-session tip after completion. Customer pays tip + marketplace surcharges (same % as the job).
+    Master receives tip payout after PROVIDER_PLATFORM_FEE_PERCENT (default 10%).
+  """
     if not stripe_configured():
         raise StripeChargeError('Stripe is not configured on the server.')
 
@@ -200,7 +205,16 @@ def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
 
     card = _resolve_order_charge_card(order)
 
-    amount_cents = money_to_cents(amount)
+    amount_cents = customer_tip_charge_cents(order, amount)
+    if amount_cents <= 0:
+        raise StripeChargeError('Tip charge amount must be positive.')
+
+    payout_cents = master_tip_payout_cents(order, amount)
+    application_fee = max(0, amount_cents - payout_cents)
+    extra_bps = int(getattr(settings, 'STRIPE_CONNECT_EXTRA_APPLICATION_FEE_BPS', 0) or 0)
+    if extra_bps > 0:
+        application_fee = min(amount_cents, application_fee + int(amount_cents * extra_bps / 10000))
+
     currency = (getattr(settings, 'STRIPE_CHARGE_CURRENCY', 'usd') or 'usd').lower()
     dest = ''
     if order.master_id:
@@ -225,11 +239,14 @@ def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
             'order_id': str(order.pk),
             'user_id': str(order.user_id),
             'kind': 'tip',
+            'tip_base': format(amount, 'f'),
         },
         'idempotency_key': idem,
     }
     if dest:
         params['transfer_data'] = {'destination': dest}
+        if application_fee > 0:
+            params['application_fee_amount'] = application_fee
 
     try:
         pi = stripe.PaymentIntent.create(**params)
@@ -245,5 +262,6 @@ def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
     order.tip_amount = amount
     order.tip_stripe_payment_intent_id = str(pi.id)
     order.tip_stripe_payment_status = OrderStripePaymentStatus.SUCCEEDED
+    order.tip_stripe_payment_amount_cents = amount_cents
     order.tip_declined = False
     order.tip_paid_at = timezone.now()

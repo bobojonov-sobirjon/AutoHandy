@@ -315,6 +315,7 @@ class OrderSerializer(serializers.ModelSerializer):
     stripe_payment_amount_cents = serializers.SerializerMethodField()
     stripe_payment_currency = serializers.SerializerMethodField()
     post_completion = serializers.SerializerMethodField()
+    tip = serializers.SerializerMethodField()
     towing = serializers.SerializerMethodField()
     fuel_delivery_type_display = serializers.SerializerMethodField()
     fuel_delivery_summary = serializers.SerializerMethodField()
@@ -349,7 +350,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'payment_type', 'saved_card',
             'stripe_payment_intent_id', 'stripe_payment_status',
             'stripe_payment_amount_cents', 'stripe_payment_currency',
-            'post_completion',
+            'post_completion', 'tip',
         ]
         read_only_fields = [
             'id',
@@ -376,6 +377,19 @@ class OrderSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         return bool(request and request.user.is_authenticated and obj.user_id == request.user.id)
 
+    def _tip_visible(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        if obj.user_id == request.user.id:
+            return True
+        if obj.master_id:
+            try:
+                return obj.master.user_id == request.user.id
+            except Exception:
+                return False
+        return False
+
     def get_stripe_payment_intent_id(self, obj):
         return obj.stripe_payment_intent_id if self._payment_privileged(obj) else None
 
@@ -393,6 +407,19 @@ class OrderSerializer(serializers.ModelSerializer):
         if not self._payment_privileged(obj):
             return None
         return build_post_completion_payload(obj)
+
+    def get_tip(self, obj):
+        """Paid tip breakdown for order history (customer + assigned master)."""
+        if not self._tip_visible(obj):
+            return None
+        from apps.payment.services.checkout_fees import build_order_tip_display
+
+        paid = build_order_tip_display(obj)
+        if paid:
+            return paid
+        if obj.tip_declined:
+            return {'declined': True}
+        return None
 
     def get_towing(self, obj):
         if obj.order_type != OrderType.TOWING:

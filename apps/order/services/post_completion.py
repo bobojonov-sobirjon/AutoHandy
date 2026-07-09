@@ -7,6 +7,7 @@ from typing import Any
 from django.conf import settings
 
 from apps.order.models import Order, OrderStatus, OrderStripePaymentStatus, Review
+from apps.payment.services.checkout_fees import compute_tip_marketplace_checkout
 
 
 def tip_preset_amounts() -> list[int]:
@@ -40,7 +41,7 @@ def build_post_completion_payload(order: Order) -> dict[str, Any] | None:
     tip_declined = bool(order.tip_declined)
     needs_tip_prompt = not tip_paid and not tip_declined
 
-    return {
+    payload = {
         'needs_review': not has_review,
         'needs_tip_prompt': needs_tip_prompt,
         'review_submitted': has_review,
@@ -50,3 +51,17 @@ def build_post_completion_payload(order: Order) -> dict[str, Any] | None:
         'tip_declined': tip_declined,
         'tip_prompt_title': 'Would you like to leave a tip for your provider?',
     }
+    if tip_paid and order.tip_amount and order.tip_amount > 0:
+        from apps.payment.services.checkout_fees import build_order_tip_display
+
+        payload['tip_breakdown'] = build_order_tip_display(order)
+    elif needs_tip_prompt:
+        previews = {}
+        for preset in tip_preset_amounts():
+            ck = compute_tip_marketplace_checkout(order, Decimal(str(preset)))
+            previews[str(preset)] = {
+                'customer_charge': ck['customer_total'],
+                'master_payout': ck['master_estimated_payout'],
+            }
+        payload['tip_presets_preview'] = previews
+    return payload

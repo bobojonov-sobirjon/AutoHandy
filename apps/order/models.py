@@ -501,6 +501,12 @@ class Order(models.Model):
         verbose_name='Tip paid at',
         help_text='When the tip charge succeeded.',
     )
+    tip_stripe_payment_amount_cents = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name='Tip Stripe charged amount (minor units)',
+        help_text='Customer charge for tip including marketplace surcharges.',
+    )
     completion_pin = models.CharField(
         max_length=4,
         blank=True,

@@ -115,6 +115,58 @@ def master_payout_cents(order) -> int:
     return money_to_cents(d)
 
 
+def compute_tip_marketplace_checkout(order, tip_amount: Decimal | str | float) -> dict[str, Any]:
+    """Same surcharge rules as the job (scheduled vs emergency) applied to the tip base amount."""
+    bd = compute_order_price_breakdown(order)
+    is_emergency = _order_uses_emergency_marketplace_fees(order, bd)
+    tip = _q(Decimal(str(tip_amount)))
+    return _marketplace_surcharges(tip, is_emergency=is_emergency, penalty=Decimal('0'))
+
+
+def customer_tip_charge_cents(order, tip_amount: Decimal | str | float) -> int:
+    d = compute_tip_marketplace_checkout(order, tip_amount)['_customer_total_decimal']
+    return money_to_cents(d)
+
+
+def master_tip_payout_cents(order, tip_amount: Decimal | str | float) -> int:
+    d = compute_tip_marketplace_checkout(order, tip_amount)['_master_payout_decimal']
+    return money_to_cents(d)
+
+
+def order_tip_is_paid(order) -> bool:
+    from apps.order.models import OrderStripePaymentStatus
+
+    return (
+        getattr(order, 'tip_stripe_payment_status', None) == OrderStripePaymentStatus.SUCCEEDED
+        and Decimal(str(getattr(order, 'tip_amount', 0) or 0)) > 0
+    )
+
+
+def build_order_tip_display(order) -> dict[str, Any] | None:
+    """Tip breakdown for order history (customer + master). None when no tip was paid."""
+    if not order_tip_is_paid(order):
+        return None
+    tip_base = _q(Decimal(str(order.tip_amount)))
+    ck = compute_tip_marketplace_checkout(order, tip_base)
+    charge_cents = int(getattr(order, 'tip_stripe_payment_amount_cents', None) or 0)
+    if charge_cents > 0:
+        customer_charge = format(_q(Decimal(charge_cents) / Decimal('100')), 'f')
+    else:
+        customer_charge = ck['customer_total']
+    return {
+        'base_amount': format(tip_base, 'f'),
+        'customer_charge': customer_charge,
+        'service_fee': ck['service_fee'],
+        'platform_fee': ck['platform_fee'],
+        'dispatch_fee': ck['dispatch_fee'],
+        'master_payout': ck['master_estimated_payout'],
+        'master_platform_fee': ck['master_platform_fee'],
+        'paid_at': order.tip_paid_at.isoformat() if order.tip_paid_at else None,
+        'stripe_payment_intent_id': (order.tip_stripe_payment_intent_id or '').strip() or None,
+        'stripe_payment_amount_cents': charge_cents or None,
+    }
+
+
 def order_pricing_platform_fee(order) -> str:
     """Unified client platform fee amount (standard / custom_request / SOS)."""
     return compute_marketplace_checkout(order)['platform_fee']
@@ -179,7 +231,8 @@ def build_order_marketplace_fee_display(order) -> dict[str, Any]:
     platform_fee = ck['platform_fee']
     master_platform_fee = ck['master_platform_fee']
 
-    customer_total = ck['customer_total']
+    customer_total_dec = _q(Decimal(str(ck['customer_total'])))
+    master_payout_dec = _q(Decimal(str(ck['master_estimated_payout'])))
     from apps.order.models import OrderStatus, OrderStripePaymentStatus
 
     cents = getattr(order, 'stripe_payment_amount_cents', None) or 0
@@ -188,7 +241,17 @@ def build_order_marketplace_fee_display(order) -> dict[str, Any]:
         and getattr(order, 'stripe_payment_status', None) == OrderStripePaymentStatus.SUCCEEDED
         and int(cents) > 0
     ):
-        customer_total = format(_q(Decimal(int(cents)) / Decimal('100')), 'f')
+        customer_total_dec = _q(Decimal(int(cents)) / Decimal('100'))
+
+    tip_display = build_order_tip_display(order)
+    tip_customer_dec = Decimal('0')
+    tip_master_dec = Decimal('0')
+    if tip_display:
+        tip_customer_dec = _q(Decimal(str(tip_display['customer_charge'])))
+        tip_master_dec = _q(Decimal(str(tip_display['master_payout'])))
+
+    grand_customer_total = _q(customer_total_dec + tip_customer_dec)
+    grand_master_payout = _q(master_payout_dec + tip_master_dec)
 
     return {
         'platform_fee': platform_fee,
@@ -209,6 +272,7 @@ def build_order_marketplace_fee_display(order) -> dict[str, Any]:
             'extra_money': format(extra_money, 'f'),
             'technician_work_total': format(work_total, 'f'),
             'estimated_payout': ck['master_estimated_payout'],
+            'grand_payout': format(grand_master_payout, 'f'),
             'platform_fee': master_platform_fee,
             'car_count': car_count,
         },
@@ -218,10 +282,18 @@ def build_order_marketplace_fee_display(order) -> dict[str, Any]:
             'service_fee': ck['service_fee'],
             'platform_fee': platform_fee,
             'penalty_total': ck['penalty_total'],
-            'total': customer_total,
+            'total': format(customer_total_dec, 'f'),
+            'grand_total': format(grand_customer_total, 'f'),
+        },
+        'tip': tip_display,
+        'totals': {
+            'customer_grand_total': format(grand_customer_total, 'f'),
+            'master_grand_payout': format(grand_master_payout, 'f'),
+            'includes_tip': bool(tip_display),
         },
         'stripe_charge_alignment': {
-            'customer_charge_matches': 'client.total (when paid by card on complete)',
+            'customer_charge_matches': 'client.total (job only when paid by card on complete)',
+            'grand_total_includes_tip': 'totals.customer_grand_total includes paid tip + surcharges',
         },
         'notes': {
             'scheduled_fees': 'Service fee + platform fee (% of technician price); no emergency coefficient.',
