@@ -3806,6 +3806,7 @@ Order detail / complete responses include **`post_completion`** for the driver (
                         'tip_amount',
                         'tip_stripe_payment_intent_id',
                         'tip_stripe_payment_status',
+                        'tip_stripe_payment_amount_cents',
                         'tip_declined',
                         'tip_paid_at',
                         'updated_at',
@@ -3815,12 +3816,16 @@ Order detail / complete responses include **`post_completion`** for the driver (
                 return Response({'error': exc.message}, status=status.HTTP_400_BAD_REQUEST)
 
             order.refresh_from_db()
-            from apps.order.services.post_completion import build_post_completion_payload
+            from apps.order.services.post_completion import (
+                build_post_completion_payload,
+                build_tip_payment_summary,
+            )
 
             return Response(
                 {
                     'message': 'Tip processed successfully',
                     'tip_amount': format(tip_amount, 'f'),
+                    'tip_payment': build_tip_payment_summary(order),
                     'post_completion': build_post_completion_payload(order),
                 },
                 status=status.HTTP_200_OK,
@@ -3854,6 +3859,7 @@ Order detail / complete responses include **`post_completion`** for the driver (
                         'tip_amount',
                         'tip_stripe_payment_intent_id',
                         'tip_stripe_payment_status',
+                        'tip_stripe_payment_amount_cents',
                         'tip_declined',
                         'tip_paid_at',
                         'updated_at',
@@ -3887,7 +3893,10 @@ Order detail / complete responses include **`post_completion`** for the driver (
             pass
 
         order.refresh_from_db()
-        from apps.order.services.post_completion import build_post_completion_payload
+        from apps.order.services.post_completion import (
+            build_post_completion_payload,
+            build_tip_payment_summary,
+        )
 
         payload = {
             'message': 'Review created successfully. Rating applied to masters.',
@@ -3896,6 +3905,8 @@ Order detail / complete responses include **`post_completion`** for the driver (
         }
         if tip_amount is not None and tip_amount > 0:
             payload['tip_amount'] = format(tip_amount, 'f')
+            if not tip_error:
+                payload['tip_payment'] = build_tip_payment_summary(order)
         if tip_error:
             payload['tip_error'] = tip_error
 

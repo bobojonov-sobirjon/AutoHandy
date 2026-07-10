@@ -65,3 +65,18 @@ def build_post_completion_payload(order: Order) -> dict[str, Any] | None:
             }
         payload['tip_presets_preview'] = previews
     return payload
+
+
+def build_tip_payment_summary(order: Order) -> dict[str, Any]:
+    """After a successful tip charge: amounts for mobile UI (base, fees, grand total)."""
+    from apps.payment.services.checkout_fees import build_order_marketplace_fee_display, build_order_tip_display
+
+    fees = build_order_marketplace_fee_display(order)
+    tip = build_order_tip_display(order)
+    return {
+        'tip': tip,
+        'job_customer_total': fees['client']['total'],
+        'customer_grand_total': fees['totals']['customer_grand_total'],
+        'master_grand_payout': fees['totals']['master_grand_payout'],
+        'includes_tip': fees['totals']['includes_tip'],
+    }
