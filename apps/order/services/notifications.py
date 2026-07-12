@@ -863,12 +863,16 @@ def _pro_push_copy(
     if k == 'time_change_request' and audience == 'user':
         when = ''
         if extra_data:
-            d = (extra_data.get('proposed_date') or '').strip()
-            t = (extra_data.get('proposed_time_start') or '').strip()
-            if d and t:
-                when = f' to {d} {t}'
-            elif d:
-                when = f' to {d}'
+            label = (extra_data.get('proposed_slot_label') or '').strip()
+            if label:
+                when = f' to {label}'
+            else:
+                d = (extra_data.get('proposed_date') or '').strip()
+                t = (extra_data.get('proposed_time_start') or '').strip()
+                if d and t:
+                    when = f' to {d} {t}'
+                elif d:
+                    when = f' to {d}'
         return (
             'New time proposed',
             f'Your provider proposed a different service time for order {oid}{when}. Approve or reject in the app.',

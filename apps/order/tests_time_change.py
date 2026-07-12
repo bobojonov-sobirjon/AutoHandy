@@ -88,3 +88,24 @@ class OrderTimeChangeFlowTestCase(APITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_utc_z_times_converted_to_service_timezone(self):
+        """Mobile often sends 21:25:00Z for 14:25 America/Los_Angeles (PDT)."""
+        self.client.force_authenticate(user=self.master_user)
+        create_url = reverse('order:order-time-change-requests-create', kwargs={'order_id': self.order.pk})
+        new_date = self.order.preferred_date
+        response = self.client.post(
+            create_url,
+            {
+                'proposed_preferred_date': str(new_date),
+                # 21:25 UTC == 14:25 PDT in July
+                'proposed_preferred_time_start': '21:25:00Z',
+                'proposed_preferred_time_end': '21:45:00Z',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['proposed_preferred_time_start'], '14:25:00')
+        self.assertEqual(response.data['proposed_preferred_time_end'], '14:45:00')
+        self.assertIn('2:25 PM', response.data['proposed_slot_label'])
+        self.assertIn('America/Los_Angeles', response.data['schedule_timezone'])

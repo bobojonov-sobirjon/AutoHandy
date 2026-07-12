@@ -4948,7 +4948,14 @@ class OrderTimeChangeRequestCreateView(APIView):
                 extra_data={
                     'request_id': str(req.id),
                     'proposed_date': str(req.proposed_preferred_date),
-                    'proposed_time_start': req.proposed_preferred_time_start.isoformat(timespec='seconds'),
+                    'proposed_time_start': req.proposed_preferred_time_start.strftime('%H:%M'),
+                    'proposed_time_end': (
+                        req.proposed_preferred_time_end.strftime('%H:%M')
+                        if req.proposed_preferred_time_end
+                        else ''
+                    ),
+                    'proposed_slot_label': payload.get('proposed_slot_label') or '',
+                    'schedule_timezone': payload.get('schedule_timezone') or '',
                 },
             )
         except Exception:  # noqa: BLE001

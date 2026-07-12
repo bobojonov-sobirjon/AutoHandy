@@ -81,25 +81,101 @@ def _request_user_is_master(request) -> bool:
 
 class LenientTimeField(serializers.TimeField):
     """
-    Accepts ISO-like time strings from mobile clients, e.g. ``04:05:41.902Z``
-    (trailing Z is ignored). Falls back to DRF ``TimeField`` parsing.
+    Accepts ISO-like time strings from mobile clients.
+
+    Important: values ending with ``Z`` (or full ISO datetimes in UTC) are treated as
+    **UTC** and converted to the scheduled service timezone wall clock
+    (``SCHEDULED_ORDER_TIMEZONE``, default America/Los_Angeles).
+
+    Without this, apps that send ``21:25:00Z`` for 2:25 PM Pacific would store 21:25
+    and show the wrong local time in the UI.
     """
 
     def to_internal_value(self, data):
         if data is None and getattr(self, 'allow_null', False):
             return None
-        if hasattr(data, 'hour'):
+        if hasattr(data, 'hour') and not hasattr(data, 'tzinfo'):
+            # datetime.time — already a wall-clock value
             return data
+        if isinstance(data, datetime):
+            return self._to_service_local_time(data)
+
         if isinstance(data, str):
             s = data.strip()
-            if s.endswith('Z') or s.endswith('z'):
+            if not s:
+                return super().to_internal_value(data)
+
+            from_utc = s.endswith('Z') or s.endswith('z')
+            if from_utc:
                 s = s[:-1]
+
+            # Full ISO datetime: 2026-07-11T21:25:00.000 or with offset already stripped
+            if 'T' in s:
+                try:
+                    dt = datetime.fromisoformat(s)
+                except ValueError:
+                    dt = None
+                if dt is not None:
+                    if from_utc and dt.tzinfo is None:
+                        from zoneinfo import ZoneInfo
+
+                        dt = dt.replace(tzinfo=ZoneInfo('UTC'))
+                    return self._to_service_local_time(dt)
+
             for fmt in ('%H:%M:%S.%f', '%H:%M:%S', '%H:%M'):
                 try:
-                    return datetime.strptime(s, fmt).time()
+                    t = datetime.strptime(s, fmt).time()
                 except ValueError:
                     continue
+                if from_utc:
+                    return self._utc_clock_to_service_local(t)
+                return t.replace(microsecond=0)
+
         return super().to_internal_value(data)
+
+    def _to_service_local_time(self, dt: datetime):
+        from apps.order.services.order_scheduled_start import scheduled_order_timezone
+
+        if dt.tzinfo is None:
+            # Naive datetime: treat as already in service timezone wall clock
+            return dt.time().replace(microsecond=0)
+        local_dt = dt.astimezone(scheduled_order_timezone())
+        return local_dt.time().replace(microsecond=0)
+
+    def _utc_clock_to_service_local(self, t):
+        """Interpret HH:MM:SS as UTC on a reference date, return service-local wall clock."""
+        from zoneinfo import ZoneInfo
+
+        from django.utils import timezone as dj_tz
+
+        from apps.order.services.order_scheduled_start import scheduled_order_timezone
+
+        ref_date = None
+        parent = getattr(self, 'parent', None)
+        initial = getattr(parent, 'initial_data', None) if parent is not None else None
+        if isinstance(initial, dict):
+            for key in (
+                'proposed_preferred_date',
+                'preferred_date',
+                'custom_request_date',
+            ):
+                raw = initial.get(key)
+                if not raw:
+                    continue
+                try:
+                    if hasattr(raw, 'year'):
+                        ref_date = raw
+                    else:
+                        ref_date = datetime.strptime(str(raw)[:10], '%Y-%m-%d').date()
+                    break
+                except (TypeError, ValueError):
+                    continue
+        if ref_date is None:
+            ref_date = dj_tz.now().astimezone(ZoneInfo('UTC')).date()
+
+        utc_dt = datetime.combine(ref_date, t.replace(microsecond=0), tzinfo=ZoneInfo('UTC'))
+        local_dt = utc_dt.astimezone(scheduled_order_timezone())
+        return local_dt.time().replace(microsecond=0)
 
 
 class PartsPurchaseRequiredItemSerializer(serializers.Serializer):
@@ -2326,6 +2402,8 @@ class OrderTimeChangeRequestSerializer(serializers.ModelSerializer):
     master_user_id = serializers.IntegerField(source='master.user_id', read_only=True)
     master = serializers.SerializerMethodField()
     order = serializers.SerializerMethodField()
+    schedule_timezone = serializers.SerializerMethodField()
+    proposed_slot_label = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderTimeChangeRequest
@@ -2342,6 +2420,8 @@ class OrderTimeChangeRequestSerializer(serializers.ModelSerializer):
             'proposed_preferred_date',
             'proposed_preferred_time_start',
             'proposed_preferred_time_end',
+            'schedule_timezone',
+            'proposed_slot_label',
             'master_comment',
             'status',
             'client_comment',
@@ -2350,6 +2430,27 @@ class OrderTimeChangeRequestSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = fields
+
+    def get_schedule_timezone(self, obj):
+        from apps.order.services.order_scheduled_start import scheduled_order_timezone
+
+        return str(scheduled_order_timezone())
+
+    def get_proposed_slot_label(self, obj):
+        """Human-readable slot for UI (service timezone wall clock, no UTC shift)."""
+        d = obj.proposed_preferred_date
+        start = obj.proposed_preferred_time_start
+        end = obj.proposed_preferred_time_end
+        if not d or not start:
+            return None
+
+        def _fmt(t):
+            return t.strftime('%I:%M %p').lstrip('0')
+
+        date_part = d.strftime('%b %d, %Y')
+        if end:
+            return f'{date_part} · {_fmt(start)} – {_fmt(end)}'
+        return f'{date_part} · {_fmt(start)}'
 
     def get_master(self, obj):
         from apps.accounts.display_name import build_compact_master_user_payload
