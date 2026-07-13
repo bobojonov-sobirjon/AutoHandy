@@ -119,14 +119,99 @@ def _resolve_order_charge_card(order: Order) -> SavedCard:
     return card
 
 
+def _complete_charge_idempotency_key(order: Order) -> str:
+    attempt = max(1, int(getattr(order, 'stripe_charge_attempt', None) or 1))
+    return f'autohandy_order_{order.pk}_complete_charge_a{attempt}'
+
+
+def _record_complete_charge_failure(order: Order, message: str) -> None:
+    """
+    Persist failure + bump attempt so the next Complete uses a fresh Stripe idempotency key.
+    Without this, Stripe replays the cached decline (e.g. insufficient_funds) for ~24h.
+    """
+    attempt = max(1, int(getattr(order, 'stripe_charge_attempt', None) or 1))
+    order.stripe_payment_status = OrderStripePaymentStatus.FAILED
+    order.stripe_payment_error = (message or '')[:2000]
+    order.stripe_charge_attempt = attempt + 1
+    update_fields = [
+        'stripe_payment_status',
+        'stripe_payment_error',
+        'stripe_charge_attempt',
+        'updated_at',
+    ]
+    if order.saved_card_id:
+        update_fields.append('saved_card')
+    if order.payment_type:
+        update_fields.append('payment_type')
+    order.save(update_fields=update_fields)
+
+
+def _bind_succeeded_payment_intent(order: Order, pi, *, amount_cents: int, currency: str) -> None:
+    order.stripe_payment_intent_id = str(pi.id)
+    order.stripe_payment_status = OrderStripePaymentStatus.SUCCEEDED
+    order.stripe_payment_amount_cents = amount_cents
+    order.stripe_payment_currency = currency
+    order.stripe_payment_error = ''
+
+
+def _find_existing_succeeded_job_payment(stripe, order: Order):
+    """
+    Recover after a client timeout: charge may have succeeded in Stripe while our DB
+    never saved SUCCEEDED. Prefer an existing succeeded PI over creating a new one.
+    """
+    existing_id = (order.stripe_payment_intent_id or '').strip()
+    if existing_id.startswith('pi_'):
+        try:
+            pi = stripe.PaymentIntent.retrieve(existing_id)
+            if (getattr(pi, 'status', '') or '') == 'succeeded':
+                return pi
+        except Exception:  # noqa: BLE001
+            pass
+
+    q = f"metadata['order_id']:'{order.pk}'"
+    try:
+        res = stripe.PaymentIntent.search(query=q, limit=20)
+    except Exception:  # noqa: BLE001
+        return None
+
+    rows = list(getattr(res, 'data', []) or [])
+    succeeded = []
+    for pi in rows:
+        if (getattr(pi, 'status', '') or '') != 'succeeded':
+            continue
+        meta = getattr(pi, 'metadata', None) or {}
+        kind = ''
+        if isinstance(meta, dict):
+            kind = str(meta.get('kind') or '')
+        else:
+            kind = str(getattr(meta, 'kind', '') or '')
+        if kind == 'tip':
+            continue
+        succeeded.append(pi)
+    if not succeeded:
+        return None
+    succeeded.sort(key=lambda p: int(getattr(p, 'created', 0) or 0), reverse=True)
+    return succeeded[0]
+
+
 def charge_order_on_completion(order: Order) -> None:
     """
     Charge the order owner's saved card when the master completes the job.
-    On success updates order stripe_* fields via ORM (caller should save completion in same transaction).
-    Raises StripeChargeError on failure (no DB writes on failure).
+
+    On success updates order stripe_* fields via ORM (caller should save completion).
+    On card/API failure: persists FAILED + increments ``stripe_charge_attempt`` so a later
+    Complete is not stuck on Stripe's idempotent replay of the decline, then raises
+    ``StripeChargeError``.
     """
     if not stripe_configured():
         raise StripeChargeError('Stripe is not configured on the server.')
+
+    # Already captured — do not charge again (safe Complete retry after DB save race).
+    if (
+        order.stripe_payment_status == OrderStripePaymentStatus.SUCCEEDED
+        and (order.stripe_payment_intent_id or '').startswith('pi_')
+    ):
+        return
 
     card = _resolve_order_charge_card(order)
 
@@ -152,7 +237,15 @@ def charge_order_on_completion(order: Order) -> None:
     if dest:
         _assert_connect_destination_can_receive_transfers(stripe, dest)
 
-    idem = f'autohandy_order_{order.pk}_complete_charge_v1'
+    existing = _find_existing_succeeded_job_payment(stripe, order)
+    if existing is not None:
+        charged = int(getattr(existing, 'amount', 0) or amount_cents)
+        cur = (getattr(existing, 'currency', None) or currency or 'usd').lower()
+        _bind_succeeded_payment_intent(order, existing, amount_cents=charged, currency=cur)
+        return
+
+    attempt = max(1, int(getattr(order, 'stripe_charge_attempt', None) or 1))
+    idem = _complete_charge_idempotency_key(order)
 
     params: dict = {
         'amount': amount_cents,
@@ -164,6 +257,8 @@ def charge_order_on_completion(order: Order) -> None:
         'metadata': {
             'order_id': str(order.pk),
             'user_id': str(order.user_id),
+            'kind': 'job_complete',
+            'charge_attempt': str(attempt),
         },
         'idempotency_key': idem,
     }
@@ -177,18 +272,23 @@ def charge_order_on_completion(order: Order) -> None:
     except Exception as exc:  # noqa: BLE001
         msg = str(getattr(exc, 'user_message', None) or getattr(exc, 'message', None) or exc)
         friendly = _friendly_stripe_destination_error(msg)
-        raise StripeChargeError(friendly or msg) from exc
+        final_msg = friendly or msg
+        try:
+            _record_complete_charge_failure(order, final_msg)
+        except Exception:  # noqa: BLE001
+            pass
+        raise StripeChargeError(final_msg) from exc
 
     st = getattr(pi, 'status', '') or ''
     if st != 'succeeded':
         msg = f'PaymentIntent status={st}'
+        try:
+            _record_complete_charge_failure(order, msg)
+        except Exception:  # noqa: BLE001
+            pass
         raise StripeChargeError(msg)
 
-    order.stripe_payment_intent_id = str(pi.id)
-    order.stripe_payment_status = OrderStripePaymentStatus.SUCCEEDED
-    order.stripe_payment_amount_cents = amount_cents
-    order.stripe_payment_currency = currency
-    order.stripe_payment_error = ''
+    _bind_succeeded_payment_intent(order, pi, amount_cents=amount_cents, currency=currency)
 
 
 def charge_order_tip(order: Order, tip_amount: Decimal) -> None:

@@ -3593,6 +3593,7 @@ class CompleteOrderView(APIView):
                         'stripe_payment_amount_cents',
                         'stripe_payment_currency',
                         'stripe_payment_error',
+                        'stripe_charge_attempt',
                     ]
                 )
                 try:

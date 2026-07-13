@@ -471,6 +471,14 @@ class Order(models.Model):
         default='',
         verbose_name='Stripe last error',
     )
+    stripe_charge_attempt = models.PositiveIntegerField(
+        default=1,
+        verbose_name='Stripe complete-charge attempt',
+        help_text=(
+            'Idempotency attempt for job charge on complete. Increments after a failed charge '
+            'so a later retry is not stuck replaying Stripe\'s cached decline (e.g. insufficient funds).'
+        ),
+    )
     tip_amount = models.DecimalField(
         max_digits=12,
         decimal_places=2,
