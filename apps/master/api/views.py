@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.response import Response
@@ -31,6 +33,8 @@ from apps.categories.models import Category
 from apps.master.services.geo import km_to_miles
 
 User = get_user_model()
+
+logger = logging.getLogger(__name__)
 
 from apps.master.api.serializers import (
     ServiceCardGroupSerializer,
@@ -1467,6 +1471,13 @@ class AddServiceItemsView(APIView):
 
         serializer = AddServiceItemsSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
+            logger.warning(
+                'POST /api/master/service-items/ 400 user_id=%s master_id_in_body=%s body=%s errors=%s',
+                getattr(request.user, 'id', None),
+                request.data.get('master_id') if hasattr(request.data, 'get') else None,
+                dict(request.data) if hasattr(request.data, 'items') else request.data,
+                serializer.errors,
+            )
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
         master_id = serializer.validated_data['master_id']
