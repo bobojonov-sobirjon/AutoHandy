@@ -962,18 +962,21 @@ def build_sos_order_websocket_payload(
     )
 
     u = order.user
-    full_name = (u.get_full_name() or '').strip() or None
+    from apps.accounts.display_name import apply_customer_name_privacy_to_user_data
 
-    user_out: dict[str, Any] = {
-        'id': u.id,
-        'private_id': u.private_id,
-        'first_name': u.first_name or '',
-        'last_name': u.last_name or '',
-        'full_name': full_name,
-        'phone_number': getattr(u, 'phone_number', None) or None,
-        'email': getattr(u, 'email', None) or None,
-        'avatar': _media_url(request, getattr(u, 'avatar', None)),
-    }
+    user_out: dict[str, Any] = apply_customer_name_privacy_to_user_data(
+        {
+            'id': u.id,
+            'private_id': u.private_id,
+            'first_name': u.first_name or '',
+            'last_name': u.last_name or '',
+            'full_name': (u.get_full_name() or '').strip() or None,
+            'phone_number': getattr(u, 'phone_number', None) or None,
+            'email': getattr(u, 'email', None) or None,
+            'avatar': _media_url(request, getattr(u, 'avatar', None)),
+        },
+        u,
+    )
 
     car_data: list[dict[str, Any]] = []
     for car in order.car.all():
@@ -1181,17 +1184,21 @@ def build_custom_request_websocket_payload(
         .get(pk=oid)
     )
     u = order.user
-    full_name = (u.get_full_name() or '').strip() or None
-    user_out: dict[str, Any] = {
-        'id': u.id,
-        'private_id': u.private_id,
-        'first_name': u.first_name or '',
-        'last_name': u.last_name or '',
-        'full_name': full_name,
-        'phone_number': getattr(u, 'phone_number', None) or None,
-        'email': getattr(u, 'email', None) or None,
-        'avatar': _media_url(request, getattr(u, 'avatar', None)),
-    }
+    from apps.accounts.display_name import apply_customer_name_privacy_to_user_data
+
+    user_out: dict[str, Any] = apply_customer_name_privacy_to_user_data(
+        {
+            'id': u.id,
+            'private_id': u.private_id,
+            'first_name': u.first_name or '',
+            'last_name': u.last_name or '',
+            'full_name': (u.get_full_name() or '').strip() or None,
+            'phone_number': getattr(u, 'phone_number', None) or None,
+            'email': getattr(u, 'email', None) or None,
+            'avatar': _media_url(request, getattr(u, 'avatar', None)),
+        },
+        u,
+    )
     car_data: list[dict[str, Any]] = []
     for car in order.car.all():
         cat = car.category

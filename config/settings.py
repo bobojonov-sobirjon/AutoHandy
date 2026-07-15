@@ -450,6 +450,10 @@ STRIPE_SECRET_KEY = (os.environ.get('STRIPE_SECRET_KEY') or '').strip()
 STRIPE_PUBLISHABLE_KEY = (os.environ.get('STRIPE_PUBLISHABLE_KEY') or '').strip()
 STRIPE_WEBHOOK_SECRET = (os.environ.get('STRIPE_WEBHOOK_SECRET') or '').strip()
 # Stripe Identity (document + ID number + selfie). Webhook optional — mobile polls GET stripe-identity/status/.
+# Ephemeral key API version for Android IdentityVerificationSheet (override if Stripe Dashboard requires newer).
+STRIPE_IDENTITY_EPHEMERAL_API_VERSION = (
+    os.environ.get('STRIPE_IDENTITY_EPHEMERAL_API_VERSION') or ''
+).strip()
 STRIPE_IDENTITY_REQUIRE_ID_NUMBER = os.environ.get('STRIPE_IDENTITY_REQUIRE_ID_NUMBER', 'true').lower() in (
     '1',
     'true',

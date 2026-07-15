@@ -435,7 +435,17 @@ class OrderSerializer(serializers.ModelSerializer):
         ]
     
     def get_user(self, obj):
-        return UserSerializer(obj.user, context=self.context).data
+        """Hide full surname from the other party (e.g. master sees \"Anton K\" only)."""
+        from apps.accounts.display_name import (
+            apply_customer_name_privacy_to_user_data,
+            should_mask_master_name_for_request,
+        )
+
+        data = UserSerializer(obj.user, context=self.context).data
+        request = self.context.get('request')
+        if should_mask_master_name_for_request(request, obj.user_id):
+            data = apply_customer_name_privacy_to_user_data(data, obj.user)
+        return data
 
     def get_saved_card(self, obj):
         request = self.context.get('request')

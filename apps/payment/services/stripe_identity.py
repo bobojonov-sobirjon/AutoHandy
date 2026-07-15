@@ -264,13 +264,61 @@ def build_identity_status_payload(*, master: Master, sync_stripe: bool = True) -
     }
 
 
+def _stripe_ephemeral_api_version(stripe_mod) -> str:
+    """
+    Android Identity SDK requires an ephemeral key bound to the VerificationSession.
+    Prefer configured version, then the SDK default.
+    """
+    configured = (getattr(settings, 'STRIPE_IDENTITY_EPHEMERAL_API_VERSION', '') or '').strip()
+    if configured:
+        return configured
+    return str(getattr(stripe_mod, 'api_version', None) or '2024-11-20.acacia')
+
+
+def _create_identity_ephemeral_key_secret(*, session_id: str) -> str | None:
+    if not session_id or not stripe_configured():
+        return None
+    stripe = stripe_sdk()
+    try:
+        ephemeral_key = stripe.EphemeralKey.create(
+            verification_session=session_id,
+            stripe_version=_stripe_ephemeral_api_version(stripe),
+        )
+    except Exception as exc:  # noqa: BLE001
+        msg = str(getattr(exc, 'user_message', None) or getattr(exc, 'message', None) or exc)
+        raise StripeIdentityError(f'Failed to create Identity ephemeral key: {msg}') from exc
+    secret = getattr(ephemeral_key, 'secret', None)
+    return str(secret) if secret else None
+
+
 def _session_public_data(session: Any) -> dict[str, Any]:
-    session_id = str(getattr(session, 'id', '') or '')
-    client_secret = getattr(session, 'client_secret', None) or None
-    expires_at = _stripe_unix_to_dt(getattr(session, 'expires_at', None))
+    """
+    Client payload for mobile SDKs.
+
+    - iOS often uses ``client_secret``
+    - Android native IdentityVerificationSheet needs ``verification_session_id`` +
+      ``ephemeral_key_secret``
+    - ``url`` supports the web/redirect fallback
+    """
+    session_id = str(getattr(session, 'id', None) or (session.get('id') if isinstance(session, dict) else '') or '')
+    client_secret = getattr(session, 'client_secret', None)
+    if client_secret is None and isinstance(session, dict):
+        client_secret = session.get('client_secret')
+    url = getattr(session, 'url', None)
+    if url is None and isinstance(session, dict):
+        url = session.get('url')
+    expires_at = _stripe_unix_to_dt(
+        getattr(session, 'expires_at', None)
+        if not isinstance(session, dict)
+        else session.get('expires_at')
+    )
+    ephemeral_key_secret = _create_identity_ephemeral_key_secret(session_id=session_id)
     return {
         'stripe_identity_verification_session_id': session_id,
-        'client_secret': client_secret,
+        'verification_session_id': session_id,
+        'client_secret': client_secret or None,
+        'ephemeral_key_secret': ephemeral_key_secret,
+        'url': url or None,
         'expires_at': _iso_dt(expires_at),
     }
 

@@ -11,7 +11,7 @@ def _last_name_initial(last_name: str) -> str:
     initial = last[0]
     if initial.isalpha() and initial.isascii():
         initial = initial.upper()
-    return f'{initial}.'
+    return initial
 
 
 def customer_display_name(
@@ -21,7 +21,7 @@ def customer_display_name(
     fallback: str = '',
 ) -> str:
     """
-    Build client-safe name: "Anton K.", "John W.", "Антон К."
+    Build privacy-safe name: "Anton K", "John W", "Антон К" (no full surname).
     """
     first = (first_name or '').strip()
     last = (last_name or '').strip()
@@ -74,10 +74,13 @@ def apply_customer_name_privacy_to_user_data(
         or getattr(user, 'email', None)
         or ''
     )
-    out['display_name'] = customer_display_name(first, last, fallback=str(fallback))
+    display = customer_display_name(first, last, fallback=str(fallback))
+    out['display_name'] = display
     out['first_name'] = (first or '').strip()
     last_stripped = (last or '').strip()
     out['last_name'] = _last_name_initial(last_stripped) if last_stripped else ''
+    if 'full_name' in out:
+        out['full_name'] = display or None
     return out
 
 
