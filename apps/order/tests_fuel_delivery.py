@@ -75,8 +75,31 @@ class FuelDeliveryFlowTestCase(APITestCase):
             has_diesel_container_2gal=diesel,
         )
 
-    def test_master_cannot_activate_fuel_delivery_without_both_containers(self):
+    def test_master_can_save_fuel_delivery_without_containers_inactive(self):
+        """Omitted / partial flags default to false; skill saves but is not active."""
         response = self.master_client.post(
+            '/api/master/service-items/',
+            {
+                'master_id': self.master.id,
+                'services': [
+                    {
+                        'category': self.fuel_category.id,
+                        'price': 100,
+                    },
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        item = MasterServiceItems.objects.get(
+            master_service=self.master_service,
+            category=self.fuel_category,
+        )
+        self.assertFalse(item.has_gas_container_2gal)
+        self.assertFalse(item.has_diesel_container_2gal)
+        self.assertFalse(item.fuel_delivery_is_active())
+
+        response_partial = self.master_client.post(
             '/api/master/service-items/',
             {
                 'master_id': self.master.id,
@@ -91,8 +114,11 @@ class FuelDeliveryFlowTestCase(APITestCase):
             },
             format='json',
         )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('has_gas_container_2gal', response.data['services'][0])
+        self.assertEqual(response_partial.status_code, status.HTTP_201_CREATED)
+        item.refresh_from_db()
+        self.assertTrue(item.has_gas_container_2gal)
+        self.assertFalse(item.has_diesel_container_2gal)
+        self.assertFalse(item.fuel_delivery_is_active())
 
     def test_master_can_activate_fuel_delivery_with_both_containers(self):
         response = self.master_client.post(

@@ -1,7 +1,10 @@
-"""Fuel Delivery master skill validation."""
-from __future__ import annotations
+"""Fuel Delivery master skill helpers.
 
-from rest_framework import serializers
+Equipment flags default to False when omitted. Skill can be saved without both
+containers; ``fuel_delivery_is_active()`` / ``master_has_active_fuel_delivery``
+still require both True before the master appears for Fuel Delivery orders.
+"""
+from __future__ import annotations
 
 from apps.categories.models import Category
 from apps.categories.services.fuel_delivery_catalog import is_fuel_delivery_category
@@ -20,13 +23,8 @@ def validate_fuel_delivery_equipment(
     has_gas_container_2gal: bool,
     has_diesel_container_2gal: bool,
 ) -> None:
-    if not is_fuel_delivery_category(category):
-        return
-    if not (has_gas_container_2gal and has_diesel_container_2gal):
-        raise serializers.ValidationError({
-            'has_gas_container_2gal': FUEL_DELIVERY_EQUIPMENT_ERROR,
-            'has_diesel_container_2gal': FUEL_DELIVERY_EQUIPMENT_ERROR,
-        })
+    """No longer rejects saves — defaults stay False if the client omits flags."""
+    return
 
 
 def master_has_active_fuel_delivery(master_id: int, category_id: int) -> bool:
