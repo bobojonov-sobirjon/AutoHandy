@@ -769,12 +769,9 @@ class MasterServiceItemsSerializer(serializers.ModelSerializer):
 
 
 def _absolute_media_url(request, file_field):
-    if not file_field:
-        return None
-    url = file_field.url
-    if request:
-        return request.build_absolute_uri(url)
-    return url
+    from apps.categories.media_urls import absolute_media_url
+
+    return absolute_media_url(request, file_field)
 
 
 def master_service_item_line_dict(item, request):

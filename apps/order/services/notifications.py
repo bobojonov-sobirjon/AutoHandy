@@ -918,17 +918,9 @@ def _ws_json_safe(value: Any) -> Any:
 
 def _absolute_media_path(request: 'HttpRequest | None', relative_url: str) -> str:
     """Turn /media/... into full URL. Prefer API_PUBLIC_BASE_URL (SOS rotation has no request)."""
-    if not relative_url:
-        return relative_url
-    if relative_url.startswith('http://') or relative_url.startswith('https://'):
-        return relative_url
-    base = (getattr(settings, 'API_PUBLIC_BASE_URL', '') or '').strip().rstrip('/')
-    if base:
-        path = relative_url if relative_url.startswith('/') else f'/{relative_url}'
-        return f'{base}{path}'
-    if request:
-        return request.build_absolute_uri(relative_url)
-    return relative_url
+    from apps.categories.media_urls import absolute_media_path
+
+    return absolute_media_path(request, relative_url) or relative_url
 
 
 def _media_url(request: 'HttpRequest | None', file_field) -> str | None:

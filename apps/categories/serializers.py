@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from apps.categories.models import Category
-from django.conf import settings
+from apps.categories.media_urls import absolute_media_url
 from django.core.exceptions import ValidationError
 import os
 
@@ -44,14 +44,7 @@ class CategorySerializer(serializers.ModelSerializer):
         return value
 
     def to_representation(self, instance):
-        """Override to return full URL for icon field"""
+        """Override to return full HTTPS URL for icon field"""
         representation = super().to_representation(instance)
-        if instance.icon:
-            request = self.context.get('request')
-            if request:
-                representation['icon'] = request.build_absolute_uri(instance.icon.url)
-            else:
-                representation['icon'] = f"{settings.MEDIA_URL}{instance.icon.url}"
-        else:
-            representation['icon'] = None
+        representation['icon'] = absolute_media_url(self.context.get('request'), instance.icon)
         return representation

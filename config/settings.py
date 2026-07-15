@@ -155,6 +155,12 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = os.getenv('MEDIA_ROOT', '/var/www/media')
 API_PUBLIC_BASE_URL = os.getenv('API_PUBLIC_BASE_URL', '').rstrip('/')
 
+# Nginx terminates TLS and proxies http:// to Gunicorn. Without this,
+# request.build_absolute_uri() emits http:// media URLs and mobile clients
+# (Android cleartext blocked) show Network error when loading category icons.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+USE_X_FORWARDED_HOST = True
+
 
 LOCALE_PATHS = [
     os.path.join(BASE_DIR, 'locale'),

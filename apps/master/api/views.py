@@ -679,9 +679,11 @@ class MasterServiceCategorySuggestionsView(APIView):
 
     @staticmethod
     def _abs_icon(request, category):
-        if not category or not category.icon:
+        from apps.categories.media_urls import absolute_media_url
+
+        if not category:
             return None
-        return request.build_absolute_uri(category.icon.url)
+        return absolute_media_url(request, category.icon)
 
     @extend_schema(
         description="""
@@ -2289,34 +2291,19 @@ class MasterServiceCardsView(APIView):
             Category.icon odatda FileField bo'ladi, lekin .values() ishlatsak u string path bo'lib keladi.
             Shuning uchun ham FileField.url, ham string (MEDIA_ROOT ichidagi path)ni media url ga o'tkazamiz.
             """
+            from apps.categories.media_urls import absolute_media_path, absolute_media_url
+
             if not file_field:
                 return None
-
-            # absolute url bo'lsa, shunday qaytaramiz
             if isinstance(file_field, str):
-                if file_field.startswith('http://') or file_field.startswith('https://'):
-                    return file_field
+                path = file_field
+                if not path.startswith('http://') and not path.startswith('https://') and not path.startswith('/'):
+                    from django.conf import settings
 
-                # request.build_absolute_uri faqat /media/... kabi pathlar bilan yaxshi ishlaydi
-                try:
-                    if file_field.startswith('/'):
-                        return request.build_absolute_uri(file_field)
-                except Exception:
-                    pass
-
-                from django.conf import settings
-                media_prefix = (settings.MEDIA_URL or '').rstrip('/') + '/'
-                # file_field ko'pincha "categories/icons/..." ko'rinishida keladi
-                return request.build_absolute_uri(media_prefix + file_field.lstrip('/'))
-
-            # FileField (FieldFile) bo'lsa
-            url = getattr(file_field, 'url', None)
-            if url:
-                try:
-                    return request.build_absolute_uri(url)
-                except Exception:
-                    return url
-            return None
+                    media_prefix = (settings.MEDIA_URL or '').rstrip('/') + '/'
+                    path = media_prefix + path.lstrip('/')
+                return absolute_media_path(request, path)
+            return absolute_media_url(request, file_field)
 
         groups_by_parent = {}
         for row in price_rows:
