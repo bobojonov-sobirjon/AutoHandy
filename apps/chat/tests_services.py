@@ -47,18 +47,26 @@ class OrderChatReopenTestCase(TestCase):
         self.assertIsNone(reopened.closes_at)
         self.assertTrue(reopened.messaging_is_open())
 
-    def test_get_or_create_order_chat_room_reopens_closed_room(self):
-        room = self._closed_room()
+    def test_get_or_create_order_chat_room_always_creates_new(self):
+        old_room = self._closed_room()
 
         result, created = get_or_create_order_chat_room(
             master_user=self.master_user,
             customer_user=self.customer_user,
         )
 
-        self.assertFalse(created)
-        self.assertEqual(result.pk, room.pk)
+        self.assertTrue(created)
+        self.assertNotEqual(result.pk, old_room.pk)
         result.refresh_from_db()
         self.assertTrue(result.messaging_is_open())
+        self.assertIsNone(result.closes_at)
+
+        second, created_again = get_or_create_order_chat_room(
+            master_user=self.master_user,
+            customer_user=self.customer_user,
+        )
+        self.assertTrue(created_again)
+        self.assertNotEqual(second.pk, result.pk)
 
     def test_refresh_does_not_reclose_room_with_active_order(self):
         from apps.master.models import Master

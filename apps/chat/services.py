@@ -172,22 +172,14 @@ def after_user_message_saved(*, room: ChatRoom, message: ChatMessage) -> list[Ch
 @transaction.atomic
 def get_or_create_order_chat_room(*, master_user, customer_user) -> tuple[ChatRoom, bool]:
     """
-    Ensure a 1:1 chat room between the two users.
-    master_user becomes initiator; customer_user is receiver.
+    Create a **new** 1:1 chat room for this order accept.
 
-    Returns (room, created).
+    Same customer/master pair always gets a fresh room so previous order threads
+    (and any conflicts) stay isolated — delivery-style, not a lifelong DM.
+
+    Returns (room, created). ``created`` is always True.
     """
-    existing = (
-        ChatRoom.objects.filter(participants=master_user)
-        .filter(participants=customer_user)
-        .distinct()
-        .first()
-    )
-    if existing:
-        reopen_order_chat_messaging(room=existing)
-        return existing, False
-
-    room = ChatRoom.objects.create(initiator=master_user, is_active=True)
+    room = ChatRoom.objects.create(initiator=master_user, is_active=True, closes_at=None)
     room.participants.add(master_user, customer_user)
     post_safety_welcome_if_needed(room=room)
     return room, True

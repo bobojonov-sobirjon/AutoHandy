@@ -20,7 +20,6 @@ from .services import (
     broadcast_chat_messages,
     post_safety_welcome_if_needed,
     refresh_room_messaging_state,
-    reopen_order_chat_messaging,
 )
 
 
@@ -175,18 +174,8 @@ If chat already exists, returns the existing chat.
 
         participant_id = serializer.validated_data['participant_id']
 
-        existing_room = ChatRoom.objects.filter(
-            participants=request.user
-        ).filter(
-            participants=participant_id
-        ).first()
-
-        if existing_room:
-            reopen_order_chat_messaging(room=existing_room)
-            result_serializer = ChatRoomSerializer(existing_room, context={'request': request})
-            return Response(result_serializer.data, status=status.HTTP_200_OK)
-
-        room = ChatRoom.objects.create(initiator=request.user, is_active=True)
+        # Always a new room: do not reopen older threads between the same pair.
+        room = ChatRoom.objects.create(initiator=request.user, is_active=True, closes_at=None)
         room.participants.add(request.user, participant_id)
         post_safety_welcome_if_needed(room=room)
 
