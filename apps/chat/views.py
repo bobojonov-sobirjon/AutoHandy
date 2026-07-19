@@ -19,7 +19,6 @@ from .services import (
     assert_room_allows_messaging,
     broadcast_chat_messages,
     post_master_greeting_if_needed,
-    post_safety_welcome_if_needed,
     refresh_room_messaging_state,
 )
 
@@ -178,7 +177,6 @@ If chat already exists, returns the existing chat.
         # Always a new room: do not reopen older threads between the same pair.
         room = ChatRoom.objects.create(initiator=request.user, is_active=True, closes_at=None)
         room.participants.add(request.user, participant_id)
-        post_safety_welcome_if_needed(room=room)
         try:
             initiator_is_master = bool(
                 getattr(request.user, 'master_profiles', None)

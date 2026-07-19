@@ -211,7 +211,6 @@ def get_or_create_order_chat_room(*, master_user, customer_user) -> tuple[ChatRo
     """
     room = ChatRoom.objects.create(initiator=master_user, is_active=True, closes_at=None)
     room.participants.add(master_user, customer_user)
-    post_safety_welcome_if_needed(room=room)
     post_master_greeting_if_needed(room=room, master_user=master_user)
     return room, True
 
