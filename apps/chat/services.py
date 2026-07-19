@@ -9,10 +9,13 @@ from django.utils import timezone
 from apps.chat.constants import (
     CONTACT_WARNING_TEXT,
     CONVERSATION_CLOSED_TEXT,
+    MASTER_GREETING_TEXT_FALLBACK,
+    MASTER_GREETING_TEXT_TEMPLATE,
     MESSAGING_CLOSED_ERROR,
     SAFETY_WELCOME_TEXT,
     SYSTEM_CODE_CONTACT_WARNING,
     SYSTEM_CODE_CONVERSATION_CLOSED,
+    SYSTEM_CODE_MASTER_GREETING,
     SYSTEM_CODE_SAFETY_WELCOME,
 )
 from apps.chat.contact_detection import message_contains_contact_info
@@ -48,6 +51,33 @@ def post_safety_welcome_if_needed(*, room: ChatRoom) -> ChatMessage | None:
         room=room,
         text=SAFETY_WELCOME_TEXT,
         system_code=SYSTEM_CODE_SAFETY_WELCOME,
+    )
+
+
+def post_master_greeting_if_needed(*, room: ChatRoom, master_user) -> ChatMessage | None:
+    """
+    Auto welcome from the master right after the room is created, e.g.
+    "Hi! I'm Anton, your master for this order...". Sent once per room, from the master.
+    """
+    if master_user is None:
+        return None
+    if room.messages.filter(system_code=SYSTEM_CODE_MASTER_GREETING).exists():
+        return None
+
+    first_name = (getattr(master_user, 'first_name', '') or '').strip()
+    if first_name:
+        text = MASTER_GREETING_TEXT_TEMPLATE.format(name=first_name)
+    else:
+        text = MASTER_GREETING_TEXT_FALLBACK
+
+    return ChatMessage.objects.create(
+        room=room,
+        sender=master_user,
+        message_type='text',
+        text=text,
+        is_system=False,
+        system_code=SYSTEM_CODE_MASTER_GREETING,
+        is_read=False,
     )
 
 
@@ -182,6 +212,7 @@ def get_or_create_order_chat_room(*, master_user, customer_user) -> tuple[ChatRo
     room = ChatRoom.objects.create(initiator=master_user, is_active=True, closes_at=None)
     room.participants.add(master_user, customer_user)
     post_safety_welcome_if_needed(room=room)
+    post_master_greeting_if_needed(room=room, master_user=master_user)
     return room, True
 
 

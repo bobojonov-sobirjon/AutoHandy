@@ -303,6 +303,7 @@ class UserDetailsSerializer(serializers.ModelSerializer):
         try:
             from apps.order.models import Review, ReviewTag, Order
             from apps.order.services.notifications import _media_url
+            from apps.accounts.display_name import public_person_display_name
 
             request = self.context.get('request')
             orders_as_main_master = Order.objects.filter(master__user=obj)
@@ -334,7 +335,7 @@ class UserDetailsSerializer(serializers.ModelSerializer):
                     'tags_detail': _tags_detail(review.tags),
                     'reviewer': {
                         'id': review.reviewer.id,
-                        'full_name': review.reviewer.get_full_name(),
+                        'full_name': public_person_display_name(review.reviewer),
                         'avatar': _media_url(request, review.reviewer.avatar),
                     },
                     'order_id': review.order.id,

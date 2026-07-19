@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 
+from apps.chat.constants import SYSTEM_CODE_MASTER_GREETING
 from apps.chat.models import ChatRoom
 from apps.chat.services import (
     get_or_create_order_chat_room,
@@ -67,6 +68,23 @@ class OrderChatReopenTestCase(TestCase):
         )
         self.assertTrue(created_again)
         self.assertNotEqual(second.pk, result.pk)
+
+    def test_new_room_posts_master_greeting_from_master(self):
+        self.master_user.first_name = 'Anton'
+        self.master_user.last_name = 'Kuznetsov'
+        self.master_user.save(update_fields=['first_name', 'last_name'])
+
+        room, _ = get_or_create_order_chat_room(
+            master_user=self.master_user,
+            customer_user=self.customer_user,
+        )
+
+        greeting = room.messages.filter(system_code=SYSTEM_CODE_MASTER_GREETING).first()
+        self.assertIsNotNone(greeting)
+        self.assertEqual(greeting.sender_id, self.master_user.id)
+        self.assertFalse(greeting.is_system)
+        self.assertIn('Anton', greeting.text)
+        self.assertNotIn('Kuznetsov', greeting.text)
 
     def test_refresh_does_not_reclose_room_with_active_order(self):
         from apps.master.models import Master

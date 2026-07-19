@@ -18,6 +18,7 @@ from .services import (
     after_user_message_saved,
     assert_room_allows_messaging,
     broadcast_chat_messages,
+    post_master_greeting_if_needed,
     post_safety_welcome_if_needed,
     refresh_room_messaging_state,
 )
@@ -178,6 +179,15 @@ If chat already exists, returns the existing chat.
         room = ChatRoom.objects.create(initiator=request.user, is_active=True, closes_at=None)
         room.participants.add(request.user, participant_id)
         post_safety_welcome_if_needed(room=room)
+        try:
+            initiator_is_master = bool(
+                getattr(request.user, 'master_profiles', None)
+                and request.user.master_profiles.exists()
+            )
+        except Exception:  # noqa: BLE001
+            initiator_is_master = False
+        if initiator_is_master:
+            post_master_greeting_if_needed(room=room, master_user=request.user)
 
         result_serializer = ChatRoomSerializer(room, context={'request': request})
         return Response(result_serializer.data, status=status.HTTP_201_CREATED)

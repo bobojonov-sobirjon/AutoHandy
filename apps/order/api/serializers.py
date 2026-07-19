@@ -59,6 +59,13 @@ CUSTOM_REQUEST_CATEGORY_MASK_MASTER = 'Incoming request'
 TOWING_CATEGORY_MASK_MASTER = 'Towing request'
 
 
+def _review_author_display_name(user):
+    """Reviews are public to the other party — hide the full surname ("Anton K")."""
+    from apps.accounts.display_name import public_person_display_name
+
+    return public_person_display_name(user)
+
+
 def review_tags_detail(tags):
     """[{value, label}, ...] for API responses."""
     if not tags:
@@ -834,7 +841,7 @@ class OrderSerializer(serializers.ModelSerializer):
                 'tags_detail': review_tags_detail(review.tags),
                 'reviewer': {
                     'id': review.reviewer.id,
-                    'full_name': review.reviewer.get_full_name(),
+                    'full_name': _review_author_display_name(review.reviewer),
                     'avatar': _media_url(request, review.reviewer.avatar),
                 }
                 if review.reviewer
@@ -2684,12 +2691,12 @@ class ReviewSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'reviewer', 'created_at', 'updated_at']
 
     def get_reviewer_info(self, obj):
-        """Review author info"""
+        """Review author info (surname hidden: "Anton K")."""
         request = self.context.get('request')
         if obj.reviewer:
             return {
                 'id': obj.reviewer.id,
-                'full_name': obj.reviewer.get_full_name(),
+                'full_name': _review_author_display_name(obj.reviewer),
                 'email': obj.reviewer.email,
                 'avatar': _media_url(request, obj.reviewer.avatar),
             }

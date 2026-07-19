@@ -178,6 +178,8 @@ class MasterSerializer(serializers.ModelSerializer):
 
     def _get_rating_data_for_master(self, master):
         """Get rating data for master"""
+        from apps.accounts.display_name import public_person_display_name
+
         cache = getattr(master, '_prefetched_objects_cache', None) or {}
         if 'ratings' in cache:
             ratings = list(cache['ratings'])
@@ -201,7 +203,7 @@ class MasterSerializer(serializers.ModelSerializer):
                     'id': r.id,
                     'rating': r.rating,
                     'comment': r.comment,
-                    'user_name': r.user.get_full_name(),
+                    'user_name': public_person_display_name(r.user),
                     'created_at': r.created_at
                 }
                 for r in ratings[:10]  # Last 10 ratings

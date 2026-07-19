@@ -107,6 +107,27 @@ def build_compact_master_user_payload(
     }
 
 
+def public_person_display_name(user, *, fallback: Optional[str] = None) -> str:
+    """
+    Privacy-safe name for anything shown to the other party (reviews, ratings, chat):
+    always "Anton K" — never the full surname. Own profile endpoints keep the full name.
+    """
+    if user is None:
+        return fallback or ''
+    fb = fallback
+    if fb is None:
+        fb = (
+            getattr(user, 'email', None)
+            or getattr(user, 'phone_number', None)
+            or ''
+        )
+    return customer_display_name(
+        getattr(user, 'first_name', None),
+        getattr(user, 'last_name', None),
+        fallback=fb or '',
+    )
+
+
 def resolve_master_full_name_for_request(user, request, *, master_user_id: Optional[int] = None) -> str:
     uid = master_user_id if master_user_id is not None else getattr(user, 'id', None)
     try:

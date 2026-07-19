@@ -11,6 +11,17 @@ from .models import ChatRoom, ChatMessage
 User = get_user_model()
 
 
+def _mask_sender_name(sender) -> str:
+    """Chat never exposes a full surname to the other party ("Anton K")."""
+    from apps.accounts.display_name import customer_display_name
+
+    return customer_display_name(
+        getattr(sender, 'first_name', None),
+        getattr(sender, 'last_name', None),
+        fallback=(getattr(sender, 'email', None) or ''),
+    )
+
+
 class ChatConsumer(AsyncWebsocketConsumer):
     """
     WebSocket consumer for real-time chat
@@ -381,11 +392,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if not other_user_id:
             return 0
         sender = getattr(message, 'sender', None) or self.user
-        sender_name = (
-            getattr(sender, 'get_full_name', lambda: '')()
-            or getattr(sender, 'email', None)
-            or getattr(sender, 'phone_number', None)
-            or f'User {getattr(sender, "id", "")}'
+        from apps.accounts.display_name import customer_display_name
+
+        sender_name = customer_display_name(
+            getattr(sender, 'first_name', None),
+            getattr(sender, 'last_name', None),
+            fallback=(
+                getattr(sender, 'email', None)
+                or getattr(sender, 'phone_number', None)
+                or f'User {getattr(sender, "id", "")}'
+            ),
         )
         return notify_chat_message(
             recipient_user_id=other_user_id,
@@ -441,7 +457,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'room_id': message.room.id,
             'sender': None if message.sender_id is None else {
                 'id': message.sender.id,
-                'full_name': message.sender.get_full_name() or message.sender.email,
+                'full_name': _mask_sender_name(message.sender),
                 'email': message.sender.email,
                 'avatar': _abs(message.sender.avatar.url) if message.sender.avatar else None
             },

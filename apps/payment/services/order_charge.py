@@ -291,13 +291,33 @@ def charge_order_on_completion(order: Order) -> None:
     _bind_succeeded_payment_intent(order, pi, amount_cents=amount_cents, currency=currency)
 
 
+def _tip_idempotency_key(order: Order) -> str:
+    attempt = max(1, int(getattr(order, 'tip_charge_attempt', None) or 1))
+    return f'autohandy_order_{order.pk}_tip_a{attempt}'
+
+
+def _record_tip_charge_failure(order: Order, message: str) -> None:
+    """Bump attempt so the next tip retry uses a fresh Stripe idempotency key (no cached decline)."""
+    attempt = max(1, int(getattr(order, 'tip_charge_attempt', None) or 1))
+    order.tip_stripe_payment_status = OrderStripePaymentStatus.FAILED
+    order.tip_charge_attempt = attempt + 1
+    order.save(update_fields=['tip_stripe_payment_status', 'tip_charge_attempt', 'updated_at'])
+
+
 def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
     """
     Off-session tip after completion. Customer pays tip + marketplace surcharges (same % as the job).
     Master receives tip payout after PROVIDER_PLATFORM_FEE_PERCENT (default 10%).
-  """
+
+    Attempt-based idempotency: a failed tip charge increments ``tip_charge_attempt`` so a later
+    retry is not stuck replaying Stripe's cached decline for ~24h.
+    """
     if not stripe_configured():
         raise StripeChargeError('Stripe is not configured on the server.')
+
+    # Already paid — nothing to do (idempotent success).
+    if order.tip_stripe_payment_status == OrderStripePaymentStatus.SUCCEEDED:
+        return
 
     amount = Decimal(str(tip_amount))
     if amount <= 0:
@@ -327,7 +347,7 @@ def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
     if dest:
         _assert_connect_destination_can_receive_transfers(stripe, dest)
 
-    idem = f'autohandy_order_{order.pk}_tip_v1'
+    idem = _tip_idempotency_key(order)
     params: dict = {
         'amount': amount_cents,
         'currency': currency,
@@ -353,10 +373,12 @@ def charge_order_tip(order: Order, tip_amount: Decimal) -> None:
     except Exception as exc:  # noqa: BLE001
         msg = str(getattr(exc, 'user_message', None) or getattr(exc, 'message', None) or exc)
         friendly = _friendly_stripe_destination_error(msg)
+        _record_tip_charge_failure(order, friendly or msg)
         raise StripeChargeError(friendly or msg) from exc
 
     st = getattr(pi, 'status', '') or ''
     if st != 'succeeded':
+        _record_tip_charge_failure(order, f'Tip PaymentIntent status={st}')
         raise StripeChargeError(f'Tip PaymentIntent status={st}')
 
     order.tip_amount = amount

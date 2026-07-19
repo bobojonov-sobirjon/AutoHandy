@@ -515,6 +515,14 @@ class Order(models.Model):
         verbose_name='Tip Stripe charged amount (minor units)',
         help_text='Customer charge for tip including marketplace surcharges.',
     )
+    tip_charge_attempt = models.PositiveIntegerField(
+        default=1,
+        verbose_name='Tip charge attempt',
+        help_text=(
+            'Idempotency attempt for the tip charge. Increments after a failed tip charge so a '
+            'later retry is not stuck replaying Stripe\'s cached decline.'
+        ),
+    )
     completion_pin = models.CharField(
         max_length=4,
         blank=True,

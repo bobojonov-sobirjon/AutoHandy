@@ -6,15 +6,36 @@ User = get_user_model()
 
 
 class ChatParticipantSerializer(serializers.ModelSerializer):
-    """Serializer for chat participant"""
+    """Serializer for chat participant (surname hidden from the other party: "Anton K")."""
     full_name = serializers.SerializerMethodField()
+    last_name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = ['id', 'email', 'first_name', 'last_name', 'full_name', 'avatar']
 
+    def _is_self(self, obj) -> bool:
+        request = self.context.get('request')
+        viewer = getattr(request, 'user', None)
+        return bool(viewer and getattr(viewer, 'is_authenticated', False) and viewer.id == obj.id)
+
     def get_full_name(self, obj):
-        return obj.get_full_name() or obj.email
+        from apps.accounts.display_name import customer_display_name
+
+        if self._is_self(obj):
+            return obj.get_full_name() or obj.email
+        return customer_display_name(
+            obj.first_name,
+            obj.last_name,
+            fallback=(obj.get_full_name() or obj.email or ''),
+        )
+
+    def get_last_name(self, obj):
+        from apps.accounts.display_name import _last_name_initial
+
+        if self._is_self(obj):
+            return obj.last_name or ''
+        return _last_name_initial(obj.last_name or '')
 
 
 class ChatMessageSerializer(serializers.ModelSerializer):
