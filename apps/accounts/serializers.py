@@ -451,11 +451,32 @@ class UserLimitedProfileUpdateSerializer(serializers.ModelSerializer):
 
 
 class UserWorkshopComplianceUpdateSerializer(serializers.ModelSerializer):
-    """PUT only: master workshop tools + licenses self-confirmation."""
+    """
+    PUT/POST: master workshop tools + licenses self-confirmation.
+
+    Once both are confirmed, the attestation is locked: flags stay True and
+    ``workshop_compliance_confirmed_at`` is never overwritten (legal evidence).
+    """
 
     class Meta:
         model = CustomUser
         fields = ['has_tools_confirmed', 'has_licenses_confirmed']
+
+    def validate(self, attrs):
+        instance = self.instance
+        if instance is not None and instance.workshop_compliance_is_locked():
+            # Idempotent re-save is OK; unconfirming is not.
+            tools = attrs.get('has_tools_confirmed', True)
+            licenses = attrs.get('has_licenses_confirmed', True)
+            if not tools or not licenses:
+                raise serializers.ValidationError(
+                    {
+                        'non_field_errors': [
+                            'Workshop compliance is already confirmed and cannot be changed.'
+                        ]
+                    }
+                )
+        return attrs
 
     def validate_has_tools_confirmed(self, value):
         if not value:
@@ -470,12 +491,52 @@ class UserWorkshopComplianceUpdateSerializer(serializers.ModelSerializer):
         return value
 
     def update(self, instance, validated_data):
+        import logging
+
         from django.utils import timezone
 
+        from apps.accounts.models import WorkshopComplianceAuditLog
+
+        already_locked = instance.workshop_compliance_is_locked()
         instance = super().update(instance, validated_data)
+
+        first_confirmation = False
         if instance.has_tools_confirmed and instance.has_licenses_confirmed:
-            instance.workshop_compliance_confirmed_at = timezone.now()
-            instance.save(update_fields=['workshop_compliance_confirmed_at', 'updated_at'])
+            if not instance.workshop_compliance_confirmed_at:
+                instance.workshop_compliance_confirmed_at = timezone.now()
+                instance.save(update_fields=['workshop_compliance_confirmed_at', 'updated_at'])
+                first_confirmation = True
+            elif already_locked:
+                # Keep original timestamp; still persist True flags if somehow out of sync.
+                pass
+
+        if first_confirmation:
+            request = self.context.get('request')
+            ip = None
+            ua = ''
+            if request is not None:
+                xff = (request.META.get('HTTP_X_FORWARDED_FOR') or '').split(',')[0].strip()
+                ip = xff or request.META.get('REMOTE_ADDR') or None
+                ua = (request.META.get('HTTP_USER_AGENT') or '')[:512]
+
+            WorkshopComplianceAuditLog.objects.create(
+                user=instance,
+                has_tools_confirmed=True,
+                has_licenses_confirmed=True,
+                confirmed_at=instance.workshop_compliance_confirmed_at,
+                ip_address=ip,
+                user_agent=ua,
+            )
+            logging.getLogger('apps.accounts.workshop_compliance').info(
+                'workshop_compliance_confirmed user_id=%s email=%s phone=%s confirmed_at=%s ip=%s',
+                instance.pk,
+                getattr(instance, 'email', None) or '',
+                getattr(instance, 'phone_number', None) or '',
+                instance.workshop_compliance_confirmed_at.isoformat()
+                if instance.workshop_compliance_confirmed_at
+                else '',
+                ip or '',
+            )
         return instance
 
 

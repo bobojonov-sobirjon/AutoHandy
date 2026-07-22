@@ -12,6 +12,7 @@ from .models import (
     FAQ,
     EmailVerificationToken,
     AppVersion,
+    WorkshopComplianceAuditLog,
 )
 from apps.car.models import Car
 from django.utils.html import mark_safe
@@ -86,6 +87,16 @@ class CustomUserAdmin(UserAdmin):
         ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups')}),
         ('Important dates', {'fields': ('last_login', 'date_joined', 'created_at', 'updated_at')}),
         ('Verification', {'fields': ('is_verified', 'is_email_verified')}),
+        (
+            'Workshop compliance',
+            {
+                'fields': (
+                    'has_tools_confirmed',
+                    'has_licenses_confirmed',
+                    'workshop_compliance_confirmed_at',
+                )
+            },
+        ),
     )
 
     add_fieldsets = (
@@ -95,7 +106,16 @@ class CustomUserAdmin(UserAdmin):
         }),
     )
 
-    readonly_fields = ('private_id', 'created_at', 'updated_at', 'date_joined', 'last_login')
+    readonly_fields = (
+        'private_id',
+        'created_at',
+        'updated_at',
+        'date_joined',
+        'last_login',
+        'has_tools_confirmed',
+        'has_licenses_confirmed',
+        'workshop_compliance_confirmed_at',
+    )
 
 
 @admin.register(MasterCustomUser)
@@ -199,6 +219,43 @@ class FAQAdmin(admin.ModelAdmin):
 admin.site.unregister(Site)
 
 admin.site.register(AppVersion)
+
+
+@admin.register(WorkshopComplianceAuditLog)
+class WorkshopComplianceAuditLogAdmin(admin.ModelAdmin):
+    """Read-only legal audit trail — do not edit or delete in production."""
+
+    list_display = (
+        'id',
+        'user',
+        'has_tools_confirmed',
+        'has_licenses_confirmed',
+        'confirmed_at',
+        'ip_address',
+        'created_at',
+    )
+    list_filter = ('has_tools_confirmed', 'has_licenses_confirmed', 'confirmed_at')
+    search_fields = ('user__email', 'user__phone_number', 'user__username', 'ip_address')
+    readonly_fields = (
+        'user',
+        'has_tools_confirmed',
+        'has_licenses_confirmed',
+        'confirmed_at',
+        'ip_address',
+        'user_agent',
+        'created_at',
+    )
+    ordering = ('-confirmed_at', '-id')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
 
 admin.site.site_header = 'AutoHandy'
 admin.site.site_title = 'AutoHandy'

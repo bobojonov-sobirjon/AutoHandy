@@ -26,6 +26,7 @@ from apps.order.services.master_offer import activate_pending_master_offer
 from apps.order.services.status_workflow import (
     auto_eta_from_order_master,
     client_cancellation_snapshot,
+    detach_master_after_pre_accept_client_cancel,
     resolve_master_coordinates_for_start_job,
     resolve_on_the_way_eta,
     validate_master_cancel,
@@ -2638,6 +2639,7 @@ class UpdateOrderStatusView(APIView):
                                 continue
                 except Exception:  # noqa: BLE001
                     pass
+                detach_master_after_pre_accept_client_cancel(order)
                 data = OrderSerializer(order, context={'request': request}).data
                 data.update(extra_response)
                 return Response(data)
@@ -2980,6 +2982,7 @@ class CancelOrderView(APIView):
                             continue
             except Exception:  # noqa: BLE001
                 pass
+            detach_master_after_pre_accept_client_cancel(order)
             data = OrderSerializer(order, context={'request': request}).data
             data['cancellation_penalty_applies'] = penalty_out['penalty_applies']
             data['cancellation_penalty_percent'] = penalty_out['penalty_percent']

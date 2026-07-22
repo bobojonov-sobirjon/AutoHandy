@@ -118,8 +118,18 @@ class CustomUser(AbstractUser):
         null=True,
         blank=True,
         verbose_name='Workshop compliance confirmed at',
-        help_text='Set when tools and licenses confirmations are saved via profile API.',
+        help_text=(
+            'Set once when both tools and licenses are first confirmed. '
+            'Never cleared or overwritten — legal evidence that the master self-attested.'
+        ),
     )
+
+    def workshop_compliance_is_locked(self) -> bool:
+        """Once confirmed, UI/API must not allow unchecking."""
+        return bool(
+            self.workshop_compliance_confirmed_at
+            or (self.has_tools_confirmed and self.has_licenses_confirmed)
+        )
 
     # Use email as the username field
     USERNAME_FIELD = 'email'
@@ -495,3 +505,40 @@ class AppVersion(models.Model):
 
     def __str__(self):
         return self.version
+
+
+class WorkshopComplianceAuditLog(models.Model):
+    """
+    Immutable audit trail: master confirmed required tools + licenses.
+    Kept for disputes / court — do not delete rows in production.
+    """
+
+    user = models.ForeignKey(
+        CustomUser,
+        on_delete=models.PROTECT,
+        related_name='workshop_compliance_audit_logs',
+        verbose_name='User',
+    )
+    has_tools_confirmed = models.BooleanField(verbose_name='Tools confirmed')
+    has_licenses_confirmed = models.BooleanField(verbose_name='Licenses confirmed')
+    confirmed_at = models.DateTimeField(verbose_name='Confirmed at', db_index=True)
+    ip_address = models.GenericIPAddressField(
+        null=True,
+        blank=True,
+        verbose_name='IP address',
+    )
+    user_agent = models.CharField(
+        max_length=512,
+        blank=True,
+        default='',
+        verbose_name='User-Agent',
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Logged at')
+
+    class Meta:
+        verbose_name = 'Workshop compliance audit log'
+        verbose_name_plural = 'Workshop compliance audit logs'
+        ordering = ['-confirmed_at', '-id']
+
+    def __str__(self):
+        return f'Compliance audit user={self.user_id} at {self.confirmed_at}'

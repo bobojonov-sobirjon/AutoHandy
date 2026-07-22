@@ -621,16 +621,44 @@ class AccountDeleteView(APIView):
 
 
 class UserWorkshopComplianceView(APIView):
-    """PUT: master confirms required tools and licenses (request.user only)."""
+    """
+    GET: current workshop compliance state (checkboxes for UI).
+    PUT/POST: confirm tools + licenses (locked forever after first success).
+    """
 
     permission_classes = [IsAuthenticated]
     parser_classes = [JSONParser, FormParser]
 
+    def _compliance_payload(self, user):
+        detail = UserDetailsSerializer(user, context={'request': self.request})
+        return {
+            'success': True,
+            'locked': user.workshop_compliance_is_locked(),
+            'has_tools_confirmed': bool(user.has_tools_confirmed),
+            'has_licenses_confirmed': bool(user.has_licenses_confirmed),
+            'workshop_compliance_confirmed_at': user.workshop_compliance_confirmed_at,
+            'user': detail.data,
+        }
+
+    @extend_schema(
+        summary='Get workshop tools/licenses confirmation state',
+        description=(
+            'Returns whether the master already confirmed required tools and licenses. '
+            'If `locked` is true, UI must show both checkboxes checked and read-only.'
+        ),
+        responses={200: {'type': 'object'}, 401: {'type': 'object'}},
+        tags=['User Profile'],
+    )
+    def get(self, request):
+        request.user.refresh_from_db()
+        return Response(self._compliance_payload(request.user), status=status.HTTP_200_OK)
+
     @extend_schema(
         summary='Confirm workshop tools and licenses',
         description=(
-            'Master only. JSON body: `has_tools_confirmed`, `has_licenses_confirmed` (both must be `true`). '
-            'Updates `request.user` only. Fields are returned on GET `/api/auth/user/`.'
+            'JSON body: `has_tools_confirmed`, `has_licenses_confirmed` (both must be `true`). '
+            'First successful confirm is permanent (cannot uncheck) and written to an audit log. '
+            'Re-submitting while already locked returns 200 with the same locked state.'
         ),
         request=UserWorkshopComplianceUpdateSerializer,
         responses={
@@ -639,6 +667,7 @@ class UserWorkshopComplianceView(APIView):
                 'properties': {
                     'success': {'type': 'boolean'},
                     'message': {'type': 'string'},
+                    'locked': {'type': 'boolean'},
                     'user': {'type': 'object'},
                 },
             },
@@ -648,8 +677,16 @@ class UserWorkshopComplianceView(APIView):
         tags=['User Profile'],
     )
     def put(self, request):
+        user = request.user
+        # Already locked → idempotent success (no re-write of timestamp).
+        if user.workshop_compliance_is_locked():
+            user.refresh_from_db()
+            payload = self._compliance_payload(user)
+            payload['message'] = 'Workshop compliance already confirmed'
+            return Response(payload, status=status.HTTP_200_OK)
+
         serializer = UserWorkshopComplianceUpdateSerializer(
-            request.user,
+            user,
             data=request.data,
             partial=False,
             context={'request': request},
@@ -657,16 +694,14 @@ class UserWorkshopComplianceView(APIView):
         if serializer.is_valid():
             serializer.save()
             request.user.refresh_from_db()
-            detail = UserDetailsSerializer(request.user, context={'request': request})
-            return Response(
-                {
-                    'success': True,
-                    'message': 'Workshop compliance confirmed',
-                    'user': detail.data,
-                },
-                status=status.HTTP_200_OK,
-            )
+            payload = self._compliance_payload(request.user)
+            payload['message'] = 'Workshop compliance confirmed'
+            return Response(payload, status=status.HTTP_200_OK)
         return Response({'success': False, 'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request):
+        """Same as PUT — some mobile clients prefer POST."""
+        return self.put(request)
 
 
 class UserLocationUpdateView(APIView):

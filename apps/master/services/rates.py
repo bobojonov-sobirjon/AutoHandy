@@ -49,6 +49,27 @@ def _safe_assignment_failure_count(*, master_ids: list[int], completed_order_ids
         return 0
 
 
+def _cancelled_after_accept_qs(*, master_id=None, master_user=None):
+    """
+    Cancels that count against completion rate.
+
+    Only orders the master actually accepted (``accepted_at`` set). Pre-accept
+    client cancels on standard bookings keep ``master`` FK briefly and must NOT
+    lower the master's completion rating.
+    """
+    from apps.order.models import Order, OrderStatus
+
+    qs = Order.objects.filter(
+        status=OrderStatus.CANCELLED,
+        accepted_at__isnull=False,
+    )
+    if master_id is not None:
+        qs = qs.filter(master_id=master_id)
+    if master_user is not None:
+        qs = qs.filter(master__user=master_user)
+    return qs
+
+
 def _user_completion_triplet(user) -> tuple[int, int, int]:
     """(completed, cancelled, failures) — same completed scope as profile counter."""
     from apps.master.models import Master
@@ -61,10 +82,7 @@ def _user_completion_triplet(user) -> tuple[int, int, int]:
     if completed <= 0:
         return 0, 0, 0
 
-    cancelled = Order.objects.filter(
-        master__user=user,
-        status=OrderStatus.CANCELLED,
-    ).count()
+    cancelled = _cancelled_after_accept_qs(master_user=user).count()
 
     master_ids = list(Master.objects.filter(user=user).values_list('id', flat=True))
     completed_ids = Order.objects.filter(
@@ -86,20 +104,14 @@ def _master_completion_triplet(master) -> tuple[int, int, int]:
         status=OrderStatus.COMPLETED,
     ).count()
     if completed <= 0:
-        cancelled_only = Order.objects.filter(
-            master_id=master.id,
-            status=OrderStatus.CANCELLED,
-        ).count()
+        cancelled_only = _cancelled_after_accept_qs(master_id=master.id).count()
         failures_only = _safe_assignment_failure_count(
             master_ids=[master.id],
             completed_order_ids=[],
         )
         return 0, cancelled_only, failures_only
 
-    cancelled = Order.objects.filter(
-        master_id=master.id,
-        status=OrderStatus.CANCELLED,
-    ).count()
+    cancelled = _cancelled_after_accept_qs(master_id=master.id).count()
     completed_ids = Order.objects.filter(
         master_id=master.id,
         status=OrderStatus.COMPLETED,

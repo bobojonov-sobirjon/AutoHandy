@@ -175,6 +175,32 @@ def client_cancel_has_penalty(order: Order) -> bool:
     return bool(snap['client_can_cancel'] and snap['penalty_applies'])
 
 
+def detach_master_after_pre_accept_client_cancel(order: Order) -> bool:
+    """
+    Client cancelled before the master accepted: clear ``order.master`` and expire
+    open offer events so completion/acceptance rates are not polluted.
+
+    Call **after** cancel notifications (so the offered master still gets the push).
+    """
+    if order.accepted_at is not None:
+        return False
+    if not order.master_id:
+        return False
+
+    from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
+
+    now = timezone.now()
+    MasterOfferEvent.objects.filter(
+        order_id=order.pk,
+        status=MasterOfferEventStatus.SENT,
+    ).update(status=MasterOfferEventStatus.EXPIRED, responded_at=now)
+
+    order.master = None
+    order.master_response_deadline = None
+    order.save(update_fields=['master', 'master_response_deadline', 'updated_at'])
+    return True
+
+
 def master_cancellations_this_month(master: Master) -> int:
     now = timezone.now()
     start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
