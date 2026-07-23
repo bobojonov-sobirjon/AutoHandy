@@ -55,12 +55,27 @@ def _order_car_count(order) -> int:
     """
     Multiply line-item service prices by how many cars are on the order (same work per vehicle).
     If no cars are linked yet, use 1 so totals stay usable.
+    Prefer prefetched ``car`` to avoid an extra COUNT query on list endpoints.
     """
+    cache = getattr(order, '_prefetched_objects_cache', None) or {}
+    if 'car' in cache:
+        n = len(cache['car'])
+        return max(1, n)
     try:
         n = order.car.count()
     except Exception:
         n = 0
     return max(1, n)
+
+
+def _iter_order_services(order):
+    """Use prefetch cache when present (chaining select_related after .all() bypasses it)."""
+    cache = getattr(order, '_prefetched_objects_cache', None) or {}
+    if 'order_services' in cache:
+        return sorted(cache['order_services'], key=lambda r: r.pk or 0)
+    return list(
+        order.order_services.select_related('master_service_item').order_by('id')
+    )
 
 
 def _towing_subtotal(order) -> Decimal | None:
@@ -178,7 +193,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
         rows: list[dict[str, Any]] = []
         services_subtotal = Decimal('0')
 
-        for os_row in order.order_services.all().select_related('master_service_item').order_by('id'):
+        for os_row in _iter_order_services(order):
             item = os_row.master_service_item
             if not item:
                 continue
@@ -332,7 +347,7 @@ def compute_order_price_breakdown(order) -> dict[str, Any]:
     base_subtotal = Decimal('0')
     subtotal = Decimal('0')
 
-    for os_row in order.order_services.all().select_related('master_service_item').order_by('id'):
+    for os_row in _iter_order_services(order):
         item = os_row.master_service_item
         if not item:
             continue

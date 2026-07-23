@@ -165,7 +165,7 @@ def push_sos_offer_to_masters_task(order_id: int, master_ids: list[int]) -> int:
             continue
         notify_master_new_order(order, target_master_id=mid)
         push_sos_order_to_master_websocket(order, request=None, target_master_id=mid)
-        schedule_master_new_order_reminders(order_id, mid)
+        schedule_master_new_order_reminders(order_id, mid, order_type=str(order.order_type))
         try:
             MasterOfferEvent.objects.get_or_create(
                 master_id=mid,

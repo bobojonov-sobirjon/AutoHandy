@@ -49,7 +49,11 @@ def activate_pending_master_offer(
     if send_push:
         notify_master_new_order(order)
         if order.master_id:
-            schedule_master_new_order_reminders(order.pk, order.master_id)
+            schedule_master_new_order_reminders(
+                order.pk,
+                order.master_id,
+                order_type=str(order.order_type),
+            )
     if order.master_response_deadline:
         schedule_master_offer_expiry(order.pk, order.master_response_deadline)
 

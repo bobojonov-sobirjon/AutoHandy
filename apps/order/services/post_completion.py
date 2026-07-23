@@ -36,7 +36,14 @@ def build_post_completion_payload(order: Order) -> dict[str, Any] | None:
     if order.status != OrderStatus.COMPLETED:
         return None
 
-    has_review = Review.objects.filter(order_id=order.pk).exists()
+    has_review = False
+    try:
+        # Prefer OneToOne already select_related on list/detail querysets.
+        has_review = order.review is not None
+    except Review.DoesNotExist:
+        has_review = False
+    except Exception:
+        has_review = Review.objects.filter(order_id=order.pk).exists()
     tip_paid = _tip_paid(order)
     tip_declined = bool(order.tip_declined)
     needs_tip_prompt = not tip_paid and not tip_declined

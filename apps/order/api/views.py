@@ -21,6 +21,7 @@ import secrets
 from apps.categories.query import order_by_order_category_smart_q
 from apps.order.services.completion_pin import clear_completion_pin, issue_completion_pin
 from apps.order.api.order_list_query import optimize_orders_list_queryset, prepare_orders_page_for_serialization
+from apps.order.api.order_list_serializers import OrderListSerializer
 from apps.order.services.offer_expiry import expire_stale_master_offers
 from apps.order.services.master_offer import activate_pending_master_offer
 from apps.order.services.status_workflow import (
@@ -1648,13 +1649,22 @@ class OrderListCreateView(APIView):
     )
     def get(self, request):
         """Get order list"""
-        expire_stale_master_offers()
-        queryset = self.get_queryset().prefetch_related('images', 'category', 'car')
+        # Stale-offer expiry runs on Celery beat; skip on hot list path.
+        queryset = optimize_orders_list_queryset(self.get_queryset())
 
         # Apply filters
         queryset = self.apply_filters(queryset, request)
-        
-        serializer = OrderSerializer(queryset, many=True, context={'request': request})
+
+        paginator = OrderPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        if page is not None:
+            prepare_orders_page_for_serialization(list(page))
+            serializer = OrderListSerializer(page, many=True, context={'request': request})
+            return paginator.get_paginated_response(serializer.data)
+
+        order_list = list(queryset[:100])
+        prepare_orders_page_for_serialization(order_list)
+        serializer = OrderListSerializer(order_list, many=True, context={'request': request})
         return Response(serializer.data)
 
     def apply_filters(self, queryset, request):
@@ -2028,7 +2038,7 @@ GET /api/order/by-user/?order_type=standard&status=pending
             orders = orders.filter(
                 Q(master__user__first_name__icontains=name) |
                 Q(master__user__last_name__icontains=name) |
-                Q(master__user__get_full_name__icontains=name)
+                Q(master__user__email__icontains=name)
             )
         
         # Убираем дубликаты и сортируем
@@ -2038,12 +2048,12 @@ GET /api/order/by-user/?order_type=standard&status=pending
         page = paginator.paginate_queryset(orders, request)
         if page is not None:
             prepare_orders_page_for_serialization(list(page))
-            serializer = OrderSerializer(page, many=True, context={'request': request})
+            serializer = OrderListSerializer(page, many=True, context={'request': request})
             return paginator.get_paginated_response(serializer.data)
 
         order_list = list(orders)
         prepare_orders_page_for_serialization(order_list)
-        serializer = OrderSerializer(order_list, many=True, context={'request': request})
+        serializer = OrderListSerializer(order_list, many=True, context={'request': request})
         return Response(serializer.data)
 
 
@@ -2304,12 +2314,12 @@ GET /api/order/by-master/?order_type=standard&status=pending
         page = paginator.paginate_queryset(orders, request)
         if page is not None:
             prepare_orders_page_for_serialization(list(page))
-            serializer = OrderSerializer(page, many=True, context={'request': request})
+            serializer = OrderListSerializer(page, many=True, context={'request': request})
             return paginator.get_paginated_response(serializer.data)
 
         order_list = list(orders)
         prepare_orders_page_for_serialization(order_list)
-        serializer = OrderSerializer(order_list, many=True, context={'request': request})
+        serializer = OrderListSerializer(order_list, many=True, context={'request': request})
         return Response(serializer.data)
 
 

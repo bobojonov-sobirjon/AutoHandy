@@ -1,10 +1,9 @@
-"""Query optimizations for order list APIs (same OrderSerializer output, fewer queries)."""
+"""Query optimizations for order list APIs."""
 from __future__ import annotations
 
 from django.db.models import Count, Prefetch
 
-from apps.master.models import MasterImage, MasterScheduleDay, MasterService, MasterServiceItems
-from apps.order.models import CustomRequestOffer, Order, OrderService, OrderStatus, Rating
+from apps.order.models import CustomRequestOffer, Order, OrderService, OrderStatus
 
 
 _ORDER_SERVICES_PREFETCH = Prefetch(
@@ -13,20 +12,7 @@ _ORDER_SERVICES_PREFETCH = Prefetch(
         'master_service_item',
         'master_service_item__category',
         'master_service_item__category__parent',
-    ).order_by(
-        'master_service_item__category__parent_id',
-        'master_service_item__category__name',
-    ),
-)
-
-_MASTER_SERVICE_ITEMS_PREFETCH = Prefetch(
-    'master_service_items',
-    queryset=MasterServiceItems.objects.select_related('category', 'category__parent'),
-)
-
-_MASTER_SERVICES_PREFETCH = Prefetch(
-    'master_services',
-    queryset=MasterService.objects.prefetch_related(_MASTER_SERVICE_ITEMS_PREFETCH),
+    ).order_by('id'),
 )
 
 _CUSTOM_OFFERS_PREFETCH = Prefetch(
@@ -41,47 +27,31 @@ _CUSTOM_OFFERS_PREFETCH = Prefetch(
     ),
 )
 
-_MASTER_RATINGS_PREFETCH = Prefetch(
-    'master__ratings',
-    queryset=Rating.objects.select_related('user').order_by('-created_at'),
-)
-
 
 def optimize_orders_list_queryset(qs):
     """
-    select_related / prefetch_related for GET by-user and by-master list serialization.
-    Response JSON unchanged; DB round-trips reduced.
+    Lightweight select/prefetch for list serializers (OrderListSerializer).
+    Avoids heavy master schedule/services/ratings graphs used only by full OrderSerializer.
     """
     return qs.select_related(
         'user',
         'master',
         'master__user',
-        'saved_card',
         'review',
         'review__reviewer',
     ).prefetch_related(
-        'images',
-        'work_completion_images',
         'category',
         'category__parent',
         'car',
         'car__category',
         _ORDER_SERVICES_PREFETCH,
         _CUSTOM_OFFERS_PREFETCH,
-        Prefetch('master__master_images', queryset=MasterImage.objects.all()),
-        Prefetch('master__master_services', queryset=_MASTER_SERVICES_PREFETCH.queryset),
-        _MASTER_RATINGS_PREFETCH,
-        Prefetch(
-            'master__schedule_days',
-            queryset=MasterScheduleDay.objects.all().order_by('date', 'start_time'),
-        ),
     )
 
 
 def prepare_orders_page_for_serialization(orders: list[Order]) -> None:
     """
-    Attach counts used by MasterSerializer so list views avoid per-order COUNT queries.
-    Mutates master instances in memory only.
+    Attach completed_orders_count on distinct masters (one query for the page).
     """
     master_ids = {o.master_id for o in orders if o.master_id}
     if not master_ids:
@@ -93,5 +63,5 @@ def prepare_orders_page_for_serialization(orders: list[Order]) -> None:
     )
     by_master = {row['master_id']: row['completed_orders_count'] for row in counts}
     for order in orders:
-        if order.master_id and order.master_id in by_master:
-            order.master.completed_orders_count = by_master[order.master_id]
+        if order.master_id and hasattr(order, 'master') and order.master is not None:
+            order.master.completed_orders_count = by_master.get(order.master_id, 0)

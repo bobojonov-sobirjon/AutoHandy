@@ -290,7 +290,7 @@ def broadcast_sos_offers(order: Order, request: 'HttpRequest | None' = None) -> 
     for mid in send_now:
         notify_master_new_order(order, target_master_id=mid)
         push_sos_order_to_master_websocket(order, request=request, target_master_id=mid)
-        schedule_master_new_order_reminders(order.pk, mid)
+        schedule_master_new_order_reminders(order.pk, mid, order_type=str(order.order_type))
         # Track offer event for acceptance-rate metrics.
         try:
             from apps.order.models import MasterOfferEvent, MasterOfferEventStatus

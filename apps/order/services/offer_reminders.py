@@ -1,4 +1,4 @@
-"""Repeat FCM for unanswered master new-order offers."""
+"""Repeat FCM for unanswered master new-order offers (Celery)."""
 from __future__ import annotations
 
 import logging
@@ -15,8 +15,15 @@ def _reminder_enabled() -> bool:
     return bool(getattr(settings, 'MASTER_NEW_ORDER_REMINDER_ENABLED', True))
 
 
-def reminder_interval_seconds() -> int:
-    return max(1, int(getattr(settings, 'MASTER_NEW_ORDER_REMINDER_SECONDS', 5) or 5))
+def reminder_interval_seconds_for_order(order: Order | None = None, *, order_type: str | None = None) -> int:
+    """
+    SOS → every 5s (loud/urgent).
+    All other order types → every 60s (1 minute) by default.
+    """
+    ot = (order_type or (getattr(order, 'order_type', None) if order is not None else None) or '').strip().lower()
+    if ot == OrderType.SOS or ot == 'sos':
+        return max(1, int(getattr(settings, 'MASTER_NEW_ORDER_REMINDER_SOS_SECONDS', 5) or 5))
+    return max(1, int(getattr(settings, 'MASTER_NEW_ORDER_REMINDER_SECONDS', 60) or 60))
 
 
 def reminder_max_count() -> int:
@@ -43,18 +50,35 @@ def schedule_master_new_order_reminder(
     master_id: int,
     *,
     attempt: int = 1,
+    order_type: str | None = None,
+    countdown: int | None = None,
 ) -> None:
-    """Queue the next reminder push (countdown = MASTER_NEW_ORDER_REMINDER_SECONDS)."""
+    """Queue the next reminder push (interval depends on SOS vs non-SOS)."""
     if not _reminder_enabled():
         return
     if attempt < 1 or attempt > reminder_max_count():
         return
+
+    if countdown is None:
+        if order_type:
+            countdown = reminder_interval_seconds_for_order(order_type=order_type)
+        else:
+            try:
+                ot = (
+                    Order.objects.filter(pk=order_id)
+                    .values_list('order_type', flat=True)
+                    .first()
+                )
+            except Exception:  # noqa: BLE001
+                ot = None
+            countdown = reminder_interval_seconds_for_order(order_type=ot)
+
     try:
         from apps.order.tasks import remind_master_pending_offer_task
 
         remind_master_pending_offer_task.apply_async(
             args=[int(order_id), int(master_id), int(attempt)],
-            countdown=reminder_interval_seconds(),
+            countdown=int(countdown),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -65,9 +89,19 @@ def schedule_master_new_order_reminder(
         )
 
 
-def start_master_new_order_reminder_chain(order_id: int, master_id: int) -> None:
-    """Call right after the first new-order FCM — first reminder fires after the interval."""
-    schedule_master_new_order_reminder(order_id, master_id, attempt=1)
+def start_master_new_order_reminder_chain(
+    order_id: int,
+    master_id: int,
+    *,
+    order_type: str | None = None,
+) -> None:
+    """Call right after the first new-order FCM — first reminder after the type-specific interval."""
+    schedule_master_new_order_reminder(
+        order_id,
+        master_id,
+        attempt=1,
+        order_type=order_type,
+    )
 
 
 def send_and_reschedule_master_new_order_reminder(
@@ -78,6 +112,7 @@ def send_and_reschedule_master_new_order_reminder(
 ) -> bool:
     """
     Celery worker entry: send one reminder if still eligible, then schedule the next.
+    Interval: SOS every 5s, other orders every 60s (configurable).
     """
     if not _reminder_enabled():
         return False
@@ -97,13 +132,19 @@ def send_and_reschedule_master_new_order_reminder(
     notify_master_new_order_reminder(order, target_master_id=master_id, attempt=attempt)
 
     next_attempt = attempt + 1
+    interval = reminder_interval_seconds_for_order(order)
     if next_attempt <= reminder_max_count() and master_still_needs_new_order_reminder(
         order=order, master_id=master_id
     ):
-        # Re-check deadline so we don't schedule past the offer window by much.
         if order.master_response_deadline:
             remaining = (order.master_response_deadline - timezone.now()).total_seconds()
-            if remaining <= reminder_interval_seconds():
+            if remaining <= interval:
                 return True
-        schedule_master_new_order_reminder(order_id, master_id, attempt=next_attempt)
+        schedule_master_new_order_reminder(
+            order_id,
+            master_id,
+            attempt=next_attempt,
+            order_type=str(order.order_type),
+            countdown=interval,
+        )
     return True
