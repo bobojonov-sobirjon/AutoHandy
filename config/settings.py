@@ -5,14 +5,14 @@ from pathlib import Path
 from celery.schedules import crontab
 
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+
+    load_dotenv(BASE_DIR / '.env')
 except ImportError:
     load_dotenv = None
-
-
-BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 SECRET_KEY = 'django-insecure-698=9lt4($dou4__kd&*tor4j5kp9g#g2mh8bp37v334-c$8h^'
@@ -528,8 +528,10 @@ STRIPE_CONNECT_PAYOUT_REMINDER_ENABLED = os.getenv(
 STRIPE_CONNECT_PAYOUT_REMINDER_HOUR = int(os.getenv('STRIPE_CONNECT_PAYOUT_REMINDER_HOUR', '9'))
 STRIPE_CONNECT_PAYOUT_REMINDER_MINUTE = int(os.getenv('STRIPE_CONNECT_PAYOUT_REMINDER_MINUTE', '0'))
 
-CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://127.0.0.1:6379/0')
-CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
+# Empty string in .env must not win over the Redis default (kombu then falls
+# back to amqp://localhost → Connection refused).
+CELERY_BROKER_URL = (os.getenv('CELERY_BROKER_URL') or '').strip() or 'redis://127.0.0.1:6379/0'
+CELERY_RESULT_BACKEND = (os.getenv('CELERY_RESULT_BACKEND') or '').strip() or CELERY_BROKER_URL
 CELERY_TASK_ALWAYS_EAGER = os.getenv('CELERY_TASK_ALWAYS_EAGER', '').lower() in ('1', 'true', 'yes')
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'

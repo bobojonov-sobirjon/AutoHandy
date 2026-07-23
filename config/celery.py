@@ -3,10 +3,6 @@ import sys
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 
-import django
-
-django.setup()
-
 from celery import Celery
 
 app = Celery('autohandy')
@@ -20,7 +16,6 @@ if sys.platform == 'win32':
     app.conf.worker_pool = 'solo'
     app.conf.worker_concurrency = 1
 
-import apps.order.tasks  # noqa: E402 — ensure @shared_task registration
 
 @app.task(bind=True, ignore_result=True)
 def debug_task(self):

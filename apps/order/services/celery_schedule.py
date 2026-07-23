@@ -25,12 +25,25 @@ def schedule_master_new_order_reminders(
     Start repeating new-order FCM reminders until accept / decline / expiry.
     SOS: every 5s. Other orders: every 60s (1 minute).
     """
+    import logging
+
+    log = logging.getLogger(__name__)
     try:
         from apps.order.services.offer_reminders import start_master_new_order_reminder_chain
 
         start_master_new_order_reminder_chain(order_id, master_id, order_type=order_type)
+        log.info(
+            'scheduled_new_order_reminders order_id=%s master_id=%s order_type=%s',
+            order_id,
+            master_id,
+            order_type or '',
+        )
     except Exception:
-        pass
+        log.exception(
+            'schedule_master_new_order_reminders FAILED order_id=%s master_id=%s',
+            order_id,
+            master_id,
+        )
 
 
 def schedule_sos_rotation(order_id: int, master_id: int, countdown_seconds: int) -> None:

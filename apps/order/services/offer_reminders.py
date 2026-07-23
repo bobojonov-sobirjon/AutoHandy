@@ -76,9 +76,17 @@ def schedule_master_new_order_reminder(
     try:
         from apps.order.tasks import remind_master_pending_offer_task
 
-        remind_master_pending_offer_task.apply_async(
+        async_result = remind_master_pending_offer_task.apply_async(
             args=[int(order_id), int(master_id), int(attempt)],
             countdown=int(countdown),
+        )
+        logger.info(
+            'queued_new_order_reminder order_id=%s master_id=%s attempt=%s countdown=%ss task_id=%s',
+            order_id,
+            master_id,
+            attempt,
+            countdown,
+            getattr(async_result, 'id', None),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -130,6 +138,13 @@ def send_and_reschedule_master_new_order_reminder(
     from apps.order.services.notifications import notify_master_new_order_reminder
 
     notify_master_new_order_reminder(order, target_master_id=master_id, attempt=attempt)
+    logger.info(
+        'sent_new_order_reminder order_id=%s master_id=%s attempt=%s order_type=%s',
+        order_id,
+        master_id,
+        attempt,
+        order.order_type,
+    )
 
     next_attempt = attempt + 1
     interval = reminder_interval_seconds_for_order(order)
