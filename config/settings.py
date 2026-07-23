@@ -564,6 +564,12 @@ CELERY_BEAT_SCHEDULE = {
 ORDER_DEADLINE_WARN_MINUTES = int(os.getenv('ORDER_DEADLINE_WARN_MINUTES', '3'))
 
 PUSH_ANDROID_CHANNEL_ID = os.getenv('PUSH_ANDROID_CHANNEL_ID', 'high_importance_channel')
+# Master "new incoming order" only — app-bundled custom sound (do not host audio on server).
+PUSH_NEW_ORDER_ANDROID_CHANNEL_ID = os.getenv(
+    'PUSH_NEW_ORDER_ANDROID_CHANNEL_ID', 'incoming_orders_v3'
+)
+PUSH_NEW_ORDER_ANDROID_SOUND = os.getenv('PUSH_NEW_ORDER_ANDROID_SOUND', 'new_order')
+PUSH_NEW_ORDER_IOS_SOUND = os.getenv('PUSH_NEW_ORDER_IOS_SOUND', 'new_order.caf')
 
 CHAT_WS_MAX_UPLOAD_BYTES = int(os.getenv('CHAT_WS_MAX_UPLOAD_BYTES', str(5 * 1024 * 1024)))
 CHAT_CLOSE_HOURS_AFTER_ORDER_COMPLETE = int(os.getenv('CHAT_CLOSE_HOURS_AFTER_ORDER_COMPLETE', '2'))

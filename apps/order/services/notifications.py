@@ -139,11 +139,18 @@ def send_fcm_to_user_devices(
     title: str,
     body: str,
     data: dict[str, str] | None = None,
+    android_channel_id: str | None = None,
+    android_sound: str | None = None,
+    apns_sound: str | None = None,
+    apns_badge: int | None = None,
 ) -> int:
     """
     Best-effort FCM send. Does not raise.
     firebase_kind: "user" or "master"
     Returns number of devices that accepted the message (0 if none sent).
+
+    Optional sound/channel overrides are for specific push kinds (e.g. new order).
+    When omitted, uses the default high-importance channel + system ``default`` sound.
     """
     try:
         from firebase_admin import messaging
@@ -163,26 +170,39 @@ def send_fcm_to_user_devices(
 
     payload_data = {str(k): str(v) for k, v in (data or {}).items()}
     # Ensure devices wake promptly and play sound consistently (iOS + Android).
-    channel_id = str(getattr(settings, 'PUSH_ANDROID_CHANNEL_ID', '') or '').strip() or 'high_importance_channel'
+    channel_id = (
+        (android_channel_id or '').strip()
+        or str(getattr(settings, 'PUSH_ANDROID_CHANNEL_ID', '') or '').strip()
+        or 'high_importance_channel'
+    )
+    and_sound = (android_sound or '').strip() or 'default'
+    ios_sound = (apns_sound or '').strip() or 'default'
+
+    aps_kwargs: dict = {'sound': ios_sound}
+    if apns_badge is not None:
+        aps_kwargs['badge'] = int(apns_badge)
+
+    android_cfg = messaging.AndroidConfig(
+        priority='high',
+        notification=messaging.AndroidNotification(
+            sound=and_sound,
+            channel_id=channel_id,
+        ),
+    )
+    apns_cfg = messaging.APNSConfig(
+        headers={'apns-priority': '10'},
+        payload=messaging.APNSPayload(
+            aps=messaging.Aps(**aps_kwargs),
+        ),
+    )
+    notification = messaging.Notification(title=title, body=body)
+
     msg = messaging.MulticastMessage(
         tokens=tokens,
-        notification=messaging.Notification(title=title, body=body),
+        notification=notification,
         data=payload_data,
-        android=messaging.AndroidConfig(
-            priority='high',
-            notification=messaging.AndroidNotification(
-                sound='default',
-                channel_id=channel_id,
-            ),
-        ),
-        apns=messaging.APNSConfig(
-            headers={'apns-priority': '10'},
-            payload=messaging.APNSPayload(
-                aps=messaging.Aps(
-                    sound='default',
-                )
-            ),
-        ),
+        android=android_cfg,
+        apns=apns_cfg,
     )
     try:
         # firebase-admin 7.x removed send_multicast in favor of send_each_for_multicast.
@@ -195,8 +215,10 @@ def send_fcm_to_user_devices(
             messages = [
                 messaging.Message(
                     token=t,
-                    notification=messaging.Notification(title=title, body=body),
+                    notification=notification,
                     data=payload_data,
+                    android=android_cfg,
+                    apns=apns_cfg,
                 )
                 for t in tokens
             ]
@@ -223,6 +245,25 @@ def send_fcm_to_user_devices(
             logger.warning('FCM token cleanup failed: %s', exc)
 
     return success_count
+
+
+def _new_order_push_sound_kwargs() -> dict:
+    """FCM sound/channel for master new-order alerts only (app-bundled audio)."""
+    return {
+        'android_channel_id': str(
+            getattr(settings, 'PUSH_NEW_ORDER_ANDROID_CHANNEL_ID', '') or 'incoming_orders_v3'
+        ).strip()
+        or 'incoming_orders_v3',
+        'android_sound': str(
+            getattr(settings, 'PUSH_NEW_ORDER_ANDROID_SOUND', '') or 'new_order'
+        ).strip()
+        or 'new_order',
+        'apns_sound': str(
+            getattr(settings, 'PUSH_NEW_ORDER_IOS_SOUND', '') or 'new_order.caf'
+        ).strip()
+        or 'new_order.caf',
+        'apns_badge': 1,
+    }
 
 
 def _firebase_kind_for_user(user_id: int) -> str:
@@ -1462,6 +1503,10 @@ def notify_master_new_order(order: 'Order', *, target_master_id: int | None = No
     """
     Loud alert for new assignment (integrate mobile push + vibration on client).
     Hook: send FCM to order.master.user_id devices.
+
+    Uses app-bundled custom sound:
+      iOS — new_order.caf
+      Android — channel incoming_orders_v3 + sound new_order
     """
     mid = target_master_id if target_master_id is not None else order.master_id
     if not mid:
@@ -1485,6 +1530,7 @@ def notify_master_new_order(order: 'Order', *, target_master_id: int | None = No
     )
     data = {
         'kind': 'order_new',
+        'type': 'new_order',
         'order_id': str(order.id),
         'order_type': str(getattr(order, 'order_type', '') or ''),
     }
@@ -1495,6 +1541,7 @@ def notify_master_new_order(order: 'Order', *, target_master_id: int | None = No
         title=title,
         body=body,
         data=data,
+        **_new_order_push_sound_kwargs(),
     )
 
 
