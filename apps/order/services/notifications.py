@@ -410,6 +410,22 @@ def _pro_push_copy(
             )
         return 'New order received', f'A new order is waiting for you. Tap to view — {oid}'.strip()
 
+    if k == 'order_new_reminder' and audience == 'master':
+        if is_towing:
+            return (
+                'Towing request still waiting',
+                f'Towing job{tow_detail} is still waiting. Tap to accept or decline — {oid}'.strip(),
+            )
+        if (order_type or '').lower() == 'sos':
+            return (
+                'Emergency still waiting',
+                f'Urgent SOS order is still waiting. Tap to respond now — {oid}'.strip(),
+            )
+        return (
+            'Order still waiting',
+            f'A new order is still waiting for you. Tap to view — {oid}'.strip(),
+        )
+
     if k == 'offer_expiring_soon':
         mins = (extra_data or {}).get('minutes_left') if extra_data else None
         if audience == 'user':
@@ -1536,6 +1552,51 @@ def notify_master_new_order(order: 'Order', *, target_master_id: int | None = No
     }
     data.update({str(k): str(v) for k, v in extra.items() if k not in data})
     send_fcm_to_user_devices(
+        user_id=master.user_id,
+        firebase_kind='master',
+        title=title,
+        body=body,
+        data=data,
+        **_new_order_push_sound_kwargs(),
+    )
+
+
+def notify_master_new_order_reminder(
+    order: 'Order',
+    *,
+    target_master_id: int,
+    attempt: int = 1,
+) -> int:
+    """
+    Repeat loud new-order FCM while the offer is still pending (same custom sound).
+    Returns FCM success count.
+    """
+    try:
+        from apps.master.models import Master
+
+        master = Master.objects.select_related('user').only('id', 'user_id').get(pk=target_master_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('notify_master_new_order_reminder: master lookup failed: %s', exc)
+        return 0
+
+    extra = _merge_order_type_extra(order, {'order_type': str(getattr(order, 'order_type', '') or '')})
+    title, body = _pro_push_copy(
+        kind='order_new_reminder',
+        order_id=order.id,
+        audience='master',
+        extra_data=extra,
+        fallback_title='Order still waiting',
+        fallback_body=f'A new order is still waiting for you. Tap to view — #{order.id}',
+    )
+    data = {
+        'kind': 'order_new_reminder',
+        'type': 'new_order',
+        'order_id': str(order.id),
+        'order_type': str(getattr(order, 'order_type', '') or ''),
+        'reminder_attempt': str(int(attempt)),
+    }
+    data.update({str(k): str(v) for k, v in extra.items() if k not in data})
+    return send_fcm_to_user_devices(
         user_id=master.user_id,
         firebase_kind='master',
         title=title,

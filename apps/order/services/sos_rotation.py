@@ -246,7 +246,10 @@ def broadcast_sos_offers(order: Order, request: 'HttpRequest | None' = None) -> 
     One shared deadline (SOS_BROADCAST_RESPONSE_SECONDS); first HTTP accept wins.
     """
     from apps.order.services.notifications import notify_master_new_order, push_sos_order_to_master_websocket
-    from apps.order.services.celery_schedule import schedule_master_offer_expiry
+    from apps.order.services.celery_schedule import (
+        schedule_master_new_order_reminders,
+        schedule_master_offer_expiry,
+    )
 
     queue = _queue_master_ids(order)
     if not queue:
@@ -287,6 +290,7 @@ def broadcast_sos_offers(order: Order, request: 'HttpRequest | None' = None) -> 
     for mid in send_now:
         notify_master_new_order(order, target_master_id=mid)
         push_sos_order_to_master_websocket(order, request=request, target_master_id=mid)
+        schedule_master_new_order_reminders(order.pk, mid)
         # Track offer event for acceptance-rate metrics.
         try:
             from apps.order.models import MasterOfferEvent, MasterOfferEventStatus

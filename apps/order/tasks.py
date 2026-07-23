@@ -142,6 +142,7 @@ def push_sos_offer_to_masters_task(order_id: int, master_ids: list[int]) -> int:
     from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
     from apps.order.services.notifications import notify_master_new_order, push_sos_order_to_master_websocket
     from apps.order.services.sos_rotation import master_eligible_for_pending_sos_offer
+    from apps.order.services.celery_schedule import schedule_master_new_order_reminders
 
     try:
         order = Order.objects.get(pk=order_id)
@@ -164,6 +165,7 @@ def push_sos_offer_to_masters_task(order_id: int, master_ids: list[int]) -> int:
             continue
         notify_master_new_order(order, target_master_id=mid)
         push_sos_order_to_master_websocket(order, request=None, target_master_id=mid)
+        schedule_master_new_order_reminders(order_id, mid)
         try:
             MasterOfferEvent.objects.get_or_create(
                 master_id=mid,
@@ -180,6 +182,32 @@ def push_sos_offer_to_masters_task(order_id: int, master_ids: list[int]) -> int:
 # Compatibility tasks (old names still present in Redis queue).
 # These no-op or delegate to current task names so the worker won't error.
 # ---------------------------------------------------------------------------
+
+
+@shared_task(ignore_result=True)
+def remind_master_pending_offer_task(order_id: int, master_id: int, attempt: int = 1) -> bool:
+    """
+    Repeat loud new-order FCM every MASTER_NEW_ORDER_REMINDER_SECONDS while pending.
+    Stops on accept / decline / expiry / max attempts.
+    """
+    try:
+        from apps.order.services.offer_reminders import send_and_reschedule_master_new_order_reminder
+
+        return bool(
+            send_and_reschedule_master_new_order_reminder(
+                order_id=int(order_id),
+                master_id=int(master_id),
+                attempt=int(attempt or 1),
+            )
+        )
+    except Exception:
+        logger.exception(
+            'remind_master_pending_offer_task failed order_id=%s master_id=%s attempt=%s',
+            order_id,
+            master_id,
+            attempt,
+        )
+        return False
 
 
 @shared_task(ignore_result=True, name='apps.order.tasks.expire_master_offer_for_order')

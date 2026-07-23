@@ -40,11 +40,16 @@ def activate_pending_master_offer(
     )
     order.refresh_from_db(fields=['master_response_deadline'])
     from apps.order.services.notifications import notify_master_new_order
-    from apps.order.services.celery_schedule import schedule_master_offer_expiry
+    from apps.order.services.celery_schedule import (
+        schedule_master_new_order_reminders,
+        schedule_master_offer_expiry,
+    )
     from apps.order.models import MasterOfferEvent, MasterOfferEventStatus
 
     if send_push:
         notify_master_new_order(order)
+        if order.master_id:
+            schedule_master_new_order_reminders(order.pk, order.master_id)
     if order.master_response_deadline:
         schedule_master_offer_expiry(order.pk, order.master_response_deadline)
 

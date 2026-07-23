@@ -15,6 +15,16 @@ def schedule_master_offer_expiry(order_id: int, deadline: datetime) -> None:
         pass
 
 
+def schedule_master_new_order_reminders(order_id: int, master_id: int) -> None:
+    """Start repeating new-order FCM reminders until accept / decline / expiry."""
+    try:
+        from apps.order.services.offer_reminders import start_master_new_order_reminder_chain
+
+        start_master_new_order_reminder_chain(order_id, master_id)
+    except Exception:
+        pass
+
+
 def schedule_sos_rotation(order_id: int, master_id: int, countdown_seconds: int) -> None:
     try:
         from apps.order.tasks import sos_rotate_master_if_stale_task

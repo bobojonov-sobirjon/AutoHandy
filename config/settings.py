@@ -408,6 +408,13 @@ SMSC_PASSWORD = os.environ.get('SMSC_PASSWORD', '')
 SMSC_API_URL = 'https://smsc.ru/sys/send.php'
 
 MASTER_OFFER_RESPONSE_MINUTES = int(os.environ.get('MASTER_OFFER_RESPONSE_MINUTES', '15'))
+# Repeat FCM for unanswered new-order offers (master app). Interval in seconds (client wants ~5s).
+MASTER_NEW_ORDER_REMINDER_ENABLED = os.environ.get(
+    'MASTER_NEW_ORDER_REMINDER_ENABLED', 'true'
+).lower() in ('1', 'true', 'yes')
+MASTER_NEW_ORDER_REMINDER_SECONDS = int(os.environ.get('MASTER_NEW_ORDER_REMINDER_SECONDS', '5'))
+# Safety cap so a stuck pending offer cannot spam forever (15min / 5s ≈ 180).
+MASTER_NEW_ORDER_REMINDER_MAX_COUNT = int(os.environ.get('MASTER_NEW_ORDER_REMINDER_MAX_COUNT', '180'))
 MASTER_NO_DEPARTURE_MINUTES = int(os.environ.get('MASTER_NO_DEPARTURE_MINUTES', '30'))
 SOS_NO_DEPARTURE_WARNING_MINUTES = int(os.environ.get('SOS_NO_DEPARTURE_WARNING_MINUTES', '4'))
 SOS_NO_DEPARTURE_ACTION_MINUTES = int(os.environ.get('SOS_NO_DEPARTURE_ACTION_MINUTES', '5'))
