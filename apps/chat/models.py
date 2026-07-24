@@ -165,3 +165,15 @@ class ChatMessage(models.Model):
             return f'System message in room {self.room_id} at {self.created_at}'
         name = self.sender.get_full_name() if self.sender_id else 'System'
         return f"Message from {name} at {self.created_at}"
+
+    @classmethod
+    def unread_queryset_for_user(cls, user, *, room=None):
+        """Unread messages for badge / room list (excludes own + system)."""
+        qs = cls.objects.filter(is_read=False, is_system=False).exclude(sender=user)
+        if room is not None:
+            return qs.filter(room=room)
+        return qs.filter(room__participants=user).distinct()
+
+    @classmethod
+    def unread_count_for_user(cls, user, *, room=None) -> int:
+        return int(cls.unread_queryset_for_user(user, room=room).count())

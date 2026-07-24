@@ -229,8 +229,10 @@ class ChatRoomSerializer(serializers.ModelSerializer):
 
     def get_unread_count(self, obj):
         request = self.context.get('request')
-        if request and request.user:
-            return obj.messages.filter(is_read=False, is_system=False).exclude(sender=request.user).count()
+        if request and request.user and request.user.is_authenticated:
+            from .models import ChatMessage
+
+            return ChatMessage.unread_count_for_user(request.user, room=obj)
         return 0
 
     def get_other_participant(self, obj):
@@ -266,19 +268,28 @@ class ChatRoomDetailSerializer(serializers.ModelSerializer):
     receiver = serializers.SerializerMethodField()
     order = serializers.SerializerMethodField()
     last_message = serializers.SerializerMethodField()
+    unread_count = serializers.SerializerMethodField()
     is_messaging_open = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatRoom
         fields = [
             'id', 'initiator', 'receiver', 'order', 'last_message',
-            'is_active', 'is_messaging_open', 'closes_at',
+            'unread_count', 'is_active', 'is_messaging_open', 'closes_at',
             'created_at', 'updated_at',
         ]
         read_only_fields = fields
 
     def get_is_messaging_open(self, obj):
         return obj.messaging_is_open()
+
+    def get_unread_count(self, obj):
+        request = self.context.get('request')
+        if request and request.user and request.user.is_authenticated:
+            from .models import ChatMessage
+
+            return ChatMessage.unread_count_for_user(request.user, room=obj)
+        return 0
 
     def get_receiver(self, obj):
         init = obj.initiator

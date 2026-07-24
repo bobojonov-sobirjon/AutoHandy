@@ -379,6 +379,47 @@ image: <file>
             )
 
 
+class UnreadCountView(APIView):
+    """
+    Total unread chat messages for the current user (master or driver/client).
+    Use for app badge / tab counter.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Unread message count",
+        description="""
+## Total unread chat messages
+
+Returns how many unread messages the current user has across all chat rooms
+(messages from others, excluding system messages).
+
+Works for both master and driver (customer) accounts.
+
+## Response:
+```json
+{
+  "unread_count": 5
+}
+```
+        """,
+        tags=['Chat'],
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'unread_count': {'type': 'integer', 'example': 5},
+                },
+            },
+            401: {'description': 'Not authenticated'},
+        },
+    )
+    def get(self, request):
+        return Response({
+            'unread_count': ChatMessage.unread_count_for_user(request.user),
+        })
+
+
 class MarkAsReadView(APIView):
     """
     API for marking messages as read
@@ -410,14 +451,13 @@ Marks all unread messages in the chat as read.
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            updated_count = room.messages.filter(
-                is_read=False
-            ).exclude(
-                sender=request.user
+            updated_count = ChatMessage.unread_queryset_for_user(
+                request.user, room=room
             ).update(is_read=True)
 
             return Response({
-                'message': f'{updated_count} messages marked as read'
+                'message': f'{updated_count} messages marked as read',
+                'unread_count': ChatMessage.unread_count_for_user(request.user),
             })
 
         except ChatRoom.DoesNotExist:
